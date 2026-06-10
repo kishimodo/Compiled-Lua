@@ -34,7 +34,8 @@ BACKEND_OBJS := \
     $(wildcard $(BUILD_DIR)/obj/codegen/*.o) \
     $(wildcard $(BUILD_DIR)/obj/link/*.o)    \
     $(BUILD_DIR)/obj/driver/closed_world.o   \
-    $(BUILD_DIR)/obj/driver/lc_undump.o
+    $(BUILD_DIR)/obj/driver/lc_undump.o      \
+    $(BUILD_DIR)/obj/driver/supported_ops.o
 
 # Front-end objects the driver calls (produced by the base Makefile's `compiler`
 # target). The driver does NOT use blob.o / pe_link.o (those are v1-only), but

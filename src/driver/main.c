@@ -26,6 +26,7 @@
 #include "../compiler/diag.h"
 #include "../driver/lc_undump.h"
 #include "../driver/closed_world.h"
+#include "../driver/supported_ops.h"
 
 /* Reused front-end produces a Proto*; we read its nested-proto array (p[]) to
 ** collect the reachable set for lifting. */
@@ -171,6 +172,10 @@ int lc_drive( const LcDriverOptions *opt ) {
                 goto cleanup;
             }
             if ( !Lc_CheckClosedWorld( P, err, sizeof( err ) ) ) {
+                fprintf( stderr, "aotc: %s\n", err );
+                goto cleanup;
+            }
+            if ( !Lc_CheckSupportedOps( P, err, sizeof( err ) ) ) {
                 fprintf( stderr, "aotc: %s\n", err );
                 goto cleanup;
             }
