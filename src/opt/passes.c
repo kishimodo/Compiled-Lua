@@ -96,10 +96,22 @@ static int ti_ktype(Proto *p, int idx) {
   if (ttisfloat(&p->k[idx]))   return TI_FLT;
   return TI_UNK;
 }
+static int ti_isnum(int t) { return t == TI_INT || t == TI_FLT; }
 static int ti_combine(int tb, int tc) {            /* +,-,*,//,% operand types */
   if (tb == TI_INT && tc == TI_INT) return TI_INT;
-  if ((tb == TI_INT || tb == TI_FLT) && (tc == TI_INT || tc == TI_FLT)) return TI_FLT;
+  if (ti_isnum(tb) && ti_isnum(tc)) return TI_FLT;
   return TI_UNK;                                   /* string-coerce / metamethod */
+}
+/* SOUNDNESS: a value is provably a primitive number ONLY when the producing op
+   cannot dispatch to a metamethod -- i.e. its operands are themselves proven
+   primitive numbers (integers/floats carry no per-value metatable, so arith/
+   bitwise on two proven primitives never runs Lua code). Ops whose operand may
+   be a table/string (with __len/__band/__add/...) must yield UNK, because the
+   metamethod can return ANY type. (Found by the adversarial soundness attack:
+   `#t`, `t & 1`, ~t etc. with metamethods returning a float/string were silently
+   miscompiled when their result was assumed integer.) */
+static int ti_int2(int tb, int tc) {               /* bitwise: int iff both int */
+  return (tb == TI_INT && tc == TI_INT) ? TI_INT : TI_UNK;
 }
 
 /* Apply one instruction's effect to the register-type state `st` (out = in). */
@@ -113,23 +125,30 @@ static void ti_transfer(int8_t *st, LcInst *in, Proto *p, int n) {
     case OP_MOVE:  SET(A, ti_reg(st, B, n)); break;
     case OP_ADD: case OP_SUB: case OP_MUL: case OP_IDIV: case OP_MOD:
       SET(A, ti_combine(ti_reg(st, B, n), ti_reg(st, C, n))); break;
-    case OP_DIV: case OP_POW: case OP_DIVK: case OP_POWK:
-      SET(A, TI_FLT); break;                                /* / and ^ -> float */
+    case OP_DIV: case OP_POW:                               /* / and ^ -> float,  */
+      SET(A, (ti_isnum(ti_reg(st, B, n)) && ti_isnum(ti_reg(st, C, n)))
+               ? TI_FLT : TI_UNK); break;                   /* unless __div/__pow */
+    case OP_DIVK: case OP_POWK:
+      SET(A, (ti_isnum(ti_reg(st, B, n)) && ti_isnum(ti_ktype(p, C)))
+               ? TI_FLT : TI_UNK); break;
     case OP_ADDK: case OP_SUBK: case OP_MULK: case OP_IDIVK: case OP_MODK:
       SET(A, ti_combine(ti_reg(st, B, n), ti_ktype(p, C))); break;
     case OP_ADDI: {
       int tb = ti_reg(st, B, n);
       SET(A, tb == TI_INT ? TI_INT : tb == TI_FLT ? TI_FLT : TI_UNK);
     } break;
-    case OP_UNM: {
+    case OP_UNM: {                                          /* __unm if non-number */
       int tb = ti_reg(st, B, n);
       SET(A, tb == TI_INT ? TI_INT : tb == TI_FLT ? TI_FLT : TI_UNK);
     } break;
+    /* bitwise: integer ONLY when operands are proven integers (else a __band/
+       __bor/__bxor/__bnot/__shl/__shr metamethod could return any type). */
     case OP_BAND: case OP_BOR: case OP_BXOR: case OP_SHL: case OP_SHR:
+      SET(A, ti_int2(ti_reg(st, B, n), ti_reg(st, C, n))); break;
     case OP_BANDK: case OP_BORK: case OP_BXORK: case OP_SHLI: case OP_SHRI:
-    case OP_BNOT:
-      SET(A, TI_INT); break;                                /* bitwise -> integer */
-    case OP_LEN: SET(A, TI_INT); break;                     /* # -> integer */
+    case OP_BNOT:                                           /* reg + int imm/K     */
+      SET(A, ti_reg(st, B, n) == TI_INT ? TI_INT : TI_UNK); break;
+    case OP_LEN: SET(A, TI_UNK); break;        /* # honors __len -> ANY type */
     case OP_LOADNIL: for (i = A; i <= A + B && i < n; i++) if (i >= 0) st[i] = TI_UNK; break;
     case OP_SELF: SET(A, TI_UNK); SET(A + 1, TI_UNK); break;
     case OP_FORPREP: {                                      /* R[A+3] = loop var */

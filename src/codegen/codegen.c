@@ -1104,8 +1104,21 @@ static int lower_inst( LcBranchCtx *Br, LcFunc *f, LcInst *in ) {
                          if ( g_lc_opt_level >= 1 && k_int32( f, in->c, &kv ) )
                              return lower_arith_imm_fast( B, in, LC_AR_XOR, kv, "Rt_BXorKOp" );
                          return lower_helper3( B, in, "Rt_BXorKOp", 1 ); }
-        case OP_SHRI:  return lower_helper3( B, in, "Rt_ShrIOp",  1 );
-        case OP_SHLI:  return lower_helper3( B, in, "Rt_ShlIOp",  1 );
+        case OP_SHRI:
+        case OP_SHLI:
+            /* a>>K, a<<K (Lua compiles this to SHRI a,a,-K), and K<<a all carry
+               the TRUE metamethod tag (__shr/__shl) + corrected immediate in the
+               trailing MMBINI, not in the SHRI/SHLI opcode. Rt_ShiftI reads that
+               word and dispatches exactly like the interpreter; the per-opcode
+               Rt_Sh{r,l}IOp helpers hardcode the wrong TM (e.g. dispatch __shr
+               for a metatable'd `a<<K`). MMBINI always follows (lcode.c). */
+            if ( f && f->source && in->bc_pc + 1 < f->source->sizecode ) {
+                Instruction mm = f->source->code[ in->bc_pc + 1 ];
+                return LcCg_EmitHelperCall3( B, "Rt_ShiftI", in->a, in->b,
+                                             ( int )( unsigned )mm, /*reload*/1 );
+            }
+            return lower_helper3( B, in,
+                                  in->bc_op == OP_SHRI ? "Rt_ShrIOp" : "Rt_ShlIOp", 1 );
 
         /* --- unary / len / concat / self --- */
         case OP_UNM:    return lower_helper3( B, in, "Rt_UnmOp",  1 );
