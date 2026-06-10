@@ -38,6 +38,26 @@ local bs = setmetatable({}, { __shl = function() return 6.5 end })
 local rs = bs << 2
 print(rs - 1, math.type(rs))         -- 5.5  float
 
+-- upvalue aliasing: an int-proven for-loop var captured by a nested closure that
+-- mutates it to a float must NOT keep its integer proof (the closure writes the
+-- aliased stack slot via SETUPVAL). Found by the adversarial soundness attack.
+for i = 1, 1 do
+  local function f() i = 9.5 end
+  f()
+  print(i + 1, i * 2, math.type(i))   -- 10.5  19.0  float
+end
+for i = 1, 3 do
+  local function bump() i = i + 0.5 end
+  bump()
+  local w = i + 1                      -- w copies i's (now float) type
+  print(i, math.type(i), w, math.type(w))
+end
+-- captured plain local mutated to a string through the closure
+local v = 5
+local function setv() v = "12" end
+setv()
+print(v + 3, type(v))                  -- 15  string
+
 -- positive cases: genuine integer length + bitwise must still optimize correctly
 local arr = { 10, 20, 30, 40 }
 local L = #arr

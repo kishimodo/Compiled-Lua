@@ -187,7 +187,7 @@ void lc_pass_local_typeinfer(LcFunc *f) {
   Proto    *p;
   LcInst  **insts = NULL, *in;
   int      *idxof = NULL;          /* bc_pc -> linear index */
-  int8_t   *st = NULL, *out = NULL;
+  int8_t   *st = NULL, *out = NULL, *captured = NULL;
   int       n = 0, nregs, maxpc = 0, i, r, changed, cap = 0;
   uint32_t  bi;
 
@@ -210,6 +210,28 @@ void lc_pass_local_typeinfer(LcFunc *f) {
   for (i = 0; i <= maxpc + 1; i++) idxof[i] = -1;
   for (i = 0; i < n; i++) if (insts[i]->bc_pc >= 0) idxof[insts[i]->bc_pc] = i;
 
+  /* SOUNDNESS (upvalue aliasing): a local/loop-var captured as an open upvalue
+     by a nested closure can be MUTATED to any type from inside that closure via
+     OP_SETUPVAL (which writes the aliased parent stack slot). The dataflow has no
+     cross-closure model, so any such register must never be trusted as a proven
+     type. Collect every register captured `instack` by a nested Proto and force
+     it to UNK after each transfer. (Found by the adversarial attack: an int
+     for-loop var `i` captured by `function() i = 9.5 end` was elided as integer.) */
+  captured = (int8_t *)calloc((size_t)nregs, 1);
+  for (i = 0; i < n; i++) {
+    if (insts[i]->bc_op == OP_CLOSURE && insts[i]->bc_pc >= 0 &&
+        insts[i]->bc_pc < p->sizecode) {
+      int bx = GETARG_Bx(p->code[insts[i]->bc_pc]);
+      if (bx >= 0 && bx < p->sizep && p->p[bx]) {
+        Proto *np = p->p[bx];
+        int j;
+        for (j = 0; j < np->sizeupvalues; j++)
+          if (np->upvalues[j].instack && np->upvalues[j].idx < nregs)
+            captured[np->upvalues[j].idx] = 1;
+      }
+    }
+  }
+
   /* in_state[i*nregs + r] = type of reg r on entry to inst i (TOP initially) */
   st  = (int8_t *)calloc((size_t)n * nregs, 1);   /* TI_TOP == 0 */
   out = (int8_t *)malloc(nregs);
@@ -223,6 +245,7 @@ void lc_pass_local_typeinfer(LcFunc *f) {
       int succ[2], ns = 0, k, op = insts[i]->bc_op, tgt;
       memcpy(out, &st[(size_t)i * nregs], nregs);
       ti_transfer(out, insts[i], p, nregs);
+      for (r = 0; r < nregs; r++) if (captured[r]) out[r] = TI_UNK;  /* upvalue alias */
       /* successors */
       switch (op) {
         case OP_RETURN: case OP_RETURN0: case OP_RETURN1: case OP_TAILCALL:
@@ -285,7 +308,7 @@ void lc_pass_local_typeinfer(LcFunc *f) {
     if (o2 >= 0 && ti_reg(sin, o2, nregs) == TI_INT) in->known |= LC_KNOWN_C_INT;
   }
 
-  free(insts); free(idxof); free(st); free(out);
+  free(insts); free(idxof); free(st); free(out); free(captured);
 }
 void lc_pass_specialize_arith(LcFunc *f) { (void)f; /* folded into codegen via LcInst.known */ }
 void lc_pass_unbox_locals(LcFunc *f)     { (void)f; /* TODO(M1) */ }
