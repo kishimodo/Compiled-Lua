@@ -54,17 +54,22 @@ typedef struct LcModReloc {
   uint8_t     width;       /* 4 = rip-relative disp32 (default), 8 = abs64      */
 } LcModReloc;
 
-/* The compiled output for one LcFunc. */
+/* The compiled output for one LcFunc.
+**
+** Task-11 data-flow contract (consumed by the COFF writer / Task 12 and
+** ProtoInit / Task 13): relocs are NAME-KEYED (the encoder-level LcReloc from
+** lc_codebuf.h, recording rel32/abs64/.rdata patch sites against a symbol
+** *name*), and each function carries a stable symbol name "luac_fn_<i>" whose
+** index i matches its slot in LcModule.funcs (so ProtoInit can register
+** luac_fn_i against m->funcs[i]->source). */
 typedef struct LcCompiledFunc {
   uint8_t  *code;          /* machine code bytes                                */
   size_t    code_len;
-  LcModReloc *relocs;
-  uint32_t  nrelocs;
-  uint8_t  *unwind;        /* Win64 UNWIND_INFO blob -> .xdata                  */
+  LcReloc  *relocs;        /* name-keyed REL32/ADDR64/RDATA (lc_codebuf.h)      */
+  size_t    nrelocs;
+  char      name[64];      /* this function's symbol, e.g. "luac_fn_0"          */
+  uint8_t  *unwind;        /* Win64 UNWIND_INFO blob -> .xdata (M0: NULL/0)     */
   size_t    unwind_len;
-  uint8_t  *stackmap;      /* GC stack map (live-ref slots per safepoint)       */
-  size_t    stackmap_len;
-  uint32_t  symbol;        /* this function's symbol index                      */
 } LcCompiledFunc;
 
 typedef struct LcCodeModule {
