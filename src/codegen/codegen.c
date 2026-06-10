@@ -41,6 +41,13 @@
    of the GCUnion (cl.l), so the gc pointer numerically IS the LClosure*. */
 #define LC_OFF_LCL_P    ( ( int32_t )offsetof( LClosure, p ) )  /* LClosure.p   */
 #define LC_OFF_PROTO_K  ( ( int32_t )offsetof( Proto, k ) )     /* Proto.k      */
+#define LC_OFF_PROTO_CODE ( ( int32_t )offsetof( Proto, code ) ) /* Proto.code  */
+
+/* ci->u.l.savedpc: the program-counter snapshot luaG_getfuncline reads to map
+   an error site to a source line (LUAC-001). v1 bakes &P->code[pc+1] absolute;
+   AOT recovers P->code at runtime (same chain as LOADK) and stores
+   P->code + (pc+1) so pcRel(savedpc,P) == pc. */
+#define LC_OFF_CI_SAVEDPC ( ( int32_t )offsetof( CallInfo, u.l.savedpc ) )
 
 /* ------------------------------------------------------------------ */
 /* Frame scaffolding — faithful port of v1 EmitPrologue/EmitEpilogue/  */
@@ -703,12 +710,45 @@ static int lower_helper3( LcCodeBuf *B, LcInst *in, const char *Sym, int reload 
  *
  * @return 1 on success, 0 on emission failure.
  */
+/* True for opcodes that can raise a Lua error (directly or via a call/
+   metamethod). They need ci->u.l.savedpc current so luaG_getfuncline reports
+   the right line. Mirrors v1 src/jit/codegen.c OpcodeNeedsSavedPc. */
+static int op_needs_savedpc( int op ) {
+    switch ( op ) {
+        case OP_MOVE: case OP_LOADI: case OP_LOADF: case OP_LOADK:
+        case OP_LOADKX: case OP_LOADFALSE: case OP_LFALSESKIP:
+        case OP_LOADTRUE: case OP_LOADNIL: case OP_GETUPVAL:
+        case OP_SETUPVAL: case OP_JMP: case OP_TEST: case OP_TESTSET:
+        case OP_FORLOOP: case OP_TFORLOOP: case OP_MMBIN: case OP_MMBINI:
+        case OP_MMBINK: case OP_EXTRAARG:
+            return 0;
+        default:
+            return 1;
+    }
+}
+
+/* Store ci->u.l.savedpc = P->code + (pc+1) (LUAC-001). Recovers P->code at
+   runtime via ci->func -> closure -> Proto -> code (the chain lower_const uses
+   for Proto.k), so pcRel(savedpc, P) == pc and a raised error reports the right
+   source:line. Clobbers RAX (= ci) and R11; emitted before each throwing op. */
+static int emit_store_savedpc( LcCodeBuf *B, int pc ) {
+    if ( !X64Emit_MovMemToReg( B, X64_RAX, X64_RBX, LC_OFF_CI ) )         return 0;
+    if ( !X64Emit_MovMemToReg( B, X64_R11, X64_RAX, LC_OFF_CI_FUNC ) )    return 0;
+    if ( !X64Emit_MovMemToReg( B, X64_R11, X64_R11, 0 ) )                 return 0;
+    if ( !X64Emit_MovMemToReg( B, X64_R11, X64_R11, LC_OFF_LCL_P ) )      return 0;
+    if ( !X64Emit_MovMemToReg( B, X64_R11, X64_R11, LC_OFF_PROTO_CODE ) ) return 0;
+    if ( !X64Emit_AddRegImm32( B, X64_R11, ( pc + 1 ) * 4 ) )            return 0;
+    if ( !X64Emit_MovRegToMem( B, X64_RAX, LC_OFF_CI_SAVEDPC, X64_R11 ) ) return 0;
+    return 1;
+}
+
 static int lower_inst( LcBranchCtx *Br, LcFunc *f, LcInst *in ) {
     LcCodeBuf *B = Br->buf;
     (void)f;
-    /* TODO(LUAC-001): runtime-relative savedpc; deferred — affects only
-       error-traceback line numbers, not stdout. The Plan-1 battery raises
-       no error inside compiled code, so the differential is unaffected. */
+    /* LUAC-001: keep ci->u.l.savedpc current before any throw-capable op so a
+       raised error reports the correct source:line (matching the interpreter). */
+    if ( op_needs_savedpc( in->bc_op ) && !emit_store_savedpc( B, in->bc_pc ) )
+        return 0;
     switch ( in->bc_op ) {
         /* --- epsilon set --- */
         case OP_VARARGPREP:  return lower_vararg( B, in );

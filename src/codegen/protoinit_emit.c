@@ -142,6 +142,42 @@ static int emit_protoinit( FILE *f, LcModule *m, int idx, char *err,
              ( unsigned )P->numparams, ( unsigned )P->is_vararg,
              ( unsigned )P->maxstacksize );
 
+    /* ---- debug info: source name + line tables ----
+    ** Reconstructed verbatim so a runtime error reports the correct
+    ** "source:line:" prefix (matching the interpreter). luaG_getfuncline reads
+    ** lineinfo/abslineinfo (indexed by the current pc, which codegen keeps in
+    ** ci->u.l.savedpc = P->code + (pc+1)); it never dereferences code[], so the
+    ** 1-instruction code safety-net below is sufficient. */
+    fprintf( f, "    P->linedefined = %d; P->lastlinedefined = %d;\n",
+             P->linedefined, P->lastlinedefined );
+    if ( P->source != NULL ) {
+        const char *s    = getstr( P->source );
+        size_t      slen = ( size_t )tsslen( P->source );
+        fprintf( f, "    { static const char sb[] = " );
+        emit_byte_array( f, s, slen );
+        fprintf( f, "; P->source = luaS_newlstr( L, sb, %zu ); }\n", slen );
+    }
+    fprintf( f, "    P->sizelineinfo = %d;\n", P->sizelineinfo );
+    if ( P->sizelineinfo > 0 ) {
+        fprintf( f, "    { static const unsigned char lb[] = " );
+        emit_byte_array( f, ( const char * )P->lineinfo,
+                         ( size_t )P->sizelineinfo );
+        fprintf( f, "; P->lineinfo = luaM_newvector( L, %d, ls_byte ); "
+                    "memcpy( P->lineinfo, lb, %d ); }\n",
+                 P->sizelineinfo, P->sizelineinfo );
+    }
+    fprintf( f, "    P->sizeabslineinfo = %d;\n", P->sizeabslineinfo );
+    if ( P->sizeabslineinfo > 0 ) {
+        int a;
+        fprintf( f, "    P->abslineinfo = luaM_newvector( L, %d, AbsLineInfo );\n",
+                 P->sizeabslineinfo );
+        for ( a = 0; a < P->sizeabslineinfo; a++ ) {
+            fprintf( f,
+                     "    P->abslineinfo[%d].pc = %d; P->abslineinfo[%d].line = %d;\n",
+                     a, P->abslineinfo[a].pc, a, P->abslineinfo[a].line );
+        }
+    }
+
     /* ---- constants ---- */
     fprintf( f, "    P->sizek = %d;\n", P->sizek );
     if ( P->sizek > 0 ) {
@@ -258,7 +294,8 @@ int LcEmitProtoInitC( const char *path, LcModule *m, char *err, size_t errlen ) 
     fprintf( f, "#include \"lfunc.h\"\n" );
     fprintf( f, "#include \"lmem.h\"\n" );
     fprintf( f, "#include \"lopcodes.h\"\n" );
-    fprintf( f, "#include \"jit/dispatch.h\"\n\n" );
+    fprintf( f, "#include \"jit/dispatch.h\"\n" );
+    fprintf( f, "#include <string.h>\n\n" );   /* memcpy for lineinfo copy */
 
     /* ---- forward declarations ----
     ** A parent ProtoInit builds its nested children recursively
