@@ -707,9 +707,50 @@ static int lower_forprep( LcBranchCtx *Br, LcInst *in ) {
 }
 
 static int lower_forloop( LcBranchCtx *Br, LcInst *in ) {
-    if ( !LcCg_EmitHelperCall3( Br->buf, "Rt_ForLoop", in->a, 0, 0, /*reload*/0 ) ) return 0;
-    if ( !X64Emit_TestEaxEax( Br->buf ) ) return 0;
-    return LcBr_EmitBranch( Br, 0x5 /* JNE */, in->c, in->bc_pc );
+    LcCodeBuf *B = Br->buf;
+    int    A = in->a;
+    size_t jne_slow, jz_exit, slow, ex;
+
+    if ( g_lc_opt_level < 1 ) {                     /* -O0: faithful helper path */
+        if ( !LcCg_EmitHelperCall3( B, "Rt_ForLoop", A, 0, 0, /*reload*/0 ) ) return 0;
+        if ( !X64Emit_TestEaxEax( B ) ) return 0;
+        return LcBr_EmitBranch( Br, 0x5 /* JNE */, in->c, in->bc_pc );
+    }
+
+    /* -O1: inline the integer-loop fast path (mirrors lvm.c OP_FORLOOP integer
+       case), runtime-checked on the step tag; float/other loops fall to the
+       complete Rt_ForLoop helper. Removes the per-iteration call -- a win even
+       over v1, which always calls the helper. Slots: R[A]=internal index,
+       R[A+1]=remaining count, R[A+2]=step, R[A+3]=control variable. */
+    if ( !X64Emit_CmpMem8Imm8( B, X64_RDI, ( A + 2 ) * 16 + 8, LUA_VNUMINT ) ) return 0;
+    jne_slow = X64Emit_JccRel32_Placeholder( B, 0x5 /* JNE -> slow */ );
+    if ( jne_slow == ( size_t )-1 ) return 0;
+    if ( !X64Emit_MovMemToReg( B, X64_RAX, X64_RDI, ( A + 1 ) * 16 ) ) return 0;  /* count */
+    { unsigned char t[ 3 ] = { 0x48, 0x85, 0xC0 };                /* test rax, rax */
+      if ( !LcCodeBuf_Append( B, t, 3 ) ) return 0; }
+    jz_exit = X64Emit_JccRel32_Placeholder( B, 0x4 /* JZ -> exit (count==0) */ );
+    if ( jz_exit == ( size_t )-1 ) return 0;
+    { unsigned char d[ 3 ] = { 0x48, 0xFF, 0xC8 };                /* dec rax */
+      if ( !LcCodeBuf_Append( B, d, 3 ) ) return 0; }
+    if ( !X64Emit_MovRegToMem( B, X64_RDI, ( A + 1 ) * 16, X64_RAX ) ) return 0;  /* count-1 */
+    if ( !X64Emit_MovMemToReg( B, X64_RCX, X64_RDI, ( A + 2 ) * 16 ) ) return 0;  /* step */
+    if ( !X64Emit_MovMemToReg( B, X64_RDX, X64_RDI, A * 16 ) ) return 0;          /* idx */
+    { unsigned char a[ 3 ] = { 0x48, 0x01, 0xCA };                /* add rdx, rcx (wrap) */
+      if ( !LcCodeBuf_Append( B, a, 3 ) ) return 0; }
+    if ( !X64Emit_MovRegToMem( B, X64_RDI, A * 16, X64_RDX ) ) return 0;          /* R[A]=idx */
+    if ( !X64Emit_MovRegToMem( B, X64_RDI, ( A + 3 ) * 16, X64_RDX ) ) return 0;  /* R[A+3]=idx */
+    if ( !X64Emit_MovImm32ToMem( B, X64_RDI, ( A + 3 ) * 16 + 8, LUA_VNUMINT ) ) return 0;
+    if ( !LcBr_EmitBranch( Br, -1 /* JMP */, in->c, in->bc_pc ) ) return 0;       /* back-edge */
+
+    slow = B->used;                                  /* float / other -> helper */
+    if ( !X64Emit_PatchRel32( B, jne_slow, slow ) ) return 0;
+    if ( !LcCg_EmitHelperCall3( B, "Rt_ForLoop", A, 0, 0, /*reload*/0 ) ) return 0;
+    if ( !X64Emit_TestEaxEax( B ) ) return 0;
+    if ( !LcBr_EmitBranch( Br, 0x5 /* JNE */, in->c, in->bc_pc ) ) return 0;
+
+    ex = B->used;                                    /* count==0 falls here (done) */
+    if ( !X64Emit_PatchRel32( B, jz_exit, ex ) ) return 0;
+    return 1;
 }
 
 /* ------------------------------------------------------------------ */
