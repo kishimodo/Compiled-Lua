@@ -55,6 +55,18 @@ static void emit_byte_array( FILE *f, const char *s, size_t n ) {
     fputc( '}', f );
 }
 
+/* Emit `s` as a quoted, escaped C string literal (for lua_setfield names). */
+static void emit_c_string( FILE *f, const char *s ) {
+    fputc( '"', f );
+    for ( ; *s; s++ ) {
+        unsigned char c = ( unsigned char )*s;
+        if ( c == '"' || c == '\\' ) { fputc( '\\', f ); fputc( ( int )c, f ); }
+        else if ( c >= 0x20 && c < 0x7f ) fputc( ( int )c, f );
+        else fprintf( f, "\\%03o", ( unsigned )c );
+    }
+    fputc( '"', f );
+}
+
 /* Print a double as a C source literal that round-trips and is unambiguously a
 ** floating-point token (so it parses as `double`, not `int`). */
 static void emit_double_literal( FILE *f, double d ) {
@@ -330,6 +342,7 @@ int LcEmitProtoInitC( const char *path, LcModule *m, char *err, size_t errlen ) 
     fprintf( f, "#include \"lfunc.h\"\n" );
     fprintf( f, "#include \"lmem.h\"\n" );
     fprintf( f, "#include \"lopcodes.h\"\n" );
+    fprintf( f, "#include \"lgc.h\"\n" );       /* luaC_barrier (preload _ENV bind) */
     fprintf( f, "#include \"jit/dispatch.h\"\n" );
     fprintf( f, "#include <string.h>\n\n" );   /* memcpy for lineinfo copy */
 
@@ -394,6 +407,35 @@ int LcEmitProtoInitC( const char *path, LcModule *m, char *err, size_t errlen ) 
             } else {
                 fprintf( f, "    (void)p%u;\n", i );
             }
+        }
+        /* Register each REQUIRED module (module_name != NULL, not the entry) in
+        ** package.preload so require("name") resolves to the compiled-in module
+        ** (self-contained — no disk dependency). The module's main-chunk closure
+        ** (over its already-built+registered Proto, with _ENV bound to globals
+        ** like a freshly loaded chunk) becomes the preloader function. */
+        for ( i = 0; i < m->nfuncs; i++ ) {
+            const char *mn;
+            if ( nested[ i ] || m->funcs[i] == NULL ) continue;
+            mn = m->funcs[i]->module_name;
+            if ( mn == NULL || ( int )i == entry_idx ) continue;
+            fprintf( f, "    {\n" );
+            fprintf( f, "        LClosure *mcl = luaF_newLclosure( L, p%u->sizeupvalues );\n", i );
+            fprintf( f, "        mcl->p = p%u;\n", i );
+            fprintf( f, "        setclLvalue2s( L, L->top.p, mcl ); L->top.p++;\n" );
+            fprintf( f, "        luaF_initupvals( L, mcl );\n" );
+            fprintf( f, "        if ( p%u->sizeupvalues >= 1 ) {\n", i );
+            fprintf( f, "            const TValue *gt = &hvalue( &G(L)->l_registry )->array[ LUA_RIDX_GLOBALS - 1 ];\n" );
+            fprintf( f, "            setobj( L, mcl->upvals[0]->v.p, gt );\n" );
+            fprintf( f, "            luaC_barrier( L, mcl->upvals[0], gt );\n" );
+            fprintf( f, "        }\n" );
+            fprintf( f, "        lua_getglobal( L, \"package\" );\n" );
+            fprintf( f, "        lua_getfield( L, -1, \"preload\" );\n" );
+            fprintf( f, "        lua_pushvalue( L, -3 );\n" );
+            fprintf( f, "        lua_setfield( L, -2, " );
+            emit_c_string( f, mn );
+            fprintf( f, " );\n" );
+            fprintf( f, "        lua_pop( L, 3 );\n" );
+            fprintf( f, "    }\n" );
         }
         free( nested );
         fprintf( f, "    return entry;\n" );

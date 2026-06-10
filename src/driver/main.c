@@ -159,6 +159,12 @@ int lc_drive( const LcDriverOptions *opt ) {
     LcCodeModule *cm = NULL;
     ProtoVec      reach = { 0 };
     Proto        *entryProto = NULL;
+    /* Per-module root Protos (Modules[0]=entry, i>0 = required modules). Used
+    ** after lift to tag each required module's LcFunc with its require-name so
+    ** ProtoInit registers it in package.preload (self-contained require). */
+    Proto       **modProtos = ( Proto ** )calloc( res.Count ? res.Count : 1,
+                                                  sizeof( Proto * ) );
+    if ( modProtos == NULL ) { fprintf( stderr, "aotc: oom\n" ); goto cleanup; }
 
     {
         size_t i;
@@ -179,6 +185,7 @@ int lc_drive( const LcDriverOptions *opt ) {
                 fprintf( stderr, "aotc: %s\n", err );
                 goto cleanup;
             }
+            modProtos[ i ] = P;
             if ( i == 0 ) entryProto = P;
             /* Collect this module's Proto + all its nested protos. For the
             ** single-module epsilon program this is just the entry tree; for
@@ -201,6 +208,24 @@ int lc_drive( const LcDriverOptions *opt ) {
     if ( m == NULL ) {
         fprintf( stderr, "aotc: error: lifting failed\n" );
         goto cleanup;
+    }
+
+    /* Tag each REQUIRED module's main-chunk LcFunc with its require-name so the
+    ** ProtoInit emitter registers it in package.preload at startup (the entry,
+    ** module 0, is run directly and is NOT a preload module). This makes
+    ** require("mod") resolve to the compiled-in module — self-contained, no
+    ** disk dependency. */
+    {
+        size_t i; uint32_t j;
+        for ( i = 1; i < res.Count; i++ ) {
+            for ( j = 0; j < m->nfuncs; j++ ) {
+                if ( m->funcs[ j ] != NULL &&
+                     m->funcs[ j ]->source == modProtos[ i ] ) {
+                    m->funcs[ j ]->module_name = res.Modules[ i ].Name;
+                    break;
+                }
+            }
+        }
     }
 
     /* ---- 4. optimize (no-op at -O0) ---- */
@@ -272,6 +297,7 @@ cleanup:
     lc_codemodule_free( cm );
     lc_module_free( m );
     free( reach.items );
+    free( modProtos );
     lua_close( L );          /* AFTER codegen — Protos lived on L's stack */
     Resolve_FreeResult( &res );
     return rc;

@@ -210,6 +210,9 @@ struct LcFunc {
   bool     is_vararg;
   bool     is_ssa;             /* false after lift (M0 memory form);      */
                                /* set true by M1 mem2reg                  */
+  const char *module_name;     /* non-NULL for a required module's main   */
+                               /* chunk -> register in package.preload    */
+                               /* at startup (self-contained require)     */
   /* interprocedural summary (filled by the whole-program passes) */
   LcType   ret_type;           /* joined return type                      */
   uint32_t effect_summary;     /* LcEffect bitset for the whole function  */
