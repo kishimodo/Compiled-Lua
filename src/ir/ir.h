@@ -4,7 +4,7 @@
 ** This is the heart of the LuaC optimizing AOT compiler. The pipeline is:
 **
 **     Lua source --[v1 front-end]--> Proto (bytecode) --[lift.c]--> THIS IR
-**                --[opt/*.c passes]--> optimized IR --[codegen]--> x64
+**                --[opt / *.c passes]--> optimized IR --[codegen]--> x64
 **
 ** Design invariants (see ../../PROMPT.md §IR and §Optimizer):
 **  - SSA form: every LcValue is assigned exactly once; control-flow joins use phi.

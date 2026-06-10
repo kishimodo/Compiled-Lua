@@ -107,7 +107,18 @@ COMPILER_SRCS := \
     $(SRC_DIR)/compiler/resolve.c
 COMPILER_OBJS := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/obj/%.o,$(COMPILER_SRCS))
 
-$(BUILD_DIR)/obj/%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)/obj/compiler $(BUILD_DIR)/obj/runtime $(BUILD_DIR)/obj/tools $(BUILD_DIR)/obj/jit $(BUILD_DIR)/obj/ffi
+# --- LuaC AOT backend objects (src/{ir,opt,codegen,link,driver}) -----------
+# Compiled into build/bin/obj/<subdir>/*.o by the generic pattern rule below
+# and scanned into libluavmtest.a by tools/run-tests.lua so C-unit tests can
+# link against backend code. Built as a side effect of `make test`.
+LUAC_SRCS := $(wildcard $(SRC_DIR)/ir/*.c) $(wildcard $(SRC_DIR)/opt/*.c) \
+             $(wildcard $(SRC_DIR)/codegen/*.c) $(wildcard $(SRC_DIR)/link/*.c) \
+             $(wildcard $(SRC_DIR)/driver/*.c)
+LUAC_OBJS := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/obj/%.o,$(LUAC_SRCS))
+.PHONY: luac-objs
+luac-objs: $(LUAC_OBJS)
+
+$(BUILD_DIR)/obj/%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)/obj/compiler $(BUILD_DIR)/obj/runtime $(BUILD_DIR)/obj/tools $(BUILD_DIR)/obj/jit $(BUILD_DIR)/obj/ffi $(BUILD_DIR)/obj/ir $(BUILD_DIR)/obj/opt $(BUILD_DIR)/obj/codegen $(BUILD_DIR)/obj/link $(BUILD_DIR)/obj/driver
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/obj/compiler:
@@ -121,6 +132,22 @@ $(BUILD_DIR)/obj/tools:
 
 $(BUILD_DIR)/obj/jit:
 	if not exist "$(BUILD_DIR)\obj\jit" mkdir "$(BUILD_DIR)\obj\jit"
+
+# --- LuaC AOT backend obj dirs (src/{ir,opt,codegen,link,driver}) ----------
+$(BUILD_DIR)/obj/ir:
+	if not exist "$(BUILD_DIR)\obj\ir" mkdir "$(BUILD_DIR)\obj\ir"
+
+$(BUILD_DIR)/obj/opt:
+	if not exist "$(BUILD_DIR)\obj\opt" mkdir "$(BUILD_DIR)\obj\opt"
+
+$(BUILD_DIR)/obj/codegen:
+	if not exist "$(BUILD_DIR)\obj\codegen" mkdir "$(BUILD_DIR)\obj\codegen"
+
+$(BUILD_DIR)/obj/link:
+	if not exist "$(BUILD_DIR)\obj\link" mkdir "$(BUILD_DIR)\obj\link"
+
+$(BUILD_DIR)/obj/driver:
+	if not exist "$(BUILD_DIR)\obj\driver" mkdir "$(BUILD_DIR)\obj\driver"
 
 $(BUILD_DIR)/compiler.exe: $(COMPILER_OBJS) $(BUILD_DIR)/liblua54.a
 	$(CC) $(CFLAGS) -o $@ $(COMPILER_OBJS) $(BUILD_DIR)/liblua54.a -lm
@@ -356,7 +383,7 @@ runluac: $(BUILD_DIR)/runluac.exe
 # them built. Depending only on packages-embedded made `make test` rely on a
 # cache restore (CI) or a previous build (local) for the two archives -- a cold
 # tree failed with "cannot find build/bin/runtime-embedded.a".
-test: compiler luavm embedded
+test: compiler luavm embedded luac-objs
 	$(BUILD_DIR)/luavm.exe $(ROOT)/tools/run-tests.lua
 # --- ImGui (Dear ImGui + cimgui + Win32/DX11 backends) --------------------
 # Compiled into imgui.a. The compiler.exe link step pulls this in only when

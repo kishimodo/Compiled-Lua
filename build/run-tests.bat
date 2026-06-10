@@ -33,7 +33,7 @@ rem tests compile via compiler.exe, which LINKS runtime-embedded.a +
 rem liblua54-embedded.a; building only `packages-embedded` leaves those archives
 rem missing after a `clean`, and every package test then fails to link with
 rem "cannot find build/bin/runtime-embedded.a".
-make -f build/Makefile compiler luavm embedded
+make -f build/Makefile compiler luavm embedded luac-objs
 if errorlevel 1 (
     echo [-] product build failed
     set RC=1

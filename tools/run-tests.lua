@@ -147,12 +147,18 @@ local function header(t) print("\n===== " .. t .. " =====") end
 local ARCHIVE_EXCLUDE = {
   ["main.o"] = true, ["luavm_main.o"] = true,
   ["runtime_init.o"] = true, ["native_loader.o"] = true,
+  -- aot_entry.c (added by a later task) defines main() for compiled PEs; it
+  -- must stay out of the unit-test archive, like the other *_main objects.
+  ["aot_entry.o"] = true,
 }
 
 local function build_archive()
   local objs = {}
   for _, d in ipairs({ "build/bin/obj/ffi", "build/bin/obj/jit",
-                       "build/bin/obj/compiler", "build/bin/obj/runtime" }) do
+                       "build/bin/obj/compiler", "build/bin/obj/runtime",
+                       "build/bin/obj/ir", "build/bin/obj/opt",
+                       "build/bin/obj/codegen", "build/bin/obj/link",
+                       "build/bin/obj/driver" }) do
     for _, o in ipairs(glob(d, "*.o")) do
       local base = basename(o, "%.o") .. ".o"
       if not ARCHIVE_EXCLUDE[base] then

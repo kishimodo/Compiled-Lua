@@ -12,6 +12,7 @@
 ** .pdata/.xdata (load-bearing for SEH unwind).
 */
 #include "pe_write.h"
+#include <stdio.h>
 #include <string.h>
 
 bool lc_write_pe(const LcCodeModule *cm, const LcLinkOptions *opt,

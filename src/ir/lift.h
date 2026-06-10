@@ -21,7 +21,7 @@
 **       OP_GETTABUP _ENV    -> LC_OP_GLOBAL_GET
 **       OP_CALL/TAILCALL    -> LC_OP_CALL/TAILCALL  (callee resolved later)
 **       OP_CLOSURE          -> LC_OP_CLOSURE (records captured upvalues)
-**       OP_FORPREP/FORLOOP  -> LC_OP_FORPREP_*/FORLOOP_* (subtype refined later)
+**       OP_FORPREP/FORLOOP  -> LC_OP_FORPREP_* / FORLOOP_* (subtype refined later)
 **       OP_TFORCALL/TFORLOOP-> LC_OP_TFORCALL/TFORLOOP
 **       ... (full table in PROMPT.md)
 **  4. Record call-graph edges; mark ffi.* / C-function call sites as barriers.

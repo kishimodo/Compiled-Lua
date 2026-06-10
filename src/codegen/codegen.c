@@ -1,6 +1,6 @@
 /*
 ** codegen.c — Optimized IR -> relocatable x64. See codegen.h and ../../PROMPT.md §11.
-** STUB: implement for Milestone M0 (generic lowering: every op -> Rt_*/luaV_* call).
+** STUB: implement for Milestone M0 (generic lowering: every op -> Rt_* / luaV_* call).
 **
 ** REUSE src/codegen/x64_emit.* (adapted from src/jit/emit_x64.*) for encoding and
 **       src/codegen/regalloc.* (adapted from src/jit/regalloc.*) for allocation.
@@ -19,7 +19,7 @@ LcCodeModule *lc_codegen(LcModule *m) {
   LcCodeModule *cm = (LcCodeModule *)calloc(1, sizeof(LcCodeModule));
   /* TODO(M0): for each LcFunc:
   **   - emit prologue (save callee-saved regs, RBX=L, RDI=stack base, reserve frame)
-  **   - per-instruction lowering: generic ops -> CALL Rt_*/luaV_* (record LcReloc),
+  **   - per-instruction lowering: generic ops -> CALL Rt_* / luaV_* (record LcReloc),
   **     typed ops (M1+) -> inline machine code
   **   - emit epilogue; build UNWIND_INFO describing the prologue
   **   - collect forward-branch placeholders, patch after the instruction loop
