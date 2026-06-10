@@ -49,6 +49,10 @@
    P->code + (pc+1) so pcRel(savedpc,P) == pc. */
 #define LC_OFF_CI_SAVEDPC ( ( int32_t )offsetof( CallInfo, u.l.savedpc ) )
 
+/* -O level, set by lc_codegen from m->opt_level. 0 = faithful boxed baseline;
+   >=1 enables the M1 typed fastpaths (arith/compare). */
+static int g_lc_opt_level = 0;
+
 /* ------------------------------------------------------------------ */
 /* Frame scaffolding — faithful port of v1 EmitPrologue/EmitEpilogue/  */
 /* EmitRestoreL/EmitReloadRdiAndCache (src/jit/codegen.c), retargeted   */
@@ -516,20 +520,97 @@ static int lower_loadkx( LcCodeBuf *B, LcInst *in ) {
 /* RDI, then `cmp r11d, k; jne`. R11 is volatile and untouched by the    */
 /* reload sequence.                                                     */
 /* ------------------------------------------------------------------ */
+/* cmp rax, [rdi+disp]  (48 3B /r, reg=RAX=0, rm=RDI=7). */
+static int emit_cmp_rax_mem( LcCodeBuf *B, int32_t disp ) {
+    uint8_t b[8]; int n = 0;
+    b[n++] = 0x48; b[n++] = 0x3B;
+    if ( disp == 0 ) { b[n++] = ( uint8_t )( ( 0 << 6 ) | ( 0 << 3 ) | 7 ); }
+    else if ( disp >= -128 && disp <= 127 ) {
+        b[n++] = ( uint8_t )( ( 1 << 6 ) | ( 0 << 3 ) | 7 ); b[n++] = ( uint8_t )( int8_t )disp;
+    } else {
+        b[n++] = ( uint8_t )( ( 2 << 6 ) | ( 0 << 3 ) | 7 );
+        b[n++] = ( uint8_t )( disp & 0xFF ); b[n++] = ( uint8_t )( ( disp >> 8 ) & 0xFF );
+        b[n++] = ( uint8_t )( ( disp >> 16 ) & 0xFF ); b[n++] = ( uint8_t )( ( disp >> 24 ) & 0xFF );
+    }
+    return LcCodeBuf_Append( B, b, ( size_t )n );
+}
+/* cmp rax, imm32 (sign-extended to 64): 48 3D id. */
+static int emit_cmp_rax_imm32( LcCodeBuf *B, int32_t imm ) {
+    uint8_t b[6] = { 0x48, 0x3D, ( uint8_t )( imm & 0xFF ), ( uint8_t )( ( imm >> 8 ) & 0xFF ),
+                     ( uint8_t )( ( imm >> 16 ) & 0xFF ), ( uint8_t )( ( imm >> 24 ) & 0xFF ) };
+    return LcCodeBuf_Append( B, b, 6 );
+}
+/* set<cc> al ; movzx r11d, al  -> r11d = 0/1. cc = low nibble of the 0F 9x setcc. */
+static int emit_setcc_movzx_r11( LcCodeBuf *B, unsigned cc ) {
+    uint8_t s[3] = { 0x0F, ( uint8_t )( 0x90 | ( cc & 0xF ) ), 0xC0 };  /* setcc al */
+    uint8_t m[4] = { 0x44, 0x0F, 0xB6, 0xD8 };                          /* movzx r11d, al */
+    if ( !LcCodeBuf_Append( B, s, 3 ) ) return 0;
+    return LcCodeBuf_Append( B, m, 4 );
+}
+/* setcc condition (low nibble) for a comparison op, or -1 if not int-fastpathable.
+   *is_regreg set when the right operand is a register (else a signed immediate). */
+static int cmp_setcc( int bc_op, int *is_regreg ) {
+    *is_regreg = 0;
+    switch ( bc_op ) {
+        case OP_EQ:  *is_regreg = 1; return 0x4; /* sete  */
+        case OP_LT:  *is_regreg = 1; return 0xC; /* setl  */
+        case OP_LE:  *is_regreg = 1; return 0xE; /* setle */
+        case OP_EQI: return 0x4;  /* sete  (R[A] == sB)  */
+        case OP_LTI: return 0xC;  /* setl  (R[A] <  sB)  */
+        case OP_LEI: return 0xE;  /* setle (R[A] <= sB)  */
+        case OP_GTI: return 0xF;  /* setg  (R[A] >  sB)  */
+        case OP_GEI: return 0xD;  /* setge (R[A] >= sB)  */
+        default: return -1;
+    }
+}
+
 static int lower_cmp( LcBranchCtx *Br, LcInst *in, const char *Helper ) {
     LcCodeBuf *B = Br->buf;
     int A = in->a, Bop = in->b, K = in->c;
-    /* helper(L, A, B) -> RAX = 0/1 (NO reload here — would clobber RAX). */
+    int is_regreg, cc;
+
+    /* --- M1 (-O1+): inline integer comparison fastpath, helper fallback. ---
+       Sound: only when the operand tags are LUA_VNUMINT does the inline path run
+       (exact integer compare, no NaN concerns); float/string/table/__eq/__lt fall
+       to the complete helper. EQK (reg-vs-constant) keeps the helper. */
+    cc = g_lc_opt_level >= 1 ? cmp_setcc( in->bc_op, &is_regreg ) : -1;
+    if ( cc >= 0 ) {
+        size_t jneA, jneB = 0, jmp_fast, slow, cmpk;
+        if ( !X64Emit_CmpMem8Imm8( B, X64_RDI, A * 16 + 8, LUA_VNUMINT ) ) return 0;
+        if ( !X64Emit_JneRel8( B, 0 ) ) return 0; jneA = B->used - 1;
+        if ( is_regreg ) {
+            if ( !X64Emit_CmpMem8Imm8( B, X64_RDI, Bop * 16 + 8, LUA_VNUMINT ) ) return 0;
+            if ( !X64Emit_JneRel8( B, 0 ) ) return 0; jneB = B->used - 1;
+        }
+        if ( !X64Emit_MovMemToReg( B, X64_RAX, X64_RDI, A * 16 ) ) return 0;
+        if ( is_regreg ) { if ( !emit_cmp_rax_mem( B, Bop * 16 ) ) return 0; }
+        else             { if ( !emit_cmp_rax_imm32( B, Bop ) ) return 0; }
+        if ( !emit_setcc_movzx_r11( B, ( unsigned )cc ) ) return 0;   /* r11d = 0/1 */
+        jmp_fast = X64Emit_JmpRel32_Placeholder( B );
+        if ( jmp_fast == ( size_t )-1 ) return 0;
+        /* slow: */
+        slow = B->used;
+        if ( !X64Emit_PatchRel8( B, jneA, slow ) ) return 0;
+        if ( is_regreg && !X64Emit_PatchRel8( B, jneB, slow ) ) return 0;
+        if ( !LcCg_EmitHelperCall3( B, Helper, A, Bop, 0, /*reload*/0 ) ) return 0;
+        { unsigned char S[ 3 ] = { 0x41, 0x89, 0xC3 };           /* mov r11d, eax */
+          if ( !LcCodeBuf_Append( B, S, 3 ) ) return 0; }
+        if ( !LcCg_EmitReloadRdiAndCache( B ) ) return 0;
+        /* cmpk: */
+        cmpk = B->used;
+        if ( !X64Emit_PatchRel32( B, jmp_fast, cmpk ) ) return 0;
+        { unsigned char C[ 4 ] = { 0x41, 0x83, 0xFB, ( unsigned char )( int8_t )K };
+          if ( !LcCodeBuf_Append( B, C, 4 ) ) return 0; }   /* cmp r11d, K */
+        return LcBr_EmitBranch( Br, 0x5 /* JNE */, in->bc_pc + 2, in->bc_pc );
+    }
+
+    /* --- M0 baseline: complete helper -> RAX 0/1, then branch. --- */
     if ( !LcCg_EmitHelperCall3( B, Helper, A, Bop, 0, /*reload*/0 ) ) return 0;
-    /* mov r11d, eax  (41 89 C3) — stash result across the reload */
     { unsigned char S[ 3 ] = { 0x41, 0x89, 0xC3 };
       if ( !LcCodeBuf_Append( B, S, 3 ) ) return 0; }
-    /* reload RDI (a comparison metamethod may have relocated the stack). */
     if ( !LcCg_EmitReloadRdiAndCache( B ) ) return 0;
-    /* cmp r11d, K  (41 83 FB ib) */
     { unsigned char C[ 4 ] = { 0x41, 0x83, 0xFB, ( unsigned char )( int8_t )K };
       if ( !LcCodeBuf_Append( B, C, 4 ) ) return 0; }
-    /* jne -> bc_pc+2 (skip the trailing JMP when result != k) */
     return LcBr_EmitBranch( Br, 0x5 /* JNE */, in->bc_pc + 2, in->bc_pc );
 }
 
@@ -699,10 +780,6 @@ static int lower_tforloop( LcBranchCtx *Br, LcInst *in ) {
 static int lower_helper3( LcCodeBuf *B, LcInst *in, const char *Sym, int reload ) {
     return LcCg_EmitHelperCall3( B, Sym, in->a, in->b, in->c, reload );
 }
-
-/* -O level, set by lc_codegen from m->opt_level. 0 = faithful boxed baseline;
-   >=1 enables the M1 typed fastpaths below. */
-static int g_lc_opt_level = 0;
 
 typedef enum { LC_AR_ADD, LC_AR_SUB, LC_AR_MUL } LcArOp;
 

@@ -309,29 +309,37 @@ local function run_aot_differential()
     print("  [~] SKIP  aotdiff   aotc.exe not built (run build\\build-luac.bat to enable)")
     return
   end
+  -- Each differential is exercised at BOTH -O0 (faithful boxed baseline) and -O1
+  -- (the optimizer's typed fastpaths). Both must match the interpreter exactly,
+  -- so the optimizer can never silently change behavior (sound-conservative).
+  local OPT_LEVELS = { { flag = "",    tag = "O0" },
+                       { flag = "-O1", tag = "O1" } }
   for _, src in ipairs(glob("tests/differential", "aot_*.lua")) do
-    local name = basename(src, "%.lua")
-    local exe  = TESTBIN .. "\\" .. name .. ".exe"
-    -- aotc shells out to gcc per build, which can be slow; guard it too.
-    local clog, crc = capture(guard('"' .. AOTC .. '" "' .. src .. '" -o "' .. exe .. '" 2>&1'))
-    if crc ~= 0 then
-      fail = fail + 1
-      failed[#failed + 1] = "aotdiff:" .. name
-      print(string.format("  [-] FAIL  %-9s %s (aotc compile/link error)", "aotdiff", name))
-      for line in clog:gmatch("[^\r\n]+") do
-        if line:find("error") then print("            " .. line) end
-      end
-    else
-      local oa, ra = capture(guard('"' .. exe .. '" 2>nul'))
-      local oi, ri = capture(guard('"' .. LUAVM .. '" -i "' .. src .. '" 2>nul'))
-      if ra == 0 and ri == 0 and oa == oi and #oa > 0 then
-        pass = pass + 1
-        print(string.format("  [+] PASS  %-9s %s", "aotdiff", name))
-      else
+    local base = basename(src, "%.lua")
+    local oi, ri = capture(guard('"' .. LUAVM .. '" -i "' .. src .. '" 2>nul'))
+    for _, lvl in ipairs(OPT_LEVELS) do
+      local name = base .. "[" .. lvl.tag .. "]"
+      local exe  = TESTBIN .. "\\" .. base .. "_" .. lvl.tag .. ".exe"
+      local clog, crc = capture(guard('"' .. AOTC .. '" ' .. lvl.flag .. ' "' .. src
+                                      .. '" -o "' .. exe .. '" 2>&1'))
+      if crc ~= 0 then
         fail = fail + 1
         failed[#failed + 1] = "aotdiff:" .. name
-        local reason = (ra ~= 0 or ri ~= 0) and "(nonzero exit)" or "(AOT-PE vs -i stdout mismatch)"
-        print(string.format("  [-] FAIL  %-9s %s %s", "aotdiff", name, reason))
+        print(string.format("  [-] FAIL  %-9s %s (aotc compile/link error)", "aotdiff", name))
+        for line in clog:gmatch("[^\r\n]+") do
+          if line:find("error") then print("            " .. line) end
+        end
+      else
+        local oa, ra = capture(guard('"' .. exe .. '" 2>nul'))
+        if ra == 0 and ri == 0 and oa == oi and #oa > 0 then
+          pass = pass + 1
+          print(string.format("  [+] PASS  %-9s %s", "aotdiff", name))
+        else
+          fail = fail + 1
+          failed[#failed + 1] = "aotdiff:" .. name
+          local reason = (ra ~= 0 or ri ~= 0) and "(nonzero exit)" or "(AOT-PE vs -i stdout mismatch)"
+          print(string.format("  [-] FAIL  %-9s %s %s", "aotdiff", name, reason))
+        end
       end
     end
   end
