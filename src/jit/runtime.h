@@ -233,6 +233,20 @@ int Rt_BNotOp( lua_State *L, int A, int B );
 
 /*!
  * @brief
+ *  Complete ADD/SUB/MUL for any operand types (int, float, string coercion,
+ *  metamethods). Safe to call unconditionally from the AOT codegen — unlike
+ *  the slow-path-only Rt_AddSlow/SubSlow/MulSlow which assume the int/float
+ *  fast path already ran. All delegate to luaO_arith.
+ */
+/* Complete ADD (any operands + metamethods), unlike the slow-path-only Rt_AddSlow. */
+int Rt_AddOp ( lua_State *L, int A, int B, int C );
+/* Complete SUB (any operands + metamethods), unlike the slow-path-only Rt_SubSlow. */
+int Rt_SubOp ( lua_State *L, int A, int B, int C );
+/* Complete MUL (any operands + metamethods), unlike the slow-path-only Rt_MulSlow. */
+int Rt_MulOp ( lua_State *L, int A, int B, int C );
+
+/*!
+ * @brief
  *  Binary arithmetic ops with float / edge-case semantics. All delegate
  *  to upstream luaO_arith — no integer fast path in v1.
  */

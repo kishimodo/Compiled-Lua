@@ -945,6 +945,42 @@ int Rt_DivOp( lua_State *L, int A, int B, int C ) {
     return 0;
 }
 
+int Rt_AddOp( lua_State *L, int A, int B, int C ) {
+    StkId Base = L->ci->func.p + 1;
+    luaO_arith( L, LUA_OPADD, s2v( Base + B ), s2v( Base + C ), Base + A );
+    /* A metamethod (string coercion / overloaded operator) reaches Lua via
+       luaT_callTMres, which leaves L->top.p at the TM result -- below the
+       frame ceiling. Restore the invariant so the NEXT re-entrant op (e.g.
+       the next string-coerced arg in a multi-arg call) gets scratch space
+       above the live registers instead of clobbering them. */
+    L->top.p = L->ci->top.p;
+    return 0;
+}
+
+int Rt_SubOp( lua_State *L, int A, int B, int C ) {
+    StkId Base = L->ci->func.p + 1;
+    luaO_arith( L, LUA_OPSUB, s2v( Base + B ), s2v( Base + C ), Base + A );
+    /* A metamethod (string coercion / overloaded operator) reaches Lua via
+       luaT_callTMres, which leaves L->top.p at the TM result -- below the
+       frame ceiling. Restore the invariant so the NEXT re-entrant op (e.g.
+       the next string-coerced arg in a multi-arg call) gets scratch space
+       above the live registers instead of clobbering them. */
+    L->top.p = L->ci->top.p;
+    return 0;
+}
+
+int Rt_MulOp( lua_State *L, int A, int B, int C ) {
+    StkId Base = L->ci->func.p + 1;
+    luaO_arith( L, LUA_OPMUL, s2v( Base + B ), s2v( Base + C ), Base + A );
+    /* A metamethod (string coercion / overloaded operator) reaches Lua via
+       luaT_callTMres, which leaves L->top.p at the TM result -- below the
+       frame ceiling. Restore the invariant so the NEXT re-entrant op (e.g.
+       the next string-coerced arg in a multi-arg call) gets scratch space
+       above the live registers instead of clobbering them. */
+    L->top.p = L->ci->top.p;
+    return 0;
+}
+
 int Rt_ModOp( lua_State *L, int A, int B, int C ) {
     StkId Base = L->ci->func.p + 1;
     luaO_arith( L, LUA_OPMOD, s2v( Base + B ), s2v( Base + C ), Base + A );
