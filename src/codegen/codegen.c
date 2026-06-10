@@ -781,16 +781,24 @@ static int lower_helper3( LcCodeBuf *B, LcInst *in, const char *Sym, int reload 
     return LcCg_EmitHelperCall3( B, Sym, in->a, in->b, in->c, reload );
 }
 
-typedef enum { LC_AR_ADD, LC_AR_SUB, LC_AR_MUL } LcArOp;
+typedef enum { LC_AR_ADD, LC_AR_SUB, LC_AR_MUL,
+               LC_AR_AND, LC_AR_OR, LC_AR_XOR } LcArOp;
 
-/* rax <op>= [RDI + disp]. ADD via X64Emit_AddMemToReg; SUB (48 2B /r) and MUL
-   (imul, 48 0F AF /r) by raw bytes (reg=RAX=0, rm=RDI=7). Ports v1 EmitArithRax. */
+/* rax <op>= [RDI + disp]. ADD via X64Emit_AddMemToReg; the rest by raw bytes
+   (REX.W + opcode, reg=RAX=0, rm=RDI=7). Ports v1 EmitArithRax + the bitwise ops.
+   SUB 2B, IMUL 0F AF, AND 23, OR 0B, XOR 33. */
 static int emit_arith_rax_mem( LcCodeBuf *B, LcArOp op, int32_t disp ) {
     uint8_t b[8]; int n = 0;
     if ( op == LC_AR_ADD ) return X64Emit_AddMemToReg( B, X64_RAX, X64_RDI, disp );
     b[n++] = 0x48;                                   /* REX.W */
-    if ( op == LC_AR_SUB ) { b[n++] = 0x2B; }
-    else                   { b[n++] = 0x0F; b[n++] = 0xAF; }  /* imul r64, r/m64 */
+    switch ( op ) {
+        case LC_AR_SUB: b[n++] = 0x2B; break;
+        case LC_AR_MUL: b[n++] = 0x0F; b[n++] = 0xAF; break;  /* imul r64, r/m64 */
+        case LC_AR_AND: b[n++] = 0x23; break;
+        case LC_AR_OR:  b[n++] = 0x0B; break;
+        case LC_AR_XOR: b[n++] = 0x33; break;
+        default: return 0;
+    }
     if ( disp == 0 ) {
         b[n++] = ( uint8_t )( ( 0 << 6 ) | ( 0 << 3 ) | 7 );
     } else if ( disp >= -128 && disp <= 127 ) {
@@ -818,30 +826,31 @@ static int emit_arith_rax_mem( LcCodeBuf *B, LcArOp op, int32_t disp ) {
  *  every Lua register at [RDI+N*16], no RegAlloc cache). a/b/c = A/B/C regs.
  */
 static int lower_arith_fast( LcCodeBuf *Bb, LcInst *in, LcArOp op,
-                             const char *slow_sym ) {
+                             const char *slow_sym, int has_float ) {
     int    A = in->a, Br = in->b, Cr = in->c;
-    size_t jne_fB, jne_fC, jmp_df, jne_iB, jne_iC, jmp_di, int_check, slow, done;
+    size_t jne_fB = 0, jne_fC = 0, jmp_df = 0, jne_iB, jne_iC, jmp_di, int_check, slow, done;
     int    ok;
 
-    /* --- float fast path: both operands LUA_VNUMFLT --- */
-    if ( !X64Emit_CmpMem8Imm8( Bb, X64_RDI, Br * 16 + 8, LUA_VNUMFLT ) ) return 0;
-    if ( !X64Emit_JneRel8( Bb, 0 ) ) return 0; jne_fB = Bb->used - 1;
-    if ( !X64Emit_CmpMem8Imm8( Bb, X64_RDI, Cr * 16 + 8, LUA_VNUMFLT ) ) return 0;
-    if ( !X64Emit_JneRel8( Bb, 0 ) ) return 0; jne_fC = Bb->used - 1;
-    if ( !X64Emit_MovsdMemToXmm0( Bb, X64_RDI, Br * 16 ) ) return 0;
-    ok = ( op == LC_AR_ADD ) ? X64Emit_AddsdMemToXmm0( Bb, X64_RDI, Cr * 16 )
-       : ( op == LC_AR_SUB ) ? X64Emit_SubsdMemToXmm0( Bb, X64_RDI, Cr * 16 )
-                             : X64Emit_MulsdMemToXmm0( Bb, X64_RDI, Cr * 16 );
-    if ( !ok ) return 0;
-    if ( !X64Emit_MovsdXmm0ToMem( Bb, X64_RDI, A * 16 ) ) return 0;
-    if ( !X64Emit_MovImm32ToMem( Bb, X64_RDI, A * 16 + 8, LUA_VNUMFLT ) ) return 0;
-    jmp_df = X64Emit_JmpRel32_Placeholder( Bb );
-    if ( jmp_df == ( size_t )-1 ) return 0;
-
-    /* int_check: float JNEs land here */
-    int_check = Bb->used;
-    if ( !X64Emit_PatchRel8( Bb, jne_fB, int_check ) ) return 0;
-    if ( !X64Emit_PatchRel8( Bb, jne_fC, int_check ) ) return 0;
+    /* --- float fast path: both operands LUA_VNUMFLT (ADD/SUB/MUL only) --- */
+    if ( has_float ) {
+        if ( !X64Emit_CmpMem8Imm8( Bb, X64_RDI, Br * 16 + 8, LUA_VNUMFLT ) ) return 0;
+        if ( !X64Emit_JneRel8( Bb, 0 ) ) return 0; jne_fB = Bb->used - 1;
+        if ( !X64Emit_CmpMem8Imm8( Bb, X64_RDI, Cr * 16 + 8, LUA_VNUMFLT ) ) return 0;
+        if ( !X64Emit_JneRel8( Bb, 0 ) ) return 0; jne_fC = Bb->used - 1;
+        if ( !X64Emit_MovsdMemToXmm0( Bb, X64_RDI, Br * 16 ) ) return 0;
+        ok = ( op == LC_AR_ADD ) ? X64Emit_AddsdMemToXmm0( Bb, X64_RDI, Cr * 16 )
+           : ( op == LC_AR_SUB ) ? X64Emit_SubsdMemToXmm0( Bb, X64_RDI, Cr * 16 )
+                                 : X64Emit_MulsdMemToXmm0( Bb, X64_RDI, Cr * 16 );
+        if ( !ok ) return 0;
+        if ( !X64Emit_MovsdXmm0ToMem( Bb, X64_RDI, A * 16 ) ) return 0;
+        if ( !X64Emit_MovImm32ToMem( Bb, X64_RDI, A * 16 + 8, LUA_VNUMFLT ) ) return 0;
+        jmp_df = X64Emit_JmpRel32_Placeholder( Bb );
+        if ( jmp_df == ( size_t )-1 ) return 0;
+        /* int_check: float JNEs land here */
+        int_check = Bb->used;
+        if ( !X64Emit_PatchRel8( Bb, jne_fB, int_check ) ) return 0;
+        if ( !X64Emit_PatchRel8( Bb, jne_fC, int_check ) ) return 0;
+    }
 
     /* --- int fast path: both operands LUA_VNUMINT --- */
     if ( !X64Emit_CmpMem8Imm8( Bb, X64_RDI, Br * 16 + 8, LUA_VNUMINT ) ) return 0;
@@ -863,7 +872,50 @@ static int lower_arith_fast( LcCodeBuf *Bb, LcInst *in, LcArOp op,
 
     /* done: both JMPs land here */
     done = Bb->used;
-    if ( !X64Emit_PatchRel32( Bb, jmp_df, done ) ) return 0;
+    if ( has_float && !X64Emit_PatchRel32( Bb, jmp_df, done ) ) return 0;
+    if ( !X64Emit_PatchRel32( Bb, jmp_di, done ) ) return 0;
+    return 1;
+}
+
+/* cmp byte [rdi+disp+8], imm8 already exists (X64Emit_CmpMem8Imm8). Immediate-
+   operand arith: rax <op>= imm32. ADD 48 05, SUB 48 2D, IMUL(by imm) 48 69 C0. */
+static int emit_arith_rax_imm32( LcCodeBuf *B, LcArOp op, int32_t imm ) {
+    uint8_t b[7]; int n = 0;
+    b[n++] = 0x48;
+    if ( op == LC_AR_ADD ) b[n++] = 0x05;
+    else if ( op == LC_AR_SUB ) b[n++] = 0x2D;
+    else if ( op == LC_AR_MUL ) { b[n++] = 0x69; b[n++] = 0xC0; }  /* imul rax,rax,imm32 */
+    else if ( op == LC_AR_AND ) { b[n++] = 0x25; }
+    else if ( op == LC_AR_OR )  { b[n++] = 0x0D; }
+    else if ( op == LC_AR_XOR ) { b[n++] = 0x35; }
+    else return 0;
+    b[n++] = ( uint8_t )( imm & 0xFF );        b[n++] = ( uint8_t )( ( imm >> 8 ) & 0xFF );
+    b[n++] = ( uint8_t )( ( imm >> 16 ) & 0xFF ); b[n++] = ( uint8_t )( ( imm >> 24 ) & 0xFF );
+    return LcCodeBuf_Append( B, b, ( size_t )n );
+}
+
+/*!
+ *  M1 (-O1+): integer fastpath for an op whose second operand is a compile-time
+ *  immediate (ADDI / ADDK / SUBK / MULK with an int constant). Checks only R[B]'s
+ *  tag (the constant is statically int); inline `rax = R[B] <op> imm`, else the
+ *  helper. No float arm — a float R[B] falls to the helper (correct: -> float).
+ */
+static int lower_arith_imm_fast( LcCodeBuf *Bb, LcInst *in, LcArOp op,
+                                 int32_t imm, const char *slow_sym ) {
+    int    A = in->a, Br = in->b;
+    size_t jne_iB, jmp_di, slow, done;
+    if ( !X64Emit_CmpMem8Imm8( Bb, X64_RDI, Br * 16 + 8, LUA_VNUMINT ) ) return 0;
+    if ( !X64Emit_JneRel8( Bb, 0 ) ) return 0; jne_iB = Bb->used - 1;
+    if ( !X64Emit_MovMemToReg( Bb, X64_RAX, X64_RDI, Br * 16 ) ) return 0;
+    if ( !emit_arith_rax_imm32( Bb, op, imm ) ) return 0;
+    if ( !X64Emit_MovRegToMem( Bb, X64_RDI, A * 16, X64_RAX ) ) return 0;
+    if ( !X64Emit_MovImm32ToMem( Bb, X64_RDI, A * 16 + 8, LUA_VNUMINT ) ) return 0;
+    jmp_di = X64Emit_JmpRel32_Placeholder( Bb );
+    if ( jmp_di == ( size_t )-1 ) return 0;
+    slow = Bb->used;
+    if ( !X64Emit_PatchRel8( Bb, jne_iB, slow ) ) return 0;
+    if ( !LcCg_EmitHelperCall3( Bb, slow_sym, A, Br, in->c, /*reload*/1 ) ) return 0;
+    done = Bb->used;
     if ( !X64Emit_PatchRel32( Bb, jmp_di, done ) ) return 0;
     return 1;
 }
@@ -910,9 +962,24 @@ static int emit_store_savedpc( LcCodeBuf *B, int pc ) {
     return 1;
 }
 
+/* If func's constant #idx is an integer in int32 range, store it in *out and
+   return 1 (enables the immediate fastpath for ADDK/SUBK/MULK/BANDK/...). The
+   imm32 sign-extends to exactly that 64-bit integer, so the inline op matches. */
+static int k_int32( LcFunc *f, int idx, int32_t *out ) {
+    TValue *k;
+    lua_Integer v;
+    if ( f == NULL || f->source == NULL || idx < 0 || idx >= f->source->sizek )
+        return 0;
+    k = &f->source->k[ idx ];
+    if ( !ttisinteger( k ) ) return 0;
+    v = ivalue( k );
+    if ( v < INT32_MIN || v > INT32_MAX ) return 0;
+    *out = ( int32_t )v;
+    return 1;
+}
+
 static int lower_inst( LcBranchCtx *Br, LcFunc *f, LcInst *in ) {
     LcCodeBuf *B = Br->buf;
-    (void)f;
     /* LUAC-001: keep ci->u.l.savedpc current before any throw-capable op so a
        raised error reports the correct source:line (matching the interpreter). */
     if ( op_needs_savedpc( in->bc_op ) && !emit_store_savedpc( B, in->bc_pc ) )
@@ -938,38 +1005,67 @@ static int lower_inst( LcBranchCtx *Br, LcFunc *f, LcInst *in ) {
         case OP_LOADNIL:     return lower_loadnil( B, in );
         case OP_LFALSESKIP:  return lower_lfalseskip( Br, in );
 
-        /* --- arithmetic (complete helpers, call unconditionally) --- */
+        /* --- arithmetic: -O1 int/float fastpath (ADD/SUB/MUL) + int-immediate
+           fastpath (ADDI / ADDK / SUBK / MULK with an int constant); else the
+           complete boxed helper. --- */
         case OP_ADD:   return ( g_lc_opt_level >= 1 )
-                           ? lower_arith_fast( B, in, LC_AR_ADD, "Rt_AddOp" )
+                           ? lower_arith_fast( B, in, LC_AR_ADD, "Rt_AddOp", 1 )
                            : lower_helper3( B, in, "Rt_AddOp", 1 );
         case OP_SUB:   return ( g_lc_opt_level >= 1 )
-                           ? lower_arith_fast( B, in, LC_AR_SUB, "Rt_SubOp" )
+                           ? lower_arith_fast( B, in, LC_AR_SUB, "Rt_SubOp", 1 )
                            : lower_helper3( B, in, "Rt_SubOp", 1 );
         case OP_MUL:   return ( g_lc_opt_level >= 1 )
-                           ? lower_arith_fast( B, in, LC_AR_MUL, "Rt_MulOp" )
+                           ? lower_arith_fast( B, in, LC_AR_MUL, "Rt_MulOp", 1 )
                            : lower_helper3( B, in, "Rt_MulOp", 1 );
         case OP_DIV:   return lower_helper3( B, in, "Rt_DivOp",  1 );
         case OP_MOD:   return lower_helper3( B, in, "Rt_ModOp",  1 );
         case OP_IDIV:  return lower_helper3( B, in, "Rt_IDivOp", 1 );
         case OP_POW:   return lower_helper3( B, in, "Rt_PowOp",  1 );
-        case OP_ADDK:  return lower_helper3( B, in, "Rt_AddKOp",  1 );
-        case OP_SUBK:  return lower_helper3( B, in, "Rt_SubKOp",  1 );
-        case OP_MULK:  return lower_helper3( B, in, "Rt_MulKOp",  1 );
+        case OP_ADDI:  return ( g_lc_opt_level >= 1 )
+                           ? lower_arith_imm_fast( B, in, LC_AR_ADD, in->c, "Rt_AddIOp" )
+                           : lower_helper3( B, in, "Rt_AddIOp", 1 );
+        case OP_ADDK:  { int32_t kv;
+                         if ( g_lc_opt_level >= 1 && k_int32( f, in->c, &kv ) )
+                             return lower_arith_imm_fast( B, in, LC_AR_ADD, kv, "Rt_AddKOp" );
+                         return lower_helper3( B, in, "Rt_AddKOp",  1 ); }
+        case OP_SUBK:  { int32_t kv;
+                         if ( g_lc_opt_level >= 1 && k_int32( f, in->c, &kv ) )
+                             return lower_arith_imm_fast( B, in, LC_AR_SUB, kv, "Rt_SubKOp" );
+                         return lower_helper3( B, in, "Rt_SubKOp",  1 ); }
+        case OP_MULK:  { int32_t kv;
+                         if ( g_lc_opt_level >= 1 && k_int32( f, in->c, &kv ) )
+                             return lower_arith_imm_fast( B, in, LC_AR_MUL, kv, "Rt_MulKOp" );
+                         return lower_helper3( B, in, "Rt_MulKOp",  1 ); }
         case OP_DIVK:  return lower_helper3( B, in, "Rt_DivKOp",  1 );
         case OP_MODK:  return lower_helper3( B, in, "Rt_ModKOp",  1 );
         case OP_IDIVK: return lower_helper3( B, in, "Rt_IDivKOp", 1 );
         case OP_POWK:  return lower_helper3( B, in, "Rt_PowKOp",  1 );
-        case OP_ADDI:  return lower_helper3( B, in, "Rt_AddIOp",  1 );
 
-        /* --- bitwise --- */
-        case OP_BAND:  return lower_helper3( B, in, "Rt_BAndOp", 1 );
-        case OP_BOR:   return lower_helper3( B, in, "Rt_BOrOp",  1 );
-        case OP_BXOR:  return lower_helper3( B, in, "Rt_BXorOp", 1 );
+        /* --- bitwise: -O1 int fastpath (no float arm — bitwise is integer-only;
+           float/non-integral operands fall to the coercing helper). --- */
+        case OP_BAND:  return ( g_lc_opt_level >= 1 )
+                           ? lower_arith_fast( B, in, LC_AR_AND, "Rt_BAndOp", 0 )
+                           : lower_helper3( B, in, "Rt_BAndOp", 1 );
+        case OP_BOR:   return ( g_lc_opt_level >= 1 )
+                           ? lower_arith_fast( B, in, LC_AR_OR, "Rt_BOrOp", 0 )
+                           : lower_helper3( B, in, "Rt_BOrOp",  1 );
+        case OP_BXOR:  return ( g_lc_opt_level >= 1 )
+                           ? lower_arith_fast( B, in, LC_AR_XOR, "Rt_BXorOp", 0 )
+                           : lower_helper3( B, in, "Rt_BXorOp", 1 );
         case OP_SHL:   return lower_helper3( B, in, "Rt_ShlOp",  1 );
         case OP_SHR:   return lower_helper3( B, in, "Rt_ShrOp",  1 );
-        case OP_BANDK: return lower_helper3( B, in, "Rt_BAndKOp", 1 );
-        case OP_BORK:  return lower_helper3( B, in, "Rt_BOrKOp",  1 );
-        case OP_BXORK: return lower_helper3( B, in, "Rt_BXorKOp", 1 );
+        case OP_BANDK: { int32_t kv;
+                         if ( g_lc_opt_level >= 1 && k_int32( f, in->c, &kv ) )
+                             return lower_arith_imm_fast( B, in, LC_AR_AND, kv, "Rt_BAndKOp" );
+                         return lower_helper3( B, in, "Rt_BAndKOp", 1 ); }
+        case OP_BORK:  { int32_t kv;
+                         if ( g_lc_opt_level >= 1 && k_int32( f, in->c, &kv ) )
+                             return lower_arith_imm_fast( B, in, LC_AR_OR, kv, "Rt_BOrKOp" );
+                         return lower_helper3( B, in, "Rt_BOrKOp",  1 ); }
+        case OP_BXORK: { int32_t kv;
+                         if ( g_lc_opt_level >= 1 && k_int32( f, in->c, &kv ) )
+                             return lower_arith_imm_fast( B, in, LC_AR_XOR, kv, "Rt_BXorKOp" );
+                         return lower_helper3( B, in, "Rt_BXorKOp", 1 ); }
         case OP_SHRI:  return lower_helper3( B, in, "Rt_ShrIOp",  1 );
         case OP_SHLI:  return lower_helper3( B, in, "Rt_ShlIOp",  1 );
 
