@@ -647,6 +647,27 @@ static int lower_inst( LcBranchCtx *Br, LcFunc *f, LcInst *in ) {
         case OP_CONCAT: return lower_helper3( B, in, "Rt_Concat", 1 );
         case OP_SELF:   return lower_helper3( B, in, "Rt_Self",   1 );
 
+        /* --- tables (Plan 2): all helper-call lowerings. lift.c pre-encodes
+               operands (size hints for NEWTABLE, Ck value operand for the SET
+               ops, fused EXTRAARG hints) into in->a/b/c, so codegen just routes
+               each to its Rt_* helper via the 3-arg shim.
+
+               reload_after=1 for everything EXCEPT SETLIST: any GET/SET can run
+               an __index/__newindex metamethod (arbitrary Lua) and NEWTABLE
+               allocates — both may relocate the Lua stack, so RDI must be
+               re-anchored. Rt_SetList only resizes the array part (luaH_resize
+               can GC-step but never moves the Lua stack), so v1 Lower_SetList
+               skips the reload — match it. --- */
+        case OP_NEWTABLE:  return lower_helper3( B, in, "Rt_NewTable", 1 );
+        case OP_GETFIELD:  return lower_helper3( B, in, "Rt_GetField", 1 );
+        case OP_GETI:      return lower_helper3( B, in, "Rt_GetI",     1 );
+        case OP_GETTABLE:  return lower_helper3( B, in, "Rt_GetTable", 1 );
+        case OP_SETFIELD:  return lower_helper3( B, in, "Rt_SetField", 1 );
+        case OP_SETI:      return lower_helper3( B, in, "Rt_SetI",     1 );
+        case OP_SETTABLE:  return lower_helper3( B, in, "Rt_SetTable", 1 );
+        case OP_SETTABUP:  return lower_helper3( B, in, "Rt_SetTabUp", 1 );
+        case OP_SETLIST:   return lower_helper3( B, in, "Rt_SetList",  0 );
+
         /* --- metamethod-bin markers + extraarg: no-op (zero bytes) --- */
         case OP_MMBIN:
         case OP_MMBINI:

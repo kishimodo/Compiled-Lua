@@ -47,6 +47,11 @@ static int OpSupported( int op ) {
         case OP_LTI:  case OP_LEI:  case OP_GTI:  case OP_GEI:
         case OP_TEST: case OP_TESTSET:
         case OP_FORPREP: case OP_FORLOOP:
+        /* Plan 2: tables + global writes (GETTABUP already allowed above) */
+        case OP_NEWTABLE:
+        case OP_GETFIELD: case OP_GETI: case OP_GETTABLE:
+        case OP_SETFIELD: case OP_SETI: case OP_SETTABLE:
+        case OP_SETTABUP: case OP_SETLIST:
             return 1;
         default:
             return 0;

@@ -49,6 +49,20 @@ static LcOpcode op_to_lc(int bc_op, int bArg) {
       /* For the main chunk, _ENV is upvalue 0; treat that as a global read. */
       return (bArg == 0) ? LC_OP_GLOBAL_GET : LC_OP_TABLE_GET;
 
+    /* --- tables (Plan 2) --- */
+    case OP_NEWTABLE:
+      return LC_OP_NEWTABLE;
+    case OP_GETFIELD:
+    case OP_GETI:
+    case OP_GETTABLE:
+      return LC_OP_TABLE_GET;
+    case OP_SETFIELD:
+    case OP_SETI:
+    case OP_SETTABLE:
+    case OP_SETTABUP:
+    case OP_SETLIST:
+      return LC_OP_TABLE_SET;
+
     /* --- loads --- */
     case OP_LOADK:
     case OP_LOADKX:
@@ -245,6 +259,49 @@ void lc_lift_func(LcFunc *f) {
         B = 0; C = 0;
         break;
 
+      /* ---- NEWTABLE A B C (+ trailing EXTRAARG): decode size hints like
+              v1 Lower_NewTable / lvm.c OP_NEWTABLE. B is log2(hashsize)+1; if the
+              k bit is set the EXTRAARG's Ax holds the high bits of the array
+              size. The EXTRAARG at pc+1 stays an inert no-op. ---- */
+      case OP_NEWTABLE: {
+        B = GETARG_B(i);
+        C = GETARG_C(i);
+        if (B > 0) { B = 1 << (B - 1); }
+        if (GETARG_k(i) && pc + 1 < p->sizecode &&
+            GET_OPCODE(p->code[pc + 1]) == OP_EXTRAARG) {
+          C += GETARG_Ax(p->code[pc + 1]) * (MAXARG_C + 1);
+        }
+        break;
+      }
+
+      /* ---- SETI/SETFIELD/SETTABLE/SETTABUP A B C k: encode the value operand
+              as Ck = k ? -C-1 : C (Ck>=0 => R[Ck]; Ck<0 => K[-Ck-1]). a=A,
+              b=B (int key / const-key idx / reg key / upvalue idx), c=Ck.
+              Matches v1 Lower_SetI/SetField/SetTable/SetTabUp exactly. ---- */
+      case OP_SETI:
+      case OP_SETFIELD:
+      case OP_SETTABLE:
+      case OP_SETTABUP: {
+        int Carg = GETARG_C(i);
+        B = GETARG_B(i);
+        C = GETARG_k(i) ? -Carg - 1 : Carg;   /* Ck-encoded value operand */
+        break;
+      }
+
+      /* ---- SETLIST A B C (+ trailing EXTRAARG when k set): if the k bit is set
+              the EXTRAARG's Ax holds the high bits of the starting index:
+              real_C = C + Ax*(MAXARG_C+1). The EXTRAARG at pc+1 stays a no-op.
+              B==0 ("multret") is passed through; Rt_SetList reads L->top. ---- */
+      case OP_SETLIST: {
+        B = GETARG_B(i);
+        C = GETARG_C(i);
+        if (GETARG_k(i) && pc + 1 < p->sizecode &&
+            GET_OPCODE(p->code[pc + 1]) == OP_EXTRAARG) {
+          C += GETARG_Ax(p->code[pc + 1]) * (MAXARG_C + 1);
+        }
+        break;
+      }
+
       default:
         /* iABC ops (arith/bitwise reg forms, K forms, unary, len, concat,
            self, GETTABUP, CALL, RETURN, generic catch-all). */
@@ -262,6 +319,19 @@ void lc_lift_func(LcFunc *f) {
        bytes for OP_EXTRAARG, so its pc maps to the same offset as the next
        real instruction.) */
     if (bc_op == OP_LOADKX && pc + 1 < p->sizecode &&
+        GET_OPCODE(p->code[pc + 1]) == OP_EXTRAARG) {
+      LcInst *nop = lc_emit_bc(blk, LC_OP_CONST, 0, 0, 0, pc + 1);
+      if (nop) nop->bc_op = OP_EXTRAARG;
+      pc++;   /* advance past the EXTRAARG we just represented */
+    }
+
+    /* NEWTABLE/SETLIST (when their k bit is set) fuse the following EXTRAARG
+       into their size/index hint above. Represent the consumed EXTRAARG's pc
+       with a benign no-op IR inst (codegen emits zero bytes for it) so any
+       branch landing on that pc still maps to a real code offset. Mirrors the
+       LOADKX fusion above. */
+    if ((bc_op == OP_NEWTABLE || bc_op == OP_SETLIST) &&
+        GETARG_k(i) && pc + 1 < p->sizecode &&
         GET_OPCODE(p->code[pc + 1]) == OP_EXTRAARG) {
       LcInst *nop = lc_emit_bc(blk, LC_OP_CONST, 0, 0, 0, pc + 1);
       if (nop) nop->bc_op = OP_EXTRAARG;
