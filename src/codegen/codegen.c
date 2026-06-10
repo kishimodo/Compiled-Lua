@@ -334,18 +334,61 @@ static int lower_call( LcCodeBuf *B, LcInst *in ) {
  *  the epsilon slice (single trailing return) we inline the epilogue directly.
  *  No reload_after: we return immediately.
  *
- *  TODO(M0): v1 also runs Rt_Close(L,0) when GETARG_k(Ins) is set (the function
- *  created closures over its locals). The lift does not yet carry the RETURN k
- *  flag; the epsilon main chunk has no upvalue-capturing closures (k=0), so it
- *  is a no-op here. M1 must thread the k flag through the IR and emit the close.
+ *  C2 (Plan 3): dispatch on bc_op so RETURN0/RETURN1 don't read b-1/c (their
+ *  bytecode has no B/C meaning) — they would otherwise compute garbage counts.
+ *    OP_RETURN0      -> Rt_PrepReturn(L, 0, 0, 0)
+ *    OP_RETURN1      -> Rt_PrepReturn(L, A, 1, 0)
+ *    OP_RETURN  A B C-> Rt_PrepReturn(L, A, B-1, C)   (B==0 => -1 MULTRET)
+ *  And honor the k-flag (in->ret_close): a function that created closures over
+ *  its locals MUST close those upvalues (Rt_Close(L,0)) before returning, else
+ *  the closures' upvalue refs dangle into freed stack memory. v1 Lower_Return /
+ *  Lower_Return0 / Lower_Return1 do exactly this.
  */
 static int lower_return( LcCodeBuf *B, LcInst *in ) {
-    int N        = in->b - 1;   /* result count (or -1 for MULTRET) */
-    int NParams1 = in->c;
+    int A, N, NParams1;
+
+    /* k-flag: close open upvalues before returning (mirrors v1 EmitCall1ArgHelper
+       (0, Rt_Close)). Rt_Close runs __close metamethods (arbitrary Lua) and can
+       relocate the stack — but we return immediately after Rt_PrepReturn, so the
+       only state that must survive is L (RBX, callee-saved). reload after is
+       harmless and keeps RDI valid for the PrepReturn that follows. */
+    if ( in->ret_close ) {
+        if ( !LcCg_EmitHelperCall3( B, "Rt_Close", 0, 0, 0, /*reload*/1 ) ) return 0;
+    }
+
+    switch ( in->bc_op ) {
+        case OP_RETURN0: A = 0;     N = 0;          NParams1 = 0;      break;
+        case OP_RETURN1: A = in->a; N = 1;          NParams1 = 0;      break;
+        case OP_RETURN:
+        default:         A = in->a; N = in->b - 1;  NParams1 = in->c;  break;
+    }
     /* Rt_PrepReturn(L, A, N, NParams1) -> RAX = nresults */
     if ( !LcCg_EmitHelperCall3( B, "Rt_PrepReturn",
-                                in->a, N, NParams1, /*reload*/0 ) ) return 0;
+                                A, N, NParams1, /*reload*/0 ) ) return 0;
     /* RAX holds the result count; epilogue restores callee-saved regs + RET. */
+    return LcCg_EmitEpilogue( B );
+}
+
+/*!
+ * @brief
+ *  LC_OP_TAILCALL (OP_TAILCALL A B C k): return R[A](R[A+1..A+B-1]). Ported from
+ *  v1 Lower_TailCall (codegen.c ~1280): if the k-flag is set, close open
+ *  upvalues first (Rt_Close(L,0)); then Rt_TailCall(L, A, NArgs) — NArgs =
+ *  (B==0)? -1 : (B-1) — which returns the tail-called function's result count in
+ *  RAX. v1 then JMPs to the shared epilogue; LuaC inlines the epilogue directly
+ *  (RAX survives the epilogue, which only restores callee-saved regs + RET). No
+ *  reload: we return immediately. Args decoded by lift into in->a/b; close flag
+ *  in in->ret_close.
+ */
+static int lower_tailcall( LcCodeBuf *B, LcInst *in ) {
+    int Bee   = in->b;
+    int NArgs = ( Bee == 0 ) ? -1 : ( Bee - 1 );
+    if ( in->ret_close ) {
+        if ( !LcCg_EmitHelperCall3( B, "Rt_Close", 0, 0, 0, /*reload*/1 ) ) return 0;
+    }
+    /* Rt_TailCall(L, A, NArgs) -> RAX = nresults */
+    if ( !LcCg_EmitHelperCall3( B, "Rt_TailCall", in->a, NArgs, 0, /*reload*/0 ) )
+        return 0;
     return LcCg_EmitEpilogue( B );
 }
 
@@ -566,6 +609,82 @@ static int lower_forloop( LcBranchCtx *Br, LcInst *in ) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Plan 3 — closures, upvalues, vararg-consume, generic-for, tbc.      */
+/*                                                                      */
+/* Faithful AOT ports of v1 Lower_Closure/GetUpval/SetUpval/Vararg/     */
+/* TForPrep/TForCall/TForLoop/Tbc/Close (src/jit/codegen.c). Operands   */
+/* come from in->a/b/c decoded by lift.c; the generic-for branch        */
+/* targets are pre-resolved into in->c.                                 */
+/* ------------------------------------------------------------------ */
+
+/* CLOSURE A Bx: R[A] = new LClosure from P->p[Bx], upvalues bound.
+   Rt_NewClosure ends with luaC_checkGC which may relocate the stack -> reload. */
+static int lower_closure( LcCodeBuf *B, LcInst *in ) {
+    return LcCg_EmitHelperCall3( B, "Rt_NewClosure", in->a, in->b, 0, /*reload*/1 );
+}
+
+/* GETUPVAL A B: R[A] = UpValue[B]. Pure setobj2s copy — no alloc, no metamethod,
+   so RDI stays valid (v1 only resyncs cache regs, a no-op here). reload=0. */
+static int lower_getupval( LcCodeBuf *B, LcInst *in ) {
+    return LcCg_EmitHelperCall3( B, "Rt_GetUpval", in->a, in->b, 0, /*reload*/0 );
+}
+
+/* SETUPVAL A B: UpValue[B] = R[A] (+ GC write-barrier). No stack relocation.
+   reload=0 (matches v1 Lower_SetUpval — no reload at all). */
+static int lower_setupval( LcCodeBuf *B, LcInst *in ) {
+    return LcCg_EmitHelperCall3( B, "Rt_SetUpval", in->a, in->b, 0, /*reload*/0 );
+}
+
+/* VARARG A C: copy varargs to R[A..]. NRequired = (C==0)? -1 : (C-1). The C is
+   carried in in->b by the lift. Rt_Vararg's MULTRET path runs checkstackGCp ->
+   may grow the stack -> reload. */
+static int lower_vararg_consume( LcCodeBuf *B, LcInst *in ) {
+    int C         = in->b;
+    int NRequired = ( C == 0 ) ? -1 : ( C - 1 );
+    return LcCg_EmitHelperCall3( B, "Rt_Vararg", in->a, NRequired, 0, /*reload*/1 );
+}
+
+/* TBC A: mark R[A] to-be-closed. Rt_Tbc allocates a tbc UpVal -> reload. */
+static int lower_tbc( LcCodeBuf *B, LcInst *in ) {
+    return LcCg_EmitHelperCall3( B, "Rt_Tbc", in->a, 0, 0, /*reload*/1 );
+}
+
+/* CLOSE A: close upvalues >= R[A]. Rt_Close runs __close (arbitrary Lua) and may
+   relocate the stack -> reload. */
+static int lower_close( LcCodeBuf *B, LcInst *in ) {
+    return LcCg_EmitHelperCall3( B, "Rt_Close", in->a, 0, 0, /*reload*/1 );
+}
+
+/* TFORPREP A Bx: make tbc upval for R[A+3], then unconditionally jump forward to
+   the TFORCALL (resolved into in->c by the lift). Rt_TForPrep allocates an UpVal
+   -> reload. */
+static int lower_tforprep( LcBranchCtx *Br, LcInst *in ) {
+    if ( !LcCg_EmitHelperCall3( Br->buf, "Rt_TForPrep", in->a, 0, 0, /*reload*/1 ) )
+        return 0;
+    return LcBr_EmitBranch( Br, -1 /* uncond JMP */, in->c, in->bc_pc );
+}
+
+/* TFORCALL A C: invoke the iterator R[A](R[A+1],R[A+2]); results -> R[A+4..].
+   Rt_TForCall calls the iterator via luaD_call -> may grow the stack -> reload.
+   The C is carried in in->b by the lift. */
+static int lower_tforcall( LcCodeBuf *B, LcInst *in ) {
+    return LcCg_EmitHelperCall3( B, "Rt_TForCall", in->a, in->b, 0, /*reload*/1 );
+}
+
+/* TFORLOOP A Bx: if the iterator returned non-nil, set the control var and loop
+   back to the body (target resolved into in->c). Rt_TForLoop is a single ttisnil
+   check + setobjs2s copy — no metamethod, no allocation, no stack relocation —
+   so RDI stays valid and we must NOT reload (the reload sequence clobbers RAX,
+   which the `test eax,eax` below needs). Mirrors v1 (which only resyncs cache
+   regs, a no-op here) and the Plan-1 lower_forloop RAX-clobber handling. */
+static int lower_tforloop( LcBranchCtx *Br, LcInst *in ) {
+    if ( !LcCg_EmitHelperCall3( Br->buf, "Rt_TForLoop", in->a, 0, 0, /*reload*/0 ) )
+        return 0;
+    if ( !X64Emit_TestEaxEax( Br->buf ) ) return 0;
+    return LcBr_EmitBranch( Br, 0x5 /* JNE */, in->c, in->bc_pc );
+}
+
+/* ------------------------------------------------------------------ */
 /* Plan 1 dispatch on the originating Lua opcode (in->bc_op).          */
 /* ------------------------------------------------------------------ */
 
@@ -596,6 +715,7 @@ static int lower_inst( LcBranchCtx *Br, LcFunc *f, LcInst *in ) {
         case OP_GETTABUP:    return lower_global_get( B, in );
         case OP_LOADK:       return lower_const( B, in );
         case OP_CALL:        return lower_call( B, in );
+        case OP_TAILCALL:    return lower_tailcall( B, in );
         case OP_RETURN:
         case OP_RETURN0:
         case OP_RETURN1:     return lower_return( B, in );
@@ -690,6 +810,21 @@ static int lower_inst( LcBranchCtx *Br, LcFunc *f, LcInst *in ) {
         case OP_TESTSET: return lower_testset( Br, in );
         case OP_FORPREP: return lower_forprep( Br, in );
         case OP_FORLOOP: return lower_forloop( Br, in );
+
+        /* --- closures & upvalues (Plan 3) --- */
+        case OP_CLOSURE:  return lower_closure( B, in );
+        case OP_GETUPVAL: return lower_getupval( B, in );
+        case OP_SETUPVAL: return lower_setupval( B, in );
+        case OP_VARARG:   return lower_vararg_consume( B, in );
+
+        /* --- to-be-closed (Plan 3) --- */
+        case OP_TBC:      return lower_tbc( B, in );
+        case OP_CLOSE:    return lower_close( B, in );
+
+        /* --- generic-for (Plan 3) --- */
+        case OP_TFORPREP: return lower_tforprep( Br, in );
+        case OP_TFORCALL: return lower_tforcall( B, in );
+        case OP_TFORLOOP: return lower_tforloop( Br, in );
 
         default:
             /* Unknown op (rejected by the supported-ops gate). Inert. */

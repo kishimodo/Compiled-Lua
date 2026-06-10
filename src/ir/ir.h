@@ -184,6 +184,10 @@ struct LcInst {
                       /* For branch ops (JMP/FORPREP/FORLOOP) `c` holds   */
                       /* the resolved target bc_pc; for comparisons `c`   */
                       /* holds the k-bit (set by lift.c).                 */
+  int      ret_close; /* RETURN/RETURN0/RETURN1/TAILCALL k-flag (C2): when */
+                      /* set, this function created closures over its      */
+                      /* locals; codegen must emit Rt_Close(L,0) before    */
+                      /* the return/tailcall. Set by lift.c via GETARG_k.  */
   LcInst  *next, *prev;
 };
 

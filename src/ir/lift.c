@@ -45,9 +45,30 @@ static LcOpcode op_to_lc(int bc_op, int bArg) {
   switch (bc_op) {
     case OP_VARARGPREP:
       return LC_OP_VARARG;
+    case OP_VARARG:
+      return LC_OP_VARARG;
     case OP_GETTABUP:
       /* For the main chunk, _ENV is upvalue 0; treat that as a global read. */
       return (bArg == 0) ? LC_OP_GLOBAL_GET : LC_OP_TABLE_GET;
+
+    /* --- closures & upvalues (Plan 3) --- */
+    case OP_CLOSURE:
+      return LC_OP_CLOSURE;
+    case OP_GETUPVAL:
+      return LC_OP_UPVAL_GET;
+    case OP_SETUPVAL:
+      return LC_OP_UPVAL_SET;
+
+    /* --- generic-for + to-be-closed (Plan 3) --- */
+    case OP_TFORPREP:
+      return LC_OP_JMP;        /* coarse: TFORPREP ends with an uncond jump */
+    case OP_TFORCALL:
+      return LC_OP_TFORCALL;
+    case OP_TFORLOOP:
+      return LC_OP_TFORLOOP;
+    case OP_TBC:
+    case OP_CLOSE:
+      return LC_OP_CONST;      /* coarse no-result category; codegen by bc_op */
 
     /* --- tables (Plan 2) --- */
     case OP_NEWTABLE:
@@ -117,6 +138,8 @@ static LcOpcode op_to_lc(int bc_op, int bArg) {
     /* --- calls / returns --- */
     case OP_CALL:
       return LC_OP_CALL;
+    case OP_TAILCALL:
+      return LC_OP_TAILCALL;
     case OP_RETURN:
     case OP_RETURN0:
     case OP_RETURN1:
@@ -302,6 +325,45 @@ void lc_lift_func(LcFunc *f) {
         break;
       }
 
+      /* ---- closures & upvalues (Plan 3) ----
+              CLOSURE A Bx: a=A, b=Bx (index into P->p). GETUPVAL/SETUPVAL A B:
+              a=A, b=B (upvalue index). VARARG A C: a=A, b=C (codegen converts
+              C to NRequired). ---- */
+      case OP_CLOSURE:
+        B = GETARG_Bx(i);
+        C = 0;
+        break;
+      case OP_GETUPVAL:
+      case OP_SETUPVAL:
+        B = GETARG_B(i);
+        C = 0;
+        break;
+      case OP_VARARG:
+        B = GETARG_C(i);     /* raw C; codegen: NRequired = (C==0)?-1:(C-1) */
+        C = 0;
+        break;
+
+      /* ---- generic-for (Plan 3): resolve branch target into `c` ----
+              TFORPREP A Bx: uncond jump forward to pc+1+Bx (the TFORCALL).
+              TFORLOOP A Bx: conditional jump back to pc+1-Bx (the body start).
+              TFORCALL A C : no branch; a=A, b=C. TBC/CLOSE A: a=A. ---- */
+      case OP_TFORPREP:
+        B = GETARG_Bx(i);
+        C = pc + 1 + GETARG_Bx(i);   /* resolved uncond-jump target */
+        break;
+      case OP_TFORLOOP:
+        B = GETARG_Bx(i);
+        C = pc + 1 - GETARG_Bx(i);   /* resolved back-edge target */
+        break;
+      case OP_TFORCALL:
+        B = GETARG_C(i);
+        C = 0;
+        break;
+      case OP_TBC:
+      case OP_CLOSE:
+        B = 0; C = 0;
+        break;
+
       default:
         /* iABC ops (arith/bitwise reg forms, K forms, unary, len, concat,
            self, GETTABUP, CALL, RETURN, generic catch-all). */
@@ -311,7 +373,17 @@ void lc_lift_func(LcFunc *f) {
     }
 
     LcInst *in = lc_emit_bc(blk, lc_op, A, B, C, pc);
-    if (in) in->bc_op = bc_op;
+    if (in) {
+      in->bc_op = bc_op;
+      /* C2: carry the RETURN/RETURN0/RETURN1/TAILCALL k-flag. When set, the
+         function created closures over its locals and codegen must Rt_Close(L,0)
+         before returning/tailcalling so open upvalues don't dangle into freed
+         stack slots. */
+      if (bc_op == OP_RETURN || bc_op == OP_RETURN0 || bc_op == OP_RETURN1 ||
+          bc_op == OP_TAILCALL) {
+        in->ret_close = GETARG_k(i);
+      }
+    }
 
     /* LOADKX consumed its trailing EXTRAARG (const idx folded into `b`). Emit a
        benign no-op IR inst occupying the EXTRAARG's pc slot so any branch that

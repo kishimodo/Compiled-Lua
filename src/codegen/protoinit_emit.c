@@ -22,6 +22,7 @@
 
 #include <stdio.h>
 #include <stdarg.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "lua.h"
@@ -259,6 +260,16 @@ int LcEmitProtoInitC( const char *path, LcModule *m, char *err, size_t errlen ) 
     fprintf( f, "#include \"lopcodes.h\"\n" );
     fprintf( f, "#include \"jit/dispatch.h\"\n\n" );
 
+    /* ---- forward declarations ----
+    ** A parent ProtoInit builds its nested children recursively
+    ** (P->p[c] = ProtoInit_<child>(L)), and a child's index may be HIGHER than
+    ** the parent's (lifting order is not parent-before-child). Forward-declare
+    ** every ProtoInit_<i> so those recursive calls resolve regardless of order. */
+    for ( i = 0; i < m->nfuncs; i++ ) {
+        fprintf( f, "static Proto *ProtoInit_%u( lua_State *L );\n", i );
+    }
+    fprintf( f, "\n" );
+
     /* ---- one ProtoInit_<i> per reachable function ---- */
     for ( i = 0; i < m->nfuncs; i++ ) {
         if ( !emit_protoinit( f, m, ( int )i, err, errlen ) ) {
@@ -267,24 +278,54 @@ int LcEmitProtoInitC( const char *path, LcModule *m, char *err, size_t errlen ) 
         }
     }
 
-    /* ---- LuacProgram_BuildEntry ---- */
-    fprintf( f, "Proto *LuacProgram_BuildEntry( lua_State *L ) {\n" );
-    fprintf( f, "    Proto *entry = NULL;\n" );
-    /* Calling every ProtoInit_<i> guarantees that even functions not reachable
-    ** through the entry's p[] tree are still built and registered. (Nested
-    ** protos reachable via p[] get built twice this way — harmless: each
-    ** ProtoInit_<i> mints a fresh Proto, and the entry-tree copy is the one the
-    ** entry references; the standalone copy is independently registered.) */
-    for ( i = 0; i < m->nfuncs; i++ ) {
-        fprintf( f, "    Proto *p%u = ProtoInit_%u( L );\n", i, i );
-        if ( ( int )i == entry_idx ) {
-            fprintf( f, "    entry = p%u;\n", i );
-        } else {
-            fprintf( f, "    (void)p%u;\n", i );
+    /* ---- LuacProgram_BuildEntry (C3 fix) ----
+    ** Each ProtoInit_<i> already builds its nested children recursively
+    ** (P->p[c] = ProtoInit_<child>(L)). So BuildEntry must call ProtoInit_<i>
+    ** ONLY for top-level ROOTS — Protos that do not appear in any other
+    ** reachable Proto's p[] — otherwise a nested child is built twice (two
+    ** Proto objects, two Jit_RegisterCompiled cache slots; the standalone dup
+    ** is unanchored and its registration shadows/duplicates the real one).
+    **
+    ** Compute the root set here: mark every Proto reachable as a child of some
+    ** parent's p[] as `nested`; the rest are roots. The roots include the entry
+    ** (the program main chunk) and any independently-required module main chunks
+    ** (which are not nested under any other Proto). Build each root once. */
+    {
+        char    *nested = ( char * )calloc( m->nfuncs, 1 );
+        uint32_t j;
+        if ( nested == NULL ) {
+            emit_err( err, errlen,
+                      "ProtoInit emit: out of memory computing root set" );
+            fclose( f );
+            return 0;
         }
+        /* Mark every Proto that is a nested child of another module function. */
+        for ( j = 0; j < m->nfuncs; j++ ) {
+            Proto *P;
+            int    c;
+            if ( m->funcs[j] == NULL || m->funcs[j]->source == NULL ) continue;
+            P = m->funcs[j]->source;
+            for ( c = 0; c < P->sizep; c++ ) {
+                int ci = proto_index( m, P->p[c] );
+                if ( ci >= 0 ) nested[ ci ] = 1;
+            }
+        }
+
+        fprintf( f, "Proto *LuacProgram_BuildEntry( lua_State *L ) {\n" );
+        fprintf( f, "    Proto *entry = NULL;\n" );
+        for ( i = 0; i < m->nfuncs; i++ ) {
+            if ( nested[ i ] ) continue;   /* built recursively by its parent */
+            fprintf( f, "    Proto *p%u = ProtoInit_%u( L );\n", i, i );
+            if ( ( int )i == entry_idx ) {
+                fprintf( f, "    entry = p%u;\n", i );
+            } else {
+                fprintf( f, "    (void)p%u;\n", i );
+            }
+        }
+        free( nested );
+        fprintf( f, "    return entry;\n" );
+        fprintf( f, "}\n" );
     }
-    fprintf( f, "    return entry;\n" );
-    fprintf( f, "}\n" );
 
     if ( ferror( f ) ) {
         emit_err( err, errlen, "ProtoInit emit: write error on '%s'", path );

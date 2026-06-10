@@ -33,12 +33,19 @@ int main( void ) {
     CHECK( Lc_CheckSupportedOps( ProtoOf( L, "local t = {1,2,3}; return t" ), err, sizeof err ) == 1 );
     CHECK( Lc_CheckSupportedOps( ProtoOf( L, "g = 1" ), err, sizeof err ) == 1 );
 
-    /* still beyond the current milestone: a closure (OP_CLOSURE) and a generic
-       for over pairs (OP_TFORCALL/OP_TFORLOOP) must be REJECTED with a diagnostic. */
-    CHECK( Lc_CheckSupportedOps( ProtoOf( L, "local function f() return 1 end return f" ), err, sizeof err ) == 0 );
-    CHECK( err[0] != 0 );
+    /* Plan 3 added closures/upvalues (OP_CLOSURE/GETUPVAL/SETUPVAL), varargs
+       consumption (OP_VARARG), generic-for (OP_TFORPREP/TFORCALL/TFORLOOP), and
+       tail calls (OP_TAILCALL): all must now be ACCEPTED. */
     CHECK( Lc_CheckSupportedOps( ProtoOf( L,
-            "local t={} for k,v in pairs(t) do print(k,v) end" ), err, sizeof err ) == 0 );
+            "local function f() return 1 end return f" ), err, sizeof err ) == 1 );
+    CHECK( Lc_CheckSupportedOps( ProtoOf( L,
+            "local function mk() local c=0 return function() c=c+1 return c end end return mk" ),
+            err, sizeof err ) == 1 );
+    CHECK( Lc_CheckSupportedOps( ProtoOf( L,
+            "local t={} for k,v in pairs(t) do print(k,v) end" ), err, sizeof err ) == 1 );
+    CHECK( Lc_CheckSupportedOps( ProtoOf( L,
+            "local function s(...) return select('#', ...) end return s" ),
+            err, sizeof err ) == 1 );
 
     lua_close( L );
     TEST_END();

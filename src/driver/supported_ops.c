@@ -15,6 +15,8 @@ static int OpSupported( int op ) {
         case OP_RETURN:
         case OP_RETURN0:
         case OP_RETURN1:
+        /* Plan 3: frame-reusing tail call (return f(args)) */
+        case OP_TAILCALL:
         /* Plan 1: loads */
         case OP_MOVE:
         case OP_LOADI:
@@ -52,6 +54,12 @@ static int OpSupported( int op ) {
         case OP_GETFIELD: case OP_GETI: case OP_GETTABLE:
         case OP_SETFIELD: case OP_SETI: case OP_SETTABLE:
         case OP_SETTABUP: case OP_SETLIST:
+        /* Plan 3: closures, upvalues, varargs, generic-for, to-be-closed */
+        case OP_CLOSURE:
+        case OP_GETUPVAL: case OP_SETUPVAL:
+        case OP_VARARG:
+        case OP_TFORPREP: case OP_TFORCALL: case OP_TFORLOOP:
+        case OP_TBC: case OP_CLOSE:
             return 1;
         default:
             return 0;
