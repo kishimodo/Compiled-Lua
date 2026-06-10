@@ -178,6 +178,8 @@ struct LcInst {
   uint16_t nargs;
   LcValue  result;    /* this instruction's SSA result                   */
   int      bc_pc;     /* originating bytecode pc (diagnostics/debug info) */
+  int      a, b, c;   /* M0 memory-form: decoded bytecode A/B/C operands  */
+                      /* (Bx in `a`, sBx in `b` for wide ops)             */
   LcInst  *next, *prev;
 };
 
@@ -198,6 +200,8 @@ struct LcFunc {
   LcValue **args;              /* parameters                              */
   uint16_t nargs;
   bool     is_vararg;
+  bool     is_ssa;             /* false after lift (M0 memory form);      */
+                               /* set true by M1 mem2reg                  */
   /* interprocedural summary (filled by the whole-program passes) */
   LcType   ret_type;           /* joined return type                      */
   uint32_t effect_summary;     /* LcEffect bitset for the whole function  */
@@ -222,6 +226,8 @@ void      lc_module_free(LcModule *m);
 LcFunc   *lc_func_new(LcModule *m, Proto *p);
 LcBlock  *lc_block_new(LcFunc *f);
 LcInst   *lc_emit(LcBlock *b, LcOpcode op);
+/* Emit a generic memory-form instruction carrying bytecode operands (M0). */
+LcInst   *lc_emit_bc(LcBlock *blk, LcOpcode op, int a, int b, int c, int bc_pc);
 void      lc_inst_add_arg(LcInst *in, LcValue *v);
 
 /* Verify SSA well-formedness + effect consistency (debug builds). */
