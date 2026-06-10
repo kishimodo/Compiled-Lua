@@ -236,6 +236,18 @@ int X64Emit_AddRspImm( LcCodeBuf *Buf, int32_t Imm )
     return AppendBytes( Buf, &Imm, 4 );
 }
 
+int X64Emit_AddRegImm32( LcCodeBuf *Buf, X64_GPR_T Reg, int32_t Imm )
+{
+    /* REX.W [+B] 81 /0 id   ADD r64, imm32.  Always uses the imm32 form for
+       simplicity and byte-stability (matches v1's hand-emitted ADD RDI,16:
+       48 81 C7 10 00 00 00). */
+    unsigned char Rex = REX_BASE | REX_W | ( IsHi( Reg ) ? REX_B : 0 );
+    if ( !AppendByte( Buf, Rex ) )                               return 0;
+    if ( !AppendByte( Buf, 0x81 ) )                              return 0;
+    if ( !AppendByte( Buf, ModRm( 3, 0, Lo3( Reg ) ) ) )         return 0; /* /0, rm=Reg */
+    return AppendBytes( Buf, &Imm, 4 );
+}
+
 int X64Emit_CallAbs( LcCodeBuf *Buf, void *Target )
 {
     /* 48 B8 imm64 ; FF D0 — mov rax, imm64 ; call rax */

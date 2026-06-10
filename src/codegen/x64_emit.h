@@ -164,6 +164,14 @@ int X64Emit_AddRspImm( LcCodeBuf *Buf, int32_t Imm );
 
 /*!
  * @brief
+ *  REX.W = 1 ADD r64, imm32.   Encodes:  ADD Reg, imm32   (81 /0 id form).
+ *  General-purpose form (X64Emit_AddRspImm is RSP-specific). Used to advance
+ *  RDI past the function slot (ADD RDI, 16) in the frame prologue/reload.
+ */
+int X64Emit_AddRegImm32( LcCodeBuf *Buf, X64_GPR_T Reg, int32_t Imm );
+
+/*!
+ * @brief
  *  Indirect CALL via 64-bit absolute address.  We emit:
  *      mov rax, imm64  (10 bytes)
  *      call rax        (2 bytes)

@@ -29,28 +29,36 @@
 #define LUAC_CODEGEN_H
 
 #include "../ir/ir.h"
+#include "codegen/lc_codebuf.h"   /* LcCodeBuf + the encoder-level LcReloc/LcRelocKind */
 
-/* A relocation the linker must resolve when placing the code. */
+/* A relocation the linker must resolve when placing the code.
+**
+** NB: this MODULE/linker-level reloc descriptor is deliberately named
+** LcModReloc to avoid colliding with the encoder-level LcReloc defined in
+** lc_codebuf.h (different concept: that one is a per-buffer rel32/abs64 patch
+** site keyed by symbol *name*; this one is a linker symbol/func/const *index*).
+** A translation unit that needs both — e.g. codegen.c and the frame unit tests —
+** includes both headers. */
 typedef enum {
-  LC_RELOC_HELPER,     /* -> a runtime-library symbol (Rt_* / luaH_* / luaS_*)  */
-  LC_RELOC_LUAFUNC,    /* -> another LuaC-generated function (.text)             */
-  LC_RELOC_RODATA,     /* -> a constant in .rdata (string/float pool)           */
-  LC_RELOC_IMPORT      /* -> an imported symbol via .idata (kernel32, etc.)      */
-} LcRelocKind;
+  LC_MRELOC_HELPER,    /* -> a runtime-library symbol (Rt_* / luaH_* / luaS_*)  */
+  LC_MRELOC_LUAFUNC,   /* -> another LuaC-generated function (.text)             */
+  LC_MRELOC_RODATA,    /* -> a constant in .rdata (string/float pool)           */
+  LC_MRELOC_IMPORT     /* -> an imported symbol via .idata (kernel32, etc.)      */
+} LcModRelocKind;
 
-typedef struct LcReloc {
-  LcRelocKind kind;
+typedef struct LcModReloc {
+  LcModRelocKind kind;
   uint32_t    offset;      /* patch site within this function's code            */
   uint32_t    target;      /* symbol/func/const index (resolved by linker)      */
   int32_t     addend;
   uint8_t     width;       /* 4 = rip-relative disp32 (default), 8 = abs64      */
-} LcReloc;
+} LcModReloc;
 
 /* The compiled output for one LcFunc. */
 typedef struct LcCompiledFunc {
   uint8_t  *code;          /* machine code bytes                                */
   size_t    code_len;
-  LcReloc  *relocs;
+  LcModReloc *relocs;
   uint32_t  nrelocs;
   uint8_t  *unwind;        /* Win64 UNWIND_INFO blob -> .xdata                  */
   size_t    unwind_len;
@@ -69,5 +77,25 @@ typedef struct LcCodeModule {
 /* Compile the optimized module. Each LcFunc -> one LcCompiledFunc. */
 LcCodeModule *lc_codegen(LcModule *m);
 void          lc_codemodule_free(LcCodeModule *cm);
+
+/* ------------------------------------------------------------------ */
+/* Frame scaffolding (ported from v1 src/jit/codegen.c).               */
+/*                                                                     */
+/* Frame ABI (validated by tests/unit/test_lc_callinfo_spike.c):       */
+/*   RBX = lua_State* L; RDI = ci->func.p + 16 (Lua register base);    */
+/*   Lua register N at [RDI + N*16] (value +0, tag byte +8).           */
+/*   Prologue pushes RDI,RBX,R12,R13,R14,R15,RSI (7 callee-saved) then */
+/*   SUB RSP,0x20 (shadow space) -> 96B frame, 16-aligned at calls.    */
+/*   Helper ABI: RCX=L, RDX/R8/R9=args, RAX=ret.                       */
+/* ------------------------------------------------------------------ */
+int LcCg_EmitPrologue        ( LcCodeBuf *B );  /* save regs, SUB RSP, RBX=L, RDI=ci->func+16 */
+int LcCg_EmitEpilogue        ( LcCodeBuf *B );  /* ADD RSP, pop regs, RET                     */
+int LcCg_EmitRestoreL        ( LcCodeBuf *B );  /* MOV RCX, RBX                               */
+int LcCg_EmitReloadRdiAndCache( LcCodeBuf *B ); /* recompute RDI after a stack-relocating call */
+
+/* Helper-call shim: MOV RCX,L ; MOV RDX,a ; MOV R8,b ; MOV R9,c ;
+   CALL <Sym> (rel32 reloc) ; optional RDI reload. Reusable by lowering. */
+int LcCg_EmitHelperCall3( LcCodeBuf *B, const char *Sym,
+                          int a, int b, int c, int reload_after );
 
 #endif /* LUAC_CODEGEN_H */
