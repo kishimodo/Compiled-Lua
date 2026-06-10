@@ -188,8 +188,18 @@ struct LcInst {
                       /* set, this function created closures over its      */
                       /* locals; codegen must emit Rt_Close(L,0) before    */
                       /* the return/tailcall. Set by lift.c via GETARG_k.  */
+  uint8_t  known;     /* M1 lc_pass_local_typeinfer proof that this op's    */
+                      /* operand registers hold a known numeric type ON     */
+                      /* ENTRY, letting codegen elide the runtime tag-check. */
+                      /* Bitmask of LC_KNOWN_* below. 0 = unknown (boxed).   */
   LcInst  *next, *prev;
 };
+
+/* lc_pass_local_typeinfer proof bits stored in LcInst.known. */
+#define LC_KNOWN_B_INT  0x01u   /* operand-B register proven LUA_VNUMINT    */
+#define LC_KNOWN_C_INT  0x02u   /* operand-C register proven LUA_VNUMINT    */
+#define LC_KNOWN_B_FLT  0x04u   /* operand-B register proven LUA_VNUMFLT    */
+#define LC_KNOWN_C_FLT  0x08u   /* operand-C register proven LUA_VNUMFLT    */
 
 struct LcBlock {
   uint32_t id;

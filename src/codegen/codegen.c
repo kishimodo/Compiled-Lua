@@ -576,6 +576,22 @@ static int lower_cmp( LcBranchCtx *Br, LcInst *in, const char *Helper ) {
     cc = g_lc_opt_level >= 1 ? cmp_setcc( in->bc_op, &is_regreg ) : -1;
     if ( cc >= 0 ) {
         size_t jneA, jneB = 0, jmp_fast, slow, cmpk;
+
+        /* M1 elision: operand(s) PROVEN integer -> inline compare with no
+           tag-check, no helper. op1 = R[A]; op2 = R[B] (reg-reg) or the signed
+           immediate (the *I forms, statically integer). */
+        int op1_int = ( in->known & LC_KNOWN_B_INT ) != 0;
+        int op2_int = is_regreg ? ( ( in->known & LC_KNOWN_C_INT ) != 0 ) : 1;
+        if ( op1_int && op2_int ) {
+            if ( !X64Emit_MovMemToReg( B, X64_RAX, X64_RDI, A * 16 ) ) return 0;
+            if ( is_regreg ) { if ( !emit_cmp_rax_mem( B, Bop * 16 ) ) return 0; }
+            else             { if ( !emit_cmp_rax_imm32( B, Bop ) ) return 0; }
+            if ( !emit_setcc_movzx_r11( B, ( unsigned )cc ) ) return 0;
+            { unsigned char C[ 4 ] = { 0x41, 0x83, 0xFB, ( unsigned char )( int8_t )K };
+              if ( !LcCodeBuf_Append( B, C, 4 ) ) return 0; }   /* cmp r11d, K */
+            return LcBr_EmitBranch( Br, 0x5 /* JNE */, in->bc_pc + 2, in->bc_pc );
+        }
+
         if ( !X64Emit_CmpMem8Imm8( B, X64_RDI, A * 16 + 8, LUA_VNUMINT ) ) return 0;
         if ( !X64Emit_JneRel8( B, 0 ) ) return 0; jneA = B->used - 1;
         if ( is_regreg ) {
@@ -831,6 +847,17 @@ static int lower_arith_fast( LcCodeBuf *Bb, LcInst *in, LcArOp op,
     size_t jne_fB = 0, jne_fC = 0, jmp_df = 0, jne_iB, jne_iC, jmp_di, int_check, slow, done;
     int    ok;
 
+    /* M1 type-inference elision: both operands PROVEN integer (lc_pass_local_
+       typeinfer) -> emit the bare integer op with no tag-check, no float arm, no
+       helper. Sound iff the proof is sound (no runtime guard, per PROMPT §9). */
+    if ( ( in->known & LC_KNOWN_B_INT ) && ( in->known & LC_KNOWN_C_INT ) ) {
+        if ( !X64Emit_MovMemToReg( Bb, X64_RAX, X64_RDI, Br * 16 ) ) return 0;
+        if ( !emit_arith_rax_mem( Bb, op, Cr * 16 ) ) return 0;
+        if ( !X64Emit_MovRegToMem( Bb, X64_RDI, A * 16, X64_RAX ) ) return 0;
+        if ( !X64Emit_MovImm32ToMem( Bb, X64_RDI, A * 16 + 8, LUA_VNUMINT ) ) return 0;
+        return 1;
+    }
+
     /* --- float fast path: both operands LUA_VNUMFLT (ADD/SUB/MUL only) --- */
     if ( has_float ) {
         if ( !X64Emit_CmpMem8Imm8( Bb, X64_RDI, Br * 16 + 8, LUA_VNUMFLT ) ) return 0;
@@ -904,6 +931,17 @@ static int lower_arith_imm_fast( LcCodeBuf *Bb, LcInst *in, LcArOp op,
                                  int32_t imm, const char *slow_sym ) {
     int    A = in->a, Br = in->b;
     size_t jne_iB, jmp_di, slow, done;
+
+    /* M1 elision: R[B] PROVEN integer -> bare int op with the immediate, no
+       tag-check, no helper. */
+    if ( in->known & LC_KNOWN_B_INT ) {
+        if ( !X64Emit_MovMemToReg( Bb, X64_RAX, X64_RDI, Br * 16 ) ) return 0;
+        if ( !emit_arith_rax_imm32( Bb, op, imm ) ) return 0;
+        if ( !X64Emit_MovRegToMem( Bb, X64_RDI, A * 16, X64_RAX ) ) return 0;
+        if ( !X64Emit_MovImm32ToMem( Bb, X64_RDI, A * 16 + 8, LUA_VNUMINT ) ) return 0;
+        return 1;
+    }
+
     if ( !X64Emit_CmpMem8Imm8( Bb, X64_RDI, Br * 16 + 8, LUA_VNUMINT ) ) return 0;
     if ( !X64Emit_JneRel8( Bb, 0 ) ) return 0; jne_iB = Bb->used - 1;
     if ( !X64Emit_MovMemToReg( Bb, X64_RAX, X64_RDI, Br * 16 ) ) return 0;
