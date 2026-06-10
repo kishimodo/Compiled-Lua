@@ -131,15 +131,30 @@ empty/stub). No bytecode is undumped at runtime; `g_LuaBlob` does not exist.
    links resolve), **registers each `(Proto*, native-entry)` pair into the JIT dispatch
    side-cache**, builds the entry closure over the entry Proto, and calls it.
 
-**Dispatch mechanism (verified 2026-06-09).** v1 dispatch is **not** a field on `Proto`
-(`lobject.h:550-573` has none) — it is a process-wide side-cache in `src/jit/dispatch.c`
-(`g_Cache[]` + an O(1) `Proto*`-hash), read by `Jit_LookupCached(Proto*) → JIT_FUNC_T`
-(`= int(*)(lua_State*)`), which the call path (`Rt_Call`, `runtime.c:87`) already consults
-before falling back. **M0 reuses this unchanged**: add one small, semantics-free function
-`Jit_RegisterCompiled(Proto*, JIT_FUNC_T)` to `dispatch.c` that inserts an
-externally-supplied entry into `g_Cache`/`g_CacheHash` (mirroring the tail of
-`Jit_Compile`, minus the codegen). `ProtoInit_*` calls it at startup. No change to the
-call path; no JIT present in the output. `AnchorProto`-style GC pinning still applies
+**Dispatch mechanism (verified 2026-06-10, Task 1 spike).** v1 dispatch is **not** a field
+on `Proto` (`lobject.h:550-573` has none) — it is a process-wide side-cache in
+`src/jit/dispatch.c` (`g_Cache[]` + an O(1) `Proto*`-hash), read by
+`Jit_LookupCached(Proto*) → JIT_FUNC_T` (`= int(*)(lua_State*)`). There are **two** entry
+points into a cached body, and M0 uses both unchanged:
+- **Initial entry from the C bootstrap → through the interpreter trampoline.** `luaV_execute`
+  (`lvm.c:1199`) checks, at function entry, `if (luavm_jit_compile_hook != NULL &&
+  L->hookmask == 0)`, calls `luavm_jit_compile_hook(L, cl->p)`, and if it returns a function
+  pointer invokes it via `luavm_jit_invoke_hook(L, jitted)` and returns — **without running
+  any bytecode**. So a registered body is dispatched iff: (A) a cache-consulting hook is
+  installed, (B) `hookmask==0`, (C) the cache key `Proto*` equals the callee closure's `p`,
+  (D) the callee is a Lua closure. The AOT entry sets `luavm_jit_compile_hook =
+  Jit_LookupCached` (**lookup-only — never `Jit_Compile`**; all bodies are pre-registered)
+  and keeps the default `luavm_jit_invoke_hook`.
+- **AOT→AOT calls → through `Rt_Call`** (`runtime.c:87`), which consults `Jit_LookupCached`
+  directly. So once execution is inside AOT code, calls dispatch without re-entering
+  `luaV_execute`.
+
+`luaV_execute` thus acts only as a **dispatch trampoline** at the boundary — no user bytecode
+is interpreted (every reachable Proto is registered in the closed world; `code[]` may carry a
+lone `RETURN` safety net). **M0 reuses this unchanged**: add one small, semantics-free
+function `Jit_RegisterCompiled(Proto*, JIT_FUNC_T)` to `dispatch.c` (done — Task 1) that
+inserts an externally-supplied entry into `g_Cache`/`g_CacheHash` (mirroring the tail of
+`Jit_Compile`, minus codegen). `ProtoInit_*` calls it at startup. `AnchorProto`-style GC pinning still applies
 (keep Protos alive). **Caveat to fix:** v1 codegen bakes `savedpc = &P->code[pc+1]` as an
 absolute pointer (`codegen.c:253-261`); for AOT the Proto is heap-built at startup, so its
 `code[]` address isn't a compile-time constant — savedpc must be set runtime-relative (or

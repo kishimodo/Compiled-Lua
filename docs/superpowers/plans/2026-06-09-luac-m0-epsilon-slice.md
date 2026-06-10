@@ -913,12 +913,21 @@ git commit -m "feat(luac): COFF object writer (sections, symbols, AMD64 relocati
     `Ffi_SetDispatchL`, `luaL_openlibs`, `Coro_OpenLib`, `Ctype_Init`,
     `Ffi_RegisterWindowsTypes`, `Ffi_OpenLib`, `PushArgTable`, the message handler
     (`Runtime_Msghandler`).
+  - **Install the dispatch hook (Task 1 finding — verified `lvm.c:1199`):** set
+    `luavm_jit_compile_hook = Jit_LookupCached` (**lookup-only**, *not* `Jit_Compile` — AOT
+    bodies are pre-registered; we never JIT at runtime) and leave `luavm_jit_invoke_hook` at
+    its default. `luaV_execute` then dispatches each Lua closure whose `Proto` is registered
+    to its AOT body and never interprets bytecode. Confirm `L->hookmask == 0` (it is, with no
+    debug hook). The four trigger conditions (A–D) are documented in
+    `tests/unit/test_lc_dispatch_spike.c`.
   - **Replace** the `luaL_loadbufferx(blob...)` + `Jit_Compile` block with:
     `extern Proto *LuacProgram_BuildEntry(lua_State*); Proto *P = LuacProgram_BuildEntry(L);`
-    then build an `LClosure` over `P` (one `_ENV` upvalue bound to the globals table:
-    `Cl->upvals[0]` ← registry `_ENV`), push it, set up the `CallInfo` per the **Task 3
-    spike notes**, and invoke under `luaD_rawrunprotected`/`Jit_TrampolineEntry` with the
-    message handler installed — identical to v1's invoke (`runtime_init.c:548-599`).
+    (this also runs every `ProtoInit_*`, which call `Jit_RegisterCompiled(P_i, luac_fn_i)` —
+    so all bodies are in the cache before the entry runs). Then build an `LClosure` over the
+    entry `P` (one `_ENV` upvalue bound to the globals table: `Cl->upvals[0]` ← registry
+    `_ENV`), push it, and invoke it the normal way (e.g. `lua_pcall` / `luaD_call` with the
+    message handler installed) — `luaV_execute`'s hook dispatches it to `luac_fn_entry`. Use
+    the **Task 3 spike notes** for any `CallInfo` specifics.
   - **Drop** `EmbeddedLoader_Install`, `InstallEmbeddedPackages` (no blob/preload in M0
     epsilon; re-add a native package-init in a later plan).
 - [ ] **Step 2: Commit** (after it links via Task 16).
@@ -940,12 +949,23 @@ x86_64-w64-mingw32-gcc -o <out.exe> <user.o> <protoinit.o> <aot_entry.o>
 ```
 
 **Do not** pass `-Wl,--strip-all` / section-randomize in M0 (keep `.pdata`/`.xdata` and
-symbols for debugging). `aot_entry.o` comes from `runtime-embedded.a`? No — `aot_entry.c` is
-a *new* source; add it as its own object on the link line (or into a small `aot-rt.a`). Ensure
-the archive's old `runtime_entry.o`/`RuntimeMain` `main` is **not** also pulled (symbol
-clash): either exclude it from `runtime-embedded.a` for AOT builds, or name the AOT entry
-`main` and ensure the archive's `main` is in an object only pulled on demand (it is, if
-nothing references it). Verify at link time.
+symbols for debugging). `aot_entry.c` is a *new* source — add it as its own object on the
+link line (or a small `aot-rt.a`), and name its entry `main`.
+
+**Task 2 spike finding (must honor):** the stock `runtime-embedded.a` contains the
+blob-coupled v1 bootstrap (`runtime_entry.o` → `runtime_init.o`), which references symbols
+that **do not exist** in an AOT program: `g_LuaBlob`, `g_LuaBlob_size`, `Runtime_GetPackages`
+(plus `embedded_loader`/`blob_reader` paths). If `runtime_entry.o`'s `main` is pulled (because
+no other `main` exists), it drags `runtime_init.o` and the link fails on those symbols.
+**Fix (confirmed working in the spike):** provide our own `main` in `aot_entry.o` so
+`runtime_entry.o` is never pulled, and ensure `aot_entry.c` does **not** reference any
+`runtime_init.o` symbol (drop `EmbeddedLoader_Install`/`InstallEmbeddedPackages`, per Task 14).
+Then `runtime_init.o` stays unpulled and the missing blob symbols never matter. Verify at link
+time with `nm`/a clean link. If any path still drags `runtime_init.o`, either (a) build a
+stripped AOT archive dropping `runtime_init.o`/`runtime_entry.o`/`embedded_loader.o`/
+`blob_reader.o`, or (b) add a tiny `aot_blob_stubs.c` defining `g_LuaBlob`/`g_LuaBlob_size`/
+`Runtime_GetPackages` as empty (the blob code is then dead, never reached since our `main`
+runs). Prefer (a) for cleanliness once green.
 
 - [ ] **Step 2: Commit** (after Task 16).
 
