@@ -1,0 +1,62 @@
+# Makefile.luac — builds build/bin/aotc.exe, the LuaC AOT compiler driver.
+#
+# Run from the project root:  make -f build/Makefile.luac aotc
+# (build/build-luac.bat sets the MinGW + make PATH first, and builds the base
+#  products/objects this links against.)
+#
+# aotc.exe = the backend objects (src/{ir,opt,codegen,link,driver}) + the reused
+# front-end objects (src/compiler/{resolve,lua_compile,paths,diag}) + liblua54.a.
+# The driver's main.c is compiled SEPARATELY with -DLUAC_AOTC_STANDALONE into a
+# dedicated obj (build/bin/obj-aotc/main.o) so a real main() exists; the plain
+# obj/driver/main.o (no main, just lc_drive) is excluded from the link to avoid
+# a duplicate lc_drive symbol.
+
+SHELL       := cmd.exe
+
+CC          := x86_64-w64-mingw32-gcc
+AR          := ar
+
+ROOT        := .
+BUILD_DIR   := $(ROOT)/build/bin
+SRC_DIR     := $(ROOT)/src
+LUA_DIR     := $(ROOT)/lua-5.4/src
+
+CFLAGS      := -std=c99 -Wall -Wextra -Wno-unused-parameter -O2 -g
+CFLAGS      += -I$(SRC_DIR) -I$(LUA_DIR) -I$(ROOT)/build/gen
+CFLAGS      += -DLUAVM_TARGET_WINDOWS_X64=1
+
+# Backend objects produced by the base Makefile's `luac-objs` target. We link
+# all of them EXCEPT the plain driver/main.o (its lc_drive is also compiled into
+# the standalone obj below, and it has no main()).
+BACKEND_OBJS := \
+    $(wildcard $(BUILD_DIR)/obj/ir/*.o)      \
+    $(wildcard $(BUILD_DIR)/obj/opt/*.o)     \
+    $(wildcard $(BUILD_DIR)/obj/codegen/*.o) \
+    $(wildcard $(BUILD_DIR)/obj/link/*.o)    \
+    $(BUILD_DIR)/obj/driver/closed_world.o   \
+    $(BUILD_DIR)/obj/driver/lc_undump.o
+
+# Front-end objects the driver calls (produced by the base Makefile's `compiler`
+# target). The driver does NOT use blob.o / pe_link.o (those are v1-only), but
+# linking them in is harmless; we list only what lc_drive references.
+FRONTEND_OBJS := \
+    $(BUILD_DIR)/obj/compiler/resolve.o    \
+    $(BUILD_DIR)/obj/compiler/lua_compile.o \
+    $(BUILD_DIR)/obj/compiler/paths.o      \
+    $(BUILD_DIR)/obj/compiler/diag.o
+
+# Standalone driver main (with main()).
+AOTC_MAIN_OBJ := $(BUILD_DIR)/obj-aotc/main.o
+
+$(BUILD_DIR)/obj-aotc:
+	if not exist "$(BUILD_DIR)\obj-aotc" mkdir "$(BUILD_DIR)\obj-aotc"
+
+$(AOTC_MAIN_OBJ): $(SRC_DIR)/driver/main.c | $(BUILD_DIR)/obj-aotc
+	$(CC) $(CFLAGS) -DLUAC_AOTC_STANDALONE -c $< -o $@
+
+$(BUILD_DIR)/aotc.exe: $(AOTC_MAIN_OBJ) $(BACKEND_OBJS) $(FRONTEND_OBJS) $(BUILD_DIR)/liblua54.a
+	$(CC) $(CFLAGS) -o $@ $(AOTC_MAIN_OBJ) $(BACKEND_OBJS) $(FRONTEND_OBJS) \
+	    $(BUILD_DIR)/liblua54.a -lm -lkernel32 -ladvapi32
+
+.PHONY: aotc
+aotc: $(BUILD_DIR)/aotc.exe

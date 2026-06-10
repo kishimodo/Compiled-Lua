@@ -288,6 +288,55 @@ local function run_differential()
   end
 end
 
+-- ---- phase 5a: AOT differential (aotc.exe PE vs interpreter) --------------
+
+-- Compile each tests/differential/aot_*.lua with aotc.exe into a real PE, run
+-- it, and diff its stdout against luavm.exe -i on the same source (the M0
+-- arbiter: a compiled program must match the interpreter byte-for-byte). The
+-- phase self-skips if aotc.exe isn't built (run-tests.bat builds luac-objs but
+-- not aotc.exe; build it with build\build-luac.bat to exercise this layer).
+local AOTC = BIN .. "\\aotc.exe"
+
+local function file_exists(path)
+  local f = io.open(path:gsub("/", "\\"), "rb")
+  if f then f:close(); return true end
+  return false
+end
+
+local function run_aot_differential()
+  header("AOT differential aotc-PE-vs-interpreter (tests/differential/aot_*.lua)")
+  if not file_exists(AOTC) then
+    print("  [~] SKIP  aotdiff   aotc.exe not built (run build\\build-luac.bat to enable)")
+    return
+  end
+  for _, src in ipairs(glob("tests/differential", "aot_*.lua")) do
+    local name = basename(src, "%.lua")
+    local exe  = TESTBIN .. "\\" .. name .. ".exe"
+    -- aotc shells out to gcc per build, which can be slow; guard it too.
+    local clog, crc = capture(guard('"' .. AOTC .. '" "' .. src .. '" -o "' .. exe .. '" 2>&1'))
+    if crc ~= 0 then
+      fail = fail + 1
+      failed[#failed + 1] = "aotdiff:" .. name
+      print(string.format("  [-] FAIL  %-9s %s (aotc compile/link error)", "aotdiff", name))
+      for line in clog:gmatch("[^\r\n]+") do
+        if line:find("error") then print("            " .. line) end
+      end
+    else
+      local oa, ra = capture(guard('"' .. exe .. '" 2>nul'))
+      local oi, ri = capture(guard('"' .. LUAVM .. '" -i "' .. src .. '" 2>nul'))
+      if ra == 0 and ri == 0 and oa == oi and #oa > 0 then
+        pass = pass + 1
+        print(string.format("  [+] PASS  %-9s %s", "aotdiff", name))
+      else
+        fail = fail + 1
+        failed[#failed + 1] = "aotdiff:" .. name
+        local reason = (ra ~= 0 or ri ~= 0) and "(nonzero exit)" or "(AOT-PE vs -i stdout mismatch)"
+        print(string.format("  [-] FAIL  %-9s %s %s", "aotdiff", name, reason))
+      end
+    end
+  end
+end
+
 -- ---- phase 5b: conformance corpus (JIT vs interpreter, with DIFF-XFAIL) ----
 
 -- Read up to the first ~10 lines of a file looking for a `-- DIFF-XFAIL: reason`
@@ -396,6 +445,7 @@ run_unit()
 run_lua()
 run_packages()
 run_differential()
+run_aot_differential()
 run_conformance()
 run_suites()
 run_fuzz_smoke()
