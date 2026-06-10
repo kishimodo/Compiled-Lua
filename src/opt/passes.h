@@ -1,0 +1,61 @@
+/*
+** passes.h — The LuaC optimization pipeline.
+**
+** Passes are grouped by delivery milestone (see ../../PROMPT.md §Phasing). Each
+** is sound: it only fires when the closed-world proof holds, so output always
+** matches the boxed Lua 5.4 semantics. The interprocedural passes iterate to a
+** fixpoint over the call graph; FFI edges and any value of type LC_T_ANY act as
+** conservative cut points.
+**
+** Ordering matters: build SSA + CFG analyses first, then local refinement, then
+** the whole-program fixpoint, then lowering-prep.
+*/
+#ifndef LUAC_PASSES_H
+#define LUAC_PASSES_H
+
+#include "../ir/ir.h"
+
+typedef struct LcPassConfig {
+  int  opt_level;        /* -O0..-O3                                       */
+  bool interprocedural;  /* enable the whole-program fixpoint (M2+)        */
+  bool escape_analysis;  /* enable table escape/unbox (M3)                 */
+  bool verify_each;      /* run lc_module_verify after every pass (debug)  */
+} LcPassConfig;
+
+/* Run the whole pipeline. Returns false on an internal invariant failure. */
+bool lc_optimize(LcModule *m, const LcPassConfig *cfg);
+
+/* ---- Analyses (no IR mutation; populate side tables) ---- */
+void lc_analyze_dominators(LcFunc *f);
+void lc_analyze_liveness(LcFunc *f);
+void lc_build_callgraph(LcModule *m);
+
+/* ---- M0: faithful baseline (correctness; removes interp/dispatch only) ---- */
+void lc_pass_mem2reg(LcFunc *f);        /* registers -> SSA values         */
+void lc_pass_dce(LcFunc *f);            /* dead-code elimination (effects)  */
+void lc_pass_const_fold(LcFunc *f);     /* fold provable constants          */
+
+/* ---- M1: per-function (local) specialization ---- */
+void lc_pass_local_typeinfer(LcFunc *f);   /* intra-fn type lattice fixpoint */
+void lc_pass_specialize_arith(LcFunc *f);  /* ARITH -> IARITH/FARITH; unbox   */
+void lc_pass_unbox_locals(LcFunc *f);      /* keep scalars in raw regs        */
+void lc_pass_devirt_local(LcFunc *f);      /* known local/closure -> DIRECT    */
+void lc_pass_raw_table(LcFunc *f);         /* drop __index when no metatable  */
+void lc_pass_inline_small(LcModule *m);    /* inline tiny leaf callees         */
+
+/* ---- M2: whole-program (interprocedural) ---- */
+void lc_pass_ip_typeprop(LcModule *m);     /* propagate arg/return types       */
+void lc_pass_monomorphize(LcModule *m);    /* clone polymorphic fns per type    */
+void lc_pass_ip_devirt(LcModule *m);       /* whole-program call devirt         */
+void lc_pass_dead_global(LcModule *m);     /* unused globals/fields/functions   */
+
+/* ---- M3: memory optimization ---- */
+void lc_pass_escape(LcModule *m);          /* escape analysis                   */
+void lc_pass_scalar_replace(LcModule *m);  /* explode non-escaping tables        */
+void lc_pass_barrier_elide(LcFunc *f);     /* drop provably-unneeded GC barriers */
+
+/* ---- lowering prep (always) ---- */
+void lc_pass_lower(LcFunc *f);             /* canonicalize to codegen-ready ops  */
+void lc_pass_safepoints(LcFunc *f);        /* insert GC safepoints on back-edges */
+
+#endif /* LUAC_PASSES_H */

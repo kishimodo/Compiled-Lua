@@ -1,0 +1,20 @@
+# LuaC build artifacts (rebuilt by build/build.bat / build-luac.bat)
+build/bin/
+build/gen/
+build/tmp/
+*.o
+*.obj
+*.a
+*.exe
+*.luac
+*.bin
+*.tmp
+*.log
+
+# editors / misc
+.vscode/
+.idea/
+*.swp
+imgui.ini
+setup.inf
+setup.rpt
