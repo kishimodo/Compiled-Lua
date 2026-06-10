@@ -231,13 +231,49 @@ static int emit_protoinit( FILE *f, LcModule *m, int idx, char *err,
         }
     }
 
-    /* ---- code safety-net ----
-    ** The registered native body is dispatched at function entry, so this is
-    ** never executed; but luaD_precall sets ci->savedpc = P->code, so code must
-    ** be non-NULL. A single OP_RETURN0 is a valid, harmless instruction. */
-    fprintf( f, "    P->sizecode = 1;\n" );
-    fprintf( f, "    P->code = luaM_newvector( L, 1, Instruction );\n" );
-    fprintf( f, "    P->code[0] = CREATE_ABCk( OP_RETURN0, 0, 1, 0, 0 );\n" );
+    /* ---- code[] (reconstructed verbatim) ----
+    ** The registered native body is what runs (dispatched at function entry), so
+    ** this bytecode is NEVER interpreted. It is shipped as data for two reasons:
+    ** (1) getobjname (ldebug.c) reads code[pc] to produce the operand-name
+    **     annotation in error messages, e.g. "(field 'x')" / "(local 'y')"
+    **     (LUAC-002 — full error fidelity, a deliberate trade of the no-bytecode
+    **     aesthetic for matching the interpreter exactly); and
+    ** (2) it keeps sizecode/code consistent (safe luaF_freeproto, valid savedpc
+    **     arithmetic, and a correct interpreter fallback if a Proto were ever
+    **     dispatched without a registered native body). */
+    fprintf( f, "    P->sizecode = %d;\n", P->sizecode );
+    if ( P->sizecode > 0 ) {
+        fprintf( f, "    P->code = luaM_newvector( L, %d, Instruction );\n",
+                 P->sizecode );
+        fprintf( f, "    { static const unsigned char cb[] = " );
+        emit_byte_array( f, ( const char * )P->code,
+                         ( size_t )P->sizecode * sizeof( Instruction ) );
+        fprintf( f, "; memcpy( P->code, cb, %zu ); }\n",
+                 ( size_t )P->sizecode * sizeof( Instruction ) );
+    }
+
+    /* ---- local-variable debug info (for getobjname name annotations) ---- */
+    fprintf( f, "    P->sizelocvars = %d;\n", P->sizelocvars );
+    if ( P->sizelocvars > 0 ) {
+        int lv;
+        fprintf( f, "    P->locvars = luaM_newvector( L, %d, LocVar );\n",
+                 P->sizelocvars );
+        for ( lv = 0; lv < P->sizelocvars; lv++ ) {
+            LocVar *v = &P->locvars[lv];
+            fprintf( f, "    P->locvars[%d].startpc = %d; P->locvars[%d].endpc = %d;\n",
+                     lv, v->startpc, lv, v->endpc );
+            if ( v->varname != NULL ) {
+                const char *s   = getstr( v->varname );
+                size_t      vlen = ( size_t )tsslen( v->varname );
+                fprintf( f, "    { static const char vb[] = " );
+                emit_byte_array( f, s, vlen );
+                fprintf( f, "; P->locvars[%d].varname = luaS_newlstr( L, vb, %zu ); }\n",
+                         lv, vlen );
+            } else {
+                fprintf( f, "    P->locvars[%d].varname = NULL;\n", lv );
+            }
+        }
+    }
 
     /* ---- register the AOT body ---- */
     fprintf( f, "    { extern int luac_fn_%d( lua_State * ); "
