@@ -253,6 +253,24 @@ JIT_FUNC_T Jit_Compile( lua_State *L, Proto *P ) {
     return Slot->Entry;
 }
 
+int Jit_RegisterCompiled( Proto *P, JIT_FUNC_T Entry ) {
+    if ( P == NULL || Entry == NULL ) { return 0; }
+    if ( CacheFind( P ) != NULL ) { return 1; }          /* idempotent */
+    if ( g_CacheCount >= JIT_CACHE_MAX ) {
+        fprintf( stderr, "[-] jit: cache full (aot register)\n" );
+        return 0;
+    }
+    JIT_CACHE_ENTRY_T *Slot = &g_Cache[ g_CacheCount ];
+    memset( Slot, 0, sizeof( *Slot ) );
+    Slot->P          = P;
+    Slot->Entry      = Entry;          /* points into the PE .text, not exec-mem */
+    Slot->PcToOffset = NULL;           /* no pc-map for AOT bodies (M0) */
+    Slot->PcCount    = P->sizecode;
+    CacheHashInsert( ( int32_t )g_CacheCount, P );
+    g_CacheCount++;
+    return 1;
+}
+
 int Jit_TrampolineEntry( lua_State *L, int ( *Fn )( lua_State * ) ) {
     /* Only the outermost JIT entry installs a trampoline frame. Nested
        entries (e.g. pcall → callee → ...) skip the setjmp setup so they

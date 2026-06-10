@@ -22,6 +22,13 @@ typedef int ( *JIT_FUNC_T )( lua_State *L );
  */
 JIT_FUNC_T Jit_Compile( lua_State *L, Proto *P );
 
+/* Register an externally-generated native entry for Proto P in the dispatch
+ * cache, exactly as Jit_Compile would after codegen. Used by AOT startup
+ * (ProtoInit) so the existing Rt_Call -> Jit_LookupCached path invokes the
+ * AOT body with no JIT present. Returns 1 on success, 0 if the cache is full
+ * or P is already registered. */
+int Jit_RegisterCompiled( Proto *P, JIT_FUNC_T Entry );
+
 /*!
  * @brief
  *  Look up the cached entry for P without compiling (returns NULL if not
