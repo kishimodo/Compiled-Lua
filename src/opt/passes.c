@@ -306,6 +306,10 @@ void lc_pass_local_typeinfer(LcFunc *f) {
     }
     if (o1 >= 0 && ti_reg(sin, o1, nregs) == TI_INT) in->known |= LC_KNOWN_B_INT;
     if (o2 >= 0 && ti_reg(sin, o2, nregs) == TI_INT) in->known |= LC_KNOWN_C_INT;
+    /* float proofs too (codegen uses these only for reg-reg ADD/SUB/MUL float
+       elision; harmless on the other annotated ops, which ignore them). */
+    if (o1 >= 0 && ti_reg(sin, o1, nregs) == TI_FLT) in->known |= LC_KNOWN_B_FLT;
+    if (o2 >= 0 && ti_reg(sin, o2, nregs) == TI_FLT) in->known |= LC_KNOWN_C_FLT;
   }
 
   free(insts); free(idxof); free(st); free(out); free(captured);

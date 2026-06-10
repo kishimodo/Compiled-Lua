@@ -858,6 +858,20 @@ static int lower_arith_fast( LcCodeBuf *Bb, LcInst *in, LcArOp op,
         return 1;
     }
 
+    /* M1 float elision: both operands PROVEN float -> bare SSE op, no tag-check,
+       no helper. has_float gates it to ADD/SUB/MUL (never bitwise). Sound: float
+       arith carries no metamethod, so two proven floats always yield a float. */
+    if ( has_float && ( in->known & LC_KNOWN_B_FLT ) && ( in->known & LC_KNOWN_C_FLT ) ) {
+        if ( !X64Emit_MovsdMemToXmm0( Bb, X64_RDI, Br * 16 ) ) return 0;
+        ok = ( op == LC_AR_ADD ) ? X64Emit_AddsdMemToXmm0( Bb, X64_RDI, Cr * 16 )
+           : ( op == LC_AR_SUB ) ? X64Emit_SubsdMemToXmm0( Bb, X64_RDI, Cr * 16 )
+                                 : X64Emit_MulsdMemToXmm0( Bb, X64_RDI, Cr * 16 );
+        if ( !ok ) return 0;
+        if ( !X64Emit_MovsdXmm0ToMem( Bb, X64_RDI, A * 16 ) ) return 0;
+        if ( !X64Emit_MovImm32ToMem( Bb, X64_RDI, A * 16 + 8, LUA_VNUMFLT ) ) return 0;
+        return 1;
+    }
+
     /* --- float fast path: both operands LUA_VNUMFLT (ADD/SUB/MUL only) --- */
     if ( has_float ) {
         if ( !X64Emit_CmpMem8Imm8( Bb, X64_RDI, Br * 16 + 8, LUA_VNUMFLT ) ) return 0;
