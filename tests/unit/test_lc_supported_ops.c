@@ -19,11 +19,22 @@ int main( void ) {
     /* epsilon-supported program: must pass the gate */
     CHECK( Lc_CheckSupportedOps( ProtoOf( L, "print(\"hello\")" ), err, sizeof err ) == 1 );
 
-    /* arithmetic uses OP_ADD / OP_LOADI: must be rejected */
-    CHECK( Lc_CheckSupportedOps( ProtoOf( L, "local x = 1 + 2; return x" ), err, sizeof err ) == 0 );
+    /* Plan 1 added arithmetic + control flow: these must now be ACCEPTED. */
+    CHECK( Lc_CheckSupportedOps( ProtoOf( L, "local x = 1 + 2; return x" ), err, sizeof err ) == 1 );
+    CHECK( Lc_CheckSupportedOps( ProtoOf( L,
+            "local s=0 for i=1,10 do s=s+i end print(s)" ), err, sizeof err ) == 1 );
+    CHECK( Lc_CheckSupportedOps( ProtoOf( L,
+            "local x=5 if x>3 then print(1) else print(2) end" ), err, sizeof err ) == 1 );
+    CHECK( Lc_CheckSupportedOps( ProtoOf( L,
+            "local a=0xF0 print(a & 1, a | 2, ~a, a << 1)" ), err, sizeof err ) == 1 );
 
-    /* a non-empty error message must have been produced */
+    /* still beyond the current milestone: a table constructor (OP_NEWTABLE /
+       OP_SETLIST) must be REJECTED with a non-empty diagnostic. */
+    CHECK( Lc_CheckSupportedOps( ProtoOf( L, "local t = {1,2,3}; return t" ), err, sizeof err ) == 0 );
     CHECK( err[0] != 0 );
+
+    /* a global WRITE (OP_SETTABUP) is also still unsupported. */
+    CHECK( Lc_CheckSupportedOps( ProtoOf( L, "g = 1" ), err, sizeof err ) == 0 );
 
     lua_close( L );
     TEST_END();

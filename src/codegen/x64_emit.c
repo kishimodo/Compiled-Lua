@@ -200,6 +200,20 @@ int X64Emit_PatchRel32( LcCodeBuf *Buf, size_t PatchOffset, size_t TargetOffset 
     return 1;
 }
 
+int X64Emit_TestEaxEax( LcCodeBuf *Buf )
+{
+    /* 85 C0   TEST eax, eax  (32-bit; ModR/M mod=11 reg=eax rm=eax) */
+    unsigned char Bytes[ 2 ] = { 0x85, 0xC0 };
+    return AppendBytes( Buf, Bytes, 2 );
+}
+
+int X64Emit_CmpEaxImm8( LcCodeBuf *Buf, int8_t Imm )
+{
+    /* 83 F8 ib   CMP eax, imm8  (/7, sign-extended imm8) */
+    unsigned char Bytes[ 3 ] = { 0x83, 0xF8, ( unsigned char )Imm };
+    return AppendBytes( Buf, Bytes, 3 );
+}
+
 int X64Emit_PushReg( LcCodeBuf *Buf, X64_GPR_T Reg )
 {
     /* PUSH r64: 50+r (opt REX.B for high regs).  PUSH defaults to 64-bit

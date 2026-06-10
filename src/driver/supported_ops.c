@@ -7,6 +7,7 @@
 
 static int OpSupported( int op ) {
     switch ( op ) {
+        /* epsilon set */
         case OP_VARARGPREP:
         case OP_GETTABUP:
         case OP_LOADK:
@@ -14,6 +15,38 @@ static int OpSupported( int op ) {
         case OP_RETURN:
         case OP_RETURN0:
         case OP_RETURN1:
+        /* Plan 1: loads */
+        case OP_MOVE:
+        case OP_LOADI:
+        case OP_LOADF:
+        case OP_LOADKX:
+        case OP_LOADFALSE:
+        case OP_LFALSESKIP:
+        case OP_LOADTRUE:
+        case OP_LOADNIL:
+        /* Plan 1: arithmetic */
+        case OP_ADD:  case OP_SUB:  case OP_MUL:  case OP_DIV:
+        case OP_MOD:  case OP_IDIV: case OP_POW:
+        case OP_ADDK: case OP_SUBK: case OP_MULK: case OP_DIVK:
+        case OP_MODK: case OP_IDIVK: case OP_POWK:
+        case OP_ADDI:
+        /* Plan 1: bitwise */
+        case OP_BAND: case OP_BOR:  case OP_BXOR: case OP_SHL: case OP_SHR:
+        case OP_BANDK: case OP_BORK: case OP_BXORK:
+        case OP_SHRI: case OP_SHLI:
+        /* Plan 1: unary / len / concat / self */
+        case OP_UNM:  case OP_BNOT: case OP_NOT:  case OP_LEN: case OP_CONCAT:
+        case OP_SELF:
+        /* Plan 1: metamethod-bin markers + extraarg (codegen no-ops them) */
+        case OP_MMBIN: case OP_MMBINI: case OP_MMBINK:
+        case OP_EXTRAARG:
+        /* Plan 1: control flow */
+        case OP_JMP:
+        case OP_EQ:   case OP_LT:   case OP_LE:
+        case OP_EQK:  case OP_EQI:
+        case OP_LTI:  case OP_LEI:  case OP_GTI:  case OP_GEI:
+        case OP_TEST: case OP_TESTSET:
+        case OP_FORPREP: case OP_FORLOOP:
             return 1;
         default:
             return 0;

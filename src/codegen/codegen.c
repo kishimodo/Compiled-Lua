@@ -16,11 +16,13 @@
 
 #include "lstate.h"        /* lua_State, CallInfo, StkIdRel layout */
 #include "lobject.h"       /* LClosure, Proto, TValue layout (for k recovery) */
+#include "lopcodes.h"      /* OP_* opcodes for the M0 bc_op dispatch */
 
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdint.h>
 
 /* CI offsets — replicated from v1 src/jit/codegen.c (OFFSET_OF_CI / _FUNC).
    .func is a StkIdRel union whose live pointer .p is at offset 0 of the union. */
@@ -148,6 +150,91 @@ int LcCg_EmitHelperCall3( LcCodeBuf *B, const char *Sym,
 }
 
 /* ------------------------------------------------------------------ */
+/* Branch infrastructure — port of v1 BranchCtx, keyed by bc_pc.       */
+/*                                                                      */
+/* M0 lays the function out linearly in bytecode order (no CFG). Each   */
+/* instruction's first emitted byte offset is recorded in PcOff[bc_pc]  */
+/* (parallel Seen[] flags whether it has been emitted yet). Branch ops  */
+/* emit a rel32 placeholder; backward targets (already emitted) patch   */
+/* immediately, forward targets defer onto Fwd[] and resolve after the  */
+/* instruction loop. This mirrors src/jit/codegen.c's BranchCtx exactly */
+/* (only the buffer plumbing differs: Slot->LcCodeBuf, EmitX64_->X64Emit_). */
+/* ------------------------------------------------------------------ */
+typedef struct LcFwdJump {
+    size_t patch_site;   /* offset of the disp32 word inside buf.bytes */
+    int    target_pc;    /* bc_pc the jump lands on                    */
+} LcFwdJump;
+
+typedef struct LcBranchCtx {
+    LcCodeBuf *buf;
+    size_t    *pc_off;   /* PcOff[bc_pc] = code offset (sized sizecode) */
+    uint8_t   *seen;     /* Seen[bc_pc]  = 1 once recorded             */
+    int        sizecode;
+    LcFwdJump *fwd;
+    int        nfwd, capfwd;
+} LcBranchCtx;
+
+/* Record bc_pc -> current code offset (call immediately before lowering). */
+static void LcBr_RecordPc( LcBranchCtx *Br, int Pc, size_t Offset ) {
+    if ( Pc < 0 || Pc >= Br->sizecode ) { return; }
+    /* Only record the FIRST emission for a pc (zero-byte no-ops that follow,
+       e.g. EXTRAARG, must not overwrite the real instruction's offset; but the
+       no-op is emitted at its own pc, so this is moot — kept defensive). */
+    Br->pc_off[ Pc ] = Offset;
+    Br->seen[ Pc ]   = 1;
+}
+
+/* Queue a forward (not-yet-emitted) rel32 patch site. */
+static int LcBr_AddFwd( LcBranchCtx *Br, size_t PatchSite, int TargetPc ) {
+    if ( Br->nfwd >= Br->capfwd ) {
+        int newcap = Br->capfwd ? Br->capfwd * 2 : 32;
+        LcFwdJump *grown = ( LcFwdJump * )realloc( Br->fwd,
+                                                   ( size_t )newcap * sizeof( LcFwdJump ) );
+        if ( !grown ) { return 0; }
+        Br->fwd = grown;
+        Br->capfwd = newcap;
+    }
+    Br->fwd[ Br->nfwd ].patch_site = PatchSite;
+    Br->fwd[ Br->nfwd ].target_pc  = TargetPc;
+    Br->nfwd++;
+    return 1;
+}
+
+/* Emit a rel32 placeholder of the given flavour and route it: backward targets
+   patch now, forward targets defer. `Cc` < 0 => unconditional JMP rel32. */
+static int LcBr_EmitBranch( LcBranchCtx *Br, int Cc, int TargetPc, int Pc ) {
+    size_t site = ( Cc < 0 )
+                ? X64Emit_JmpRel32_Placeholder( Br->buf )
+                : X64Emit_JccRel32_Placeholder( Br->buf, ( unsigned )Cc );
+    if ( site == ( size_t )-1 ) { return 0; }
+    if ( TargetPc < 0 || TargetPc >= Br->sizecode ) { return 0; }
+    if ( TargetPc <= Pc && Br->seen[ TargetPc ] ) {
+        /* backward target already laid out — patch immediately. */
+        return X64Emit_PatchRel32( Br->buf, site, Br->pc_off[ TargetPc ] );
+    }
+    /* forward (or not-yet-seen) target — defer. */
+    return LcBr_AddFwd( Br, site, TargetPc );
+}
+
+/* Resolve every deferred forward patch. Call after the instruction loop and
+   BEFORE taking ownership of the buffer. */
+static int LcBr_Resolve( LcBranchCtx *Br ) {
+    int i;
+    for ( i = 0; i < Br->nfwd; i++ ) {
+        int t = Br->fwd[ i ].target_pc;
+        if ( t < 0 || t >= Br->sizecode || !Br->seen[ t ] ) {
+            fprintf( stderr, "[-] luac: branch target pc %d never emitted\n", t );
+            return 0;
+        }
+        if ( !X64Emit_PatchRel32( Br->buf, Br->fwd[ i ].patch_site, Br->pc_off[ t ] ) ) {
+            fprintf( stderr, "[-] luac: branch to pc %d out of rel32 range\n", t );
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* ------------------------------------------------------------------ */
 /* Per-op lowering — faithful AOT port of v1 src/jit/Lower_* (the      */
 /* memory-form path: M0 keeps every Lua register at [RDI + N*16], so   */
 /* we always use the memory path v1 emits when a register isn't        */
@@ -262,27 +349,329 @@ static int lower_return( LcCodeBuf *B, LcInst *in ) {
     return LcCg_EmitEpilogue( B );
 }
 
+/* ------------------------------------------------------------------ */
+/* Plan 1 — inline loads (no helper). Faithful ports of v1's           */
+/* Lower_Move/LoadI/LoadF/LoadFalse/LoadTrue/LoadNil onto the          */
+/* memory-form path: every Lua register lives at [RDI + N*16] (value), */
+/* tag dword at +8.                                                    */
+/* ------------------------------------------------------------------ */
+
+/* MOVE A B: 16-byte TValue copy [RDI+B*16] -> [RDI+A*16] (value + tag). */
+static int lower_move( LcCodeBuf *B, LcInst *in ) {
+    int A = in->a, Bs = in->b;
+    /* value half via R10 */
+    if ( !X64Emit_MovMemToReg( B, X64_R10, X64_RDI, Bs * 16 ) )       return 0;
+    if ( !X64Emit_MovRegToMem( B, X64_RDI, A * 16, X64_R10 ) )        return 0;
+    /* tag half via R10 */
+    if ( !X64Emit_MovMemToReg( B, X64_R10, X64_RDI, Bs * 16 + 8 ) )   return 0;
+    if ( !X64Emit_MovRegToMem( B, X64_RDI, A * 16 + 8, X64_R10 ) )    return 0;
+    return 1;
+}
+
+/* LOADI A sBx: R[A] = sBx (sign-extended integer), tag LUA_VNUMINT. */
+static int lower_loadi( LcCodeBuf *B, LcInst *in ) {
+    int A = in->a;
+    int64_t v = ( int64_t )in->b;   /* sBx carried in `b` */
+    if ( !X64Emit_MovImm64ToReg( B, X64_RAX, ( uint64_t )v ) )        return 0;
+    if ( !X64Emit_MovRegToMem( B, X64_RDI, A * 16, X64_RAX ) )        return 0;
+    if ( !X64Emit_MovImm32ToMem( B, X64_RDI, A * 16 + 8, LUA_VNUMINT ) ) return 0;
+    return 1;
+}
+
+/* LOADF A sBx: R[A] = (double)sBx (bit pattern), tag LUA_VNUMFLT. */
+static int lower_loadf( LcCodeBuf *B, LcInst *in ) {
+    int A = in->a;
+    double d = ( double )in->b;     /* sBx carried in `b` */
+    uint64_t bits = 0;
+    memcpy( &bits, &d, 8 );
+    if ( !X64Emit_MovImm64ToReg( B, X64_RAX, bits ) )                return 0;
+    if ( !X64Emit_MovRegToMem( B, X64_RDI, A * 16, X64_RAX ) )        return 0;
+    if ( !X64Emit_MovImm32ToMem( B, X64_RDI, A * 16 + 8, LUA_VNUMFLT ) ) return 0;
+    return 1;
+}
+
+/* LOADFALSE A: R[A] = false (value 0, tag LUA_VFALSE). */
+static int lower_loadfalse( LcCodeBuf *B, LcInst *in ) {
+    int A = in->a;
+    if ( !X64Emit_MovImm64ToReg( B, X64_RAX, 0 ) )                   return 0;
+    if ( !X64Emit_MovRegToMem( B, X64_RDI, A * 16, X64_RAX ) )        return 0;
+    if ( !X64Emit_MovImm32ToMem( B, X64_RDI, A * 16 + 8, LUA_VFALSE ) ) return 0;
+    return 1;
+}
+
+/* LOADTRUE A: R[A] = true (value 0, tag LUA_VTRUE). */
+static int lower_loadtrue( LcCodeBuf *B, LcInst *in ) {
+    int A = in->a;
+    if ( !X64Emit_MovImm64ToReg( B, X64_RAX, 0 ) )                   return 0;
+    if ( !X64Emit_MovRegToMem( B, X64_RDI, A * 16, X64_RAX ) )        return 0;
+    if ( !X64Emit_MovImm32ToMem( B, X64_RDI, A * 16 + 8, LUA_VTRUE ) ) return 0;
+    return 1;
+}
+
+/* LOADNIL A B: R[A..A+B] = nil (tag LUA_VNIL). */
+static int lower_loadnil( LcCodeBuf *B, LcInst *in ) {
+    int A = in->a, n = in->b, i;
+    if ( !X64Emit_MovImm64ToReg( B, X64_RAX, 0 ) )                   return 0;
+    for ( i = 0; i <= n; i++ ) {
+        if ( !X64Emit_MovRegToMem( B, X64_RDI, ( A + i ) * 16, X64_RAX ) )       return 0;
+        if ( !X64Emit_MovImm32ToMem( B, X64_RDI, ( A + i ) * 16 + 8, LUA_VNIL ) ) return 0;
+    }
+    return 1;
+}
+
+/* LFALSESKIP A: R[A] = false; then skip the next instruction (the paired
+   LOADTRUE). M0: write false, then unconditional jump to bc_pc+2. The skipped
+   instruction still gets its own pc->offset entry and emits its own code; we
+   just branch over it. */
+static int lower_lfalseskip( LcBranchCtx *Br, LcInst *in ) {
+    int A = in->a;
+    if ( !X64Emit_MovImm64ToReg( Br->buf, X64_RAX, 0 ) )                   return 0;
+    if ( !X64Emit_MovRegToMem( Br->buf, X64_RDI, A * 16, X64_RAX ) )       return 0;
+    if ( !X64Emit_MovImm32ToMem( Br->buf, X64_RDI, A * 16 + 8, LUA_VFALSE ) ) return 0;
+    /* skip next instruction: unconditional jump to bc_pc + 2 */
+    return LcBr_EmitBranch( Br, -1, in->bc_pc + 2, in->bc_pc );
+}
+
+/* LOADKX A (fused EXTRAARG): R[A] = K[Ax]. Like lower_const but the const index
+   (Ax) is carried in `b` and recovered from the runtime Proto via ci. */
+static int lower_loadkx( LcCodeBuf *B, LcInst *in ) {
+    int A  = in->a;
+    int Ax = in->b;
+    int32_t kdisp = ( int32_t )( Ax * 16 );
+    if ( !X64Emit_MovMemToReg( B, X64_RAX, X64_RBX, LC_OFF_CI ) )       return 0;
+    if ( !X64Emit_MovMemToReg( B, X64_RAX, X64_RAX, LC_OFF_CI_FUNC ) )  return 0;
+    if ( !X64Emit_MovMemToReg( B, X64_RAX, X64_RAX, 0 ) )              return 0;
+    if ( !X64Emit_MovMemToReg( B, X64_RAX, X64_RAX, LC_OFF_LCL_P ) )    return 0;
+    if ( !X64Emit_MovMemToReg( B, X64_RAX, X64_RAX, LC_OFF_PROTO_K ) )  return 0;
+    if ( !X64Emit_MovMemToReg( B, X64_R10, X64_RAX, kdisp ) )           return 0;
+    if ( !X64Emit_MovRegToMem( B, X64_RDI, A * 16, X64_R10 ) )          return 0;
+    if ( !X64Emit_MovMemToReg( B, X64_R10, X64_RAX, kdisp + 8 ) )       return 0;
+    if ( !X64Emit_MovRegToMem( B, X64_RDI, A * 16 + 8, X64_R10 ) )      return 0;
+    return 1;
+}
+
+/* ------------------------------------------------------------------ */
+/* Plan 1 — comparisons + conditional branch.                          */
+/*                                                                      */
+/* M0 protocol: call the complete comparison helper (returns 0/1 in     */
+/* RAX), then branch: `jne` to bc_pc+2 (skip the following JMP) when     */
+/* result != k. The paired JMP lowers independently as an unconditional */
+/* jump to its resolved target.                                         */
+/*                                                                      */
+/* A comparison helper can run __eq/__lt/__le — arbitrary Lua that may   */
+/* relocate the Lua stack — so RDI must be reloaded before the branch    */
+/* (both successors assume the function-wide RDI invariant). But the     */
+/* reload (LcCg_EmitReloadRdiAndCache) CLOBBERS RAX. So, exactly like v1 */
+/* EmitCompareSlowReloadAndBranch: stash the 0/1 result in R11D, reload  */
+/* RDI, then `cmp r11d, k; jne`. R11 is volatile and untouched by the    */
+/* reload sequence.                                                     */
+/* ------------------------------------------------------------------ */
+static int lower_cmp( LcBranchCtx *Br, LcInst *in, const char *Helper ) {
+    LcCodeBuf *B = Br->buf;
+    int A = in->a, Bop = in->b, K = in->c;
+    /* helper(L, A, B) -> RAX = 0/1 (NO reload here — would clobber RAX). */
+    if ( !LcCg_EmitHelperCall3( B, Helper, A, Bop, 0, /*reload*/0 ) ) return 0;
+    /* mov r11d, eax  (41 89 C3) — stash result across the reload */
+    { unsigned char S[ 3 ] = { 0x41, 0x89, 0xC3 };
+      if ( !LcCodeBuf_Append( B, S, 3 ) ) return 0; }
+    /* reload RDI (a comparison metamethod may have relocated the stack). */
+    if ( !LcCg_EmitReloadRdiAndCache( B ) ) return 0;
+    /* cmp r11d, K  (41 83 FB ib) */
+    { unsigned char C[ 4 ] = { 0x41, 0x83, 0xFB, ( unsigned char )( int8_t )K };
+      if ( !LcCodeBuf_Append( B, C, 4 ) ) return 0; }
+    /* jne -> bc_pc+2 (skip the trailing JMP when result != k) */
+    return LcBr_EmitBranch( Br, 0x5 /* JNE */, in->bc_pc + 2, in->bc_pc );
+}
+
+/* ------------------------------------------------------------------ */
+/* Plan 1 — TEST / TESTSET (truthiness branch).                        */
+/*                                                                      */
+/* Truthiness check ported from v1 EmitIsTruthyEax: falsy iff tag is    */
+/* LUA_VNIL or LUA_VFALSE. Result 0/1 in EAX, then `cmp eax,k; jne      */
+/* bc_pc+2`. TESTSET copies R[B]->R[A] on the fall-through (truthy==k). */
+/* The paired JMP lowers independently.                                */
+/* ------------------------------------------------------------------ */
+static int emit_is_truthy_eax( LcCodeBuf *B, int RegSlot ) {
+    /* mov eax, 1 */
+    unsigned char MovEax1[ 5 ] = { 0xB8, 0x01, 0x00, 0x00, 0x00 };
+    if ( !LcCodeBuf_Append( B, MovEax1, 5 ) ) return 0;
+    /* cmp byte [rdi + RegSlot*16 + 8], LUA_VNIL */
+    if ( !X64Emit_CmpMem8Imm8( B, X64_RDI, RegSlot * 16 + 8, LUA_VNIL ) ) return 0;
+    /* je .set_falsy (rel8 placeholder) */
+    unsigned char JeBytes[ 2 ] = { 0x74, 0x00 };
+    if ( !LcCodeBuf_Append( B, JeBytes, 2 ) ) return 0;
+    size_t JeNilPatch = B->used - 1;
+    /* cmp byte [rdi + RegSlot*16 + 8], LUA_VFALSE */
+    if ( !X64Emit_CmpMem8Imm8( B, X64_RDI, RegSlot * 16 + 8, LUA_VFALSE ) ) return 0;
+    /* jne .done (rel8 placeholder) */
+    if ( !X64Emit_JneRel8( B, 0 ) ) return 0;
+    size_t JneFalsePatch = B->used - 1;
+    /* .set_falsy: mov eax, 0 */
+    size_t SetFalsyStart = B->used;
+    unsigned char MovEax0[ 5 ] = { 0xB8, 0x00, 0x00, 0x00, 0x00 };
+    if ( !LcCodeBuf_Append( B, MovEax0, 5 ) ) return 0;
+    /* .done: */
+    size_t DoneOff = B->used;
+    if ( !X64Emit_PatchRel8( B, JeNilPatch,    SetFalsyStart ) ) return 0;
+    if ( !X64Emit_PatchRel8( B, JneFalsePatch, DoneOff       ) ) return 0;
+    return 1;
+}
+
+static int lower_test( LcBranchCtx *Br, LcInst *in ) {
+    int A = in->a, K = in->c;
+    if ( !emit_is_truthy_eax( Br->buf, A ) ) return 0;
+    if ( !X64Emit_CmpEaxImm8( Br->buf, ( int8_t )K ) ) return 0;
+    /* jne -> bc_pc+2 (skip the trailing JMP when truthy != k) */
+    return LcBr_EmitBranch( Br, 0x5 /* JNE */, in->bc_pc + 2, in->bc_pc );
+}
+
+static int lower_testset( LcBranchCtx *Br, LcInst *in ) {
+    int A = in->a, Bs = in->b, K = in->c;
+    LcCodeBuf *B = Br->buf;
+    if ( !emit_is_truthy_eax( B, Bs ) ) return 0;
+    if ( !X64Emit_CmpEaxImm8( B, ( int8_t )K ) ) return 0;
+    /* jne .done — when truthy != k, skip the copy AND skip the trailing JMP
+       (i.e. branch to bc_pc+2). When truthy == k, fall through: copy then let
+       the independent JMP execute. */
+    if ( !LcBr_EmitBranch( Br, 0x5 /* JNE */, in->bc_pc + 2, in->bc_pc ) ) return 0;
+    /* fall-through (truthy == k): copy R[B] -> R[A] (value + tag). */
+    if ( !X64Emit_MovMemToReg( B, X64_R10, X64_RDI, Bs * 16 ) )     return 0;
+    if ( !X64Emit_MovRegToMem( B, X64_RDI, A * 16, X64_R10 ) )      return 0;
+    if ( !X64Emit_MovMemToReg( B, X64_R10, X64_RDI, Bs * 16 + 8 ) ) return 0;
+    if ( !X64Emit_MovRegToMem( B, X64_RDI, A * 16 + 8, X64_R10 ) )  return 0;
+    return 1;
+}
+
+/* ------------------------------------------------------------------ */
+/* Plan 1 — numeric for (FORPREP/FORLOOP).                             */
+/*                                                                      */
+/* Rt_ForPrep(L,A)/Rt_ForLoop(L,A) return a skip/continue flag in RAX.  */
+/* FORPREP: `test eax,eax; jne target` (skip loop body if RAX != 0).    */
+/* FORLOOP: `test eax,eax; jne target` (loop back if RAX != 0).         */
+/* The resolved target pc is carried in in->c by the lift. These        */
+/* helpers do plain arithmetic on stack slots (no metamethod, no        */
+/* allocation), so RDI stays valid — and reload would clobber RAX,      */
+/* which the `test` needs. So: reload_after = 0.                        */
+/* ------------------------------------------------------------------ */
+static int lower_forprep( LcBranchCtx *Br, LcInst *in ) {
+    if ( !LcCg_EmitHelperCall3( Br->buf, "Rt_ForPrep", in->a, 0, 0, /*reload*/0 ) ) return 0;
+    if ( !X64Emit_TestEaxEax( Br->buf ) ) return 0;
+    return LcBr_EmitBranch( Br, 0x5 /* JNE */, in->c, in->bc_pc );
+}
+
+static int lower_forloop( LcBranchCtx *Br, LcInst *in ) {
+    if ( !LcCg_EmitHelperCall3( Br->buf, "Rt_ForLoop", in->a, 0, 0, /*reload*/0 ) ) return 0;
+    if ( !X64Emit_TestEaxEax( Br->buf ) ) return 0;
+    return LcBr_EmitBranch( Br, 0x5 /* JNE */, in->c, in->bc_pc );
+}
+
+/* ------------------------------------------------------------------ */
+/* Plan 1 dispatch on the originating Lua opcode (in->bc_op).          */
+/* ------------------------------------------------------------------ */
+
+/* Helper-backed dynamic ops: emit Helper(L, A, B, C) with optional reload. */
+static int lower_helper3( LcCodeBuf *B, LcInst *in, const char *Sym, int reload ) {
+    return LcCg_EmitHelperCall3( B, Sym, in->a, in->b, in->c, reload );
+}
+
 /*!
  * @brief
- *  Dispatch one IR instruction to its lowering. Unknown ops (not in the
- *  epsilon set) emit nothing and continue — lift.c's catch-all keeps the IR
- *  well-formed, and richer coverage is M1+ work.
+ *  Dispatch one IR instruction to its lowering, keyed on in->bc_op (the exact
+ *  originating Lua opcode). Branch ops use the LcBranchCtx for pc-keyed
+ *  placeholder/patch. Ops outside the Plan-1 set should be rejected by the
+ *  supported-ops gate before reaching here; we treat any unknown op as an
+ *  inert no-op (returns 1) to stay total.
  *
  * @return 1 on success, 0 on emission failure.
  */
-static int lower_inst( LcCodeBuf *B, LcFunc *f, LcInst *in ) {
+static int lower_inst( LcBranchCtx *Br, LcFunc *f, LcInst *in ) {
+    LcCodeBuf *B = Br->buf;
     (void)f;
     /* TODO(LUAC-001): runtime-relative savedpc; deferred — affects only
-       error-traceback line numbers, not stdout. The epsilon program raises
-       no error, so the differential is unaffected. */
-    switch ( in->op ) {
-        case LC_OP_VARARG:      return lower_vararg( B, in );
-        case LC_OP_GLOBAL_GET:  return lower_global_get( B, in );
-        case LC_OP_CONST:       return lower_const( B, in );
-        case LC_OP_CALL:        return lower_call( B, in );
-        case LC_OP_RETURN:      return lower_return( B, in );
+       error-traceback line numbers, not stdout. The Plan-1 battery raises
+       no error inside compiled code, so the differential is unaffected. */
+    switch ( in->bc_op ) {
+        /* --- epsilon set --- */
+        case OP_VARARGPREP:  return lower_vararg( B, in );
+        case OP_GETTABUP:    return lower_global_get( B, in );
+        case OP_LOADK:       return lower_const( B, in );
+        case OP_CALL:        return lower_call( B, in );
+        case OP_RETURN:
+        case OP_RETURN0:
+        case OP_RETURN1:     return lower_return( B, in );
+
+        /* --- inline loads --- */
+        case OP_MOVE:        return lower_move( B, in );
+        case OP_LOADI:       return lower_loadi( B, in );
+        case OP_LOADF:       return lower_loadf( B, in );
+        case OP_LOADKX:      return lower_loadkx( B, in );
+        case OP_LOADFALSE:   return lower_loadfalse( B, in );
+        case OP_LOADTRUE:    return lower_loadtrue( B, in );
+        case OP_LOADNIL:     return lower_loadnil( B, in );
+        case OP_LFALSESKIP:  return lower_lfalseskip( Br, in );
+
+        /* --- arithmetic (complete helpers, call unconditionally) --- */
+        case OP_ADD:   return lower_helper3( B, in, "Rt_AddOp",  1 );
+        case OP_SUB:   return lower_helper3( B, in, "Rt_SubOp",  1 );
+        case OP_MUL:   return lower_helper3( B, in, "Rt_MulOp",  1 );
+        case OP_DIV:   return lower_helper3( B, in, "Rt_DivOp",  1 );
+        case OP_MOD:   return lower_helper3( B, in, "Rt_ModOp",  1 );
+        case OP_IDIV:  return lower_helper3( B, in, "Rt_IDivOp", 1 );
+        case OP_POW:   return lower_helper3( B, in, "Rt_PowOp",  1 );
+        case OP_ADDK:  return lower_helper3( B, in, "Rt_AddKOp",  1 );
+        case OP_SUBK:  return lower_helper3( B, in, "Rt_SubKOp",  1 );
+        case OP_MULK:  return lower_helper3( B, in, "Rt_MulKOp",  1 );
+        case OP_DIVK:  return lower_helper3( B, in, "Rt_DivKOp",  1 );
+        case OP_MODK:  return lower_helper3( B, in, "Rt_ModKOp",  1 );
+        case OP_IDIVK: return lower_helper3( B, in, "Rt_IDivKOp", 1 );
+        case OP_POWK:  return lower_helper3( B, in, "Rt_PowKOp",  1 );
+        case OP_ADDI:  return lower_helper3( B, in, "Rt_AddIOp",  1 );
+
+        /* --- bitwise --- */
+        case OP_BAND:  return lower_helper3( B, in, "Rt_BAndOp", 1 );
+        case OP_BOR:   return lower_helper3( B, in, "Rt_BOrOp",  1 );
+        case OP_BXOR:  return lower_helper3( B, in, "Rt_BXorOp", 1 );
+        case OP_SHL:   return lower_helper3( B, in, "Rt_ShlOp",  1 );
+        case OP_SHR:   return lower_helper3( B, in, "Rt_ShrOp",  1 );
+        case OP_BANDK: return lower_helper3( B, in, "Rt_BAndKOp", 1 );
+        case OP_BORK:  return lower_helper3( B, in, "Rt_BOrKOp",  1 );
+        case OP_BXORK: return lower_helper3( B, in, "Rt_BXorKOp", 1 );
+        case OP_SHRI:  return lower_helper3( B, in, "Rt_ShrIOp",  1 );
+        case OP_SHLI:  return lower_helper3( B, in, "Rt_ShlIOp",  1 );
+
+        /* --- unary / len / concat / self --- */
+        case OP_UNM:    return lower_helper3( B, in, "Rt_UnmOp",  1 );
+        case OP_BNOT:   return lower_helper3( B, in, "Rt_BNotOp", 1 );
+        case OP_NOT:    return lower_helper3( B, in, "Rt_NotOp",  0 );
+        case OP_LEN:    return lower_helper3( B, in, "Rt_Len",    1 );
+        case OP_CONCAT: return lower_helper3( B, in, "Rt_Concat", 1 );
+        case OP_SELF:   return lower_helper3( B, in, "Rt_Self",   1 );
+
+        /* --- metamethod-bin markers + extraarg: no-op (zero bytes) --- */
+        case OP_MMBIN:
+        case OP_MMBINI:
+        case OP_MMBINK:
+        case OP_EXTRAARG:
+            return 1;
+
+        /* --- control flow --- */
+        case OP_JMP:     return LcBr_EmitBranch( Br, -1, in->c, in->bc_pc );
+        case OP_EQ:      return lower_cmp( Br, in, "Rt_EqSlow" );
+        case OP_LT:      return lower_cmp( Br, in, "Rt_LtSlow" );
+        case OP_LE:      return lower_cmp( Br, in, "Rt_LeSlow" );
+        case OP_EQK:     return lower_cmp( Br, in, "Rt_EqKSlow" );
+        case OP_EQI:     return lower_cmp( Br, in, "Rt_EqISlow" );
+        case OP_LTI:     return lower_cmp( Br, in, "Rt_LtISlow" );
+        case OP_LEI:     return lower_cmp( Br, in, "Rt_LeISlow" );
+        case OP_GTI:     return lower_cmp( Br, in, "Rt_GtISlow" );
+        case OP_GEI:     return lower_cmp( Br, in, "Rt_GeISlow" );
+        case OP_TEST:    return lower_test( Br, in );
+        case OP_TESTSET: return lower_testset( Br, in );
+        case OP_FORPREP: return lower_forprep( Br, in );
+        case OP_FORLOOP: return lower_forloop( Br, in );
+
         default:
-            /* TODO(M1+): full opcode coverage. Inert for non-epsilon ops. */
+            /* Unknown op (rejected by the supported-ops gate). Inert. */
             return 1;
     }
 }
@@ -308,13 +697,35 @@ LcCodeModule *lc_codegen(LcModule *m) {
 
     if (!LcCodeBuf_Init(&buf, 256)) { lc_codemodule_free(cm); return NULL; }
 
-    if (!LcCg_EmitPrologue(&buf)) { LcCodeBuf_Free(&buf); lc_codemodule_free(cm); return NULL; }
+    /* Per-function branch context (bc_pc -> code-offset map + deferred rel32
+       patch queue). Sized by the source Proto's instruction count. */
+    int sizecode = (f && f->source) ? f->source->sizecode : 0;
+    LcBranchCtx Br;
+    memset(&Br, 0, sizeof(Br));
+    Br.buf = &buf;
+    Br.sizecode = sizecode;
+    if (sizecode > 0) {
+      Br.pc_off = (size_t *)calloc((size_t)sizecode, sizeof(size_t));
+      Br.seen   = (uint8_t *)calloc((size_t)sizecode, sizeof(uint8_t));
+      if (!Br.pc_off || !Br.seen) {
+        free(Br.pc_off); free(Br.seen);
+        LcCodeBuf_Free(&buf); lc_codemodule_free(cm); return NULL;
+      }
+    }
+
+    if (!LcCg_EmitPrologue(&buf)) {
+      free(Br.pc_off); free(Br.seen); free(Br.fwd);
+      LcCodeBuf_Free(&buf); lc_codemodule_free(cm); return NULL;
+    }
 
     for (uint32_t bi = 0; ok && f && bi < f->nblocks; bi++) {
       LcInst *in;
       for (in = f->blocks[bi]->first; in; in = in->next) {
         if (in->op == LC_OP_RETURN) saw_return = 1;
-        if (!lower_inst(&buf, f, in)) { ok = 0; break; }
+        /* Record this bytecode pc -> current code offset BEFORE lowering, so
+           backward branches and the pc->offset resolution see the right base. */
+        LcBr_RecordPc(&Br, in->bc_pc, buf.used);
+        if (!lower_inst(&Br, f, in)) { ok = 0; break; }
       }
     }
 
@@ -327,6 +738,12 @@ LcCodeModule *lc_codegen(LcModule *m) {
         ok = 0;
       }
     }
+
+    /* Resolve all deferred forward branches now that every pc has an offset.
+       MUST run before we take ownership of buf.bytes. */
+    if (ok && !LcBr_Resolve(&Br)) { ok = 0; }
+
+    free(Br.pc_off); free(Br.seen); free(Br.fwd);
 
     if (!ok) { LcCodeBuf_Free(&buf); lc_codemodule_free(cm); return NULL; }
 

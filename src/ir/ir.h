@@ -178,8 +178,12 @@ struct LcInst {
   uint16_t nargs;
   LcValue  result;    /* this instruction's SSA result                   */
   int      bc_pc;     /* originating bytecode pc (diagnostics/debug info) */
-  int      a, b, c;   /* M0 memory-form: decoded bytecode A/B/C operands  */
-                      /* (Bx in `a`, sBx in `b` for wide ops)             */
+  int      bc_op;     /* originating Lua opcode (OpCode); M0 codegen      */
+                      /* dispatches on this for exact per-op lowering.    */
+  int      a, b, c;   /* M0 memory-form: decoded bytecode A/B/C operands. */
+                      /* For branch ops (JMP/FORPREP/FORLOOP) `c` holds   */
+                      /* the resolved target bc_pc; for comparisons `c`   */
+                      /* holds the k-bit (set by lift.c).                 */
   LcInst  *next, *prev;
 };
 

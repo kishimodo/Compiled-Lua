@@ -145,6 +145,20 @@ int X64Emit_PatchRel32( LcCodeBuf *Buf, size_t PatchOffset, size_t TargetOffset 
 
 /*!
  * @brief
+ *  TEST eax, eax.  Bytes: 85 C0. Sets ZF iff eax == 0; used after a helper that
+ *  returns a 0/1 (or skip/continue) flag in RAX to branch on it.
+ */
+int X64Emit_TestEaxEax( LcCodeBuf *Buf );
+
+/*!
+ * @brief
+ *  CMP eax, imm8.  Bytes: 83 F8 ib (sign-extended imm8). Used to compare a
+ *  comparison helper's 0/1 result against the k-bit.
+ */
+int X64Emit_CmpEaxImm8( LcCodeBuf *Buf, int8_t Imm );
+
+/*!
+ * @brief
  *  PUSH r64, POP r64.
  */
 int X64Emit_PushReg( LcCodeBuf *Buf, X64_GPR_T Reg );
