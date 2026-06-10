@@ -1,0 +1,30 @@
+{
+  "app": ["1.0.0"],
+  "conflictdep": ["1.0.0"],
+  "leaf": ["2.0.0", "1.0.0"],
+  "mfpkg": ["1.0.0"],
+  "mid": ["1.0.0"],
+  "hashes": {
+    "app": {
+      "1.0.0": "4ca749509e836fa60819678eba854591dcc0472912623e3938b2ecc5c70acedf"
+    },
+    "conflictdep": {
+      "1.0.0": "ab94b3fc3872c543c31bd49e53336cedfd6e968c02c6130b653f0d352a3c1b8f"
+    },
+    "leaf": {
+      "2.0.0": "a67719b5832168ac7da877a84165b45b8c77aad0c38e1b75d6a4db427be8e4d3",
+      "1.0.0": "8aaa74c352f4d27103f2f394a5383d898d4323f89dbba708db97633ff9407840"
+    },
+    "mfpkg": {
+      "1.0.0": "b323b621c83496c1b8cf8b3b743f01238f17b9e90c1ef10b0cf5a176ebe7d884"
+    },
+    "mid": {
+      "1.0.0": "920f79f7cef3b3728e054126cb008d24b117e726a9f9778f4cffdaf0ac9038f6"
+    }
+  },
+  "files": {
+    "mfpkg": {
+      "1.0.0": ["helper.lua"]
+    }
+  }
+}
