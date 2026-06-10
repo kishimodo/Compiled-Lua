@@ -36,6 +36,7 @@
 #include "lvm.h"        /* luavm_jit_compile_hook + luavm_jit_compile_t typedef */
 
 #include "jit/dispatch.h"
+#include "runtime/coro.h"   /* fiber-based coroutines so native code can yield */
 
 #include <stdio.h>
 
@@ -71,6 +72,10 @@ int main( int argc, char **argv ) {
         return 1;
     }
     luaL_openlibs( L );                       /* installs print, etc. into _G */
+    Coro_OpenLib( L );                        /* replace stock coroutine with the
+                                                 fiber-based lib (native code can
+                                                 yield across call frames), as v1's
+                                                 RuntimeMain does (runtime_init.c) */
     luavm_jit_compile_hook = AotLookupHook;   /* AOT dispatch (lookup-only)   */
 
     /* Build every Proto + register each luac_fn_* body; returns the entry. */
