@@ -1069,6 +1069,30 @@ standard PE → dispatch-cache registration → differential-green `print("hello
 
 ---
 
+## Known issues from the M0 code review (2026-06-10) — address in the named follow-on
+
+The epsilon slice is differential-green and the review found **no memory-corruption or
+epsilon-path bugs**. These were filed for the follow-on milestones (all moot for epsilon):
+
+- **C1 — FIXED (2026-06-10).** Added `src/driver/supported_ops.c` — `aotc` now hard-errors
+  on any opcode outside the implemented set instead of silently miscompiling. Each follow-on
+  plan extends the `OpSupported` switch as it adds coverage.
+- **C2 (Follow-on 1).** `lift.c` collapses `OP_RETURN/RETURN0/RETURN1` into `LC_OP_RETURN`
+  and `codegen.c` `lower_return` reads `B/C` unconditionally — only correct for `OP_RETURN`.
+  Distinguish the three forms when RETURN coverage lands, **paired with** threading the
+  RETURN `k`-flag (upvalue close) through the IR.
+- **C3 (before non-trivial nesting).** `protoinit_emit.c` `LuacProgram_BuildEntry` calls
+  every `ProtoInit_<i>` at top level *and* each parent recursively builds its `p[]` children
+  → nested children are minted twice (2× `JIT_CACHE_MAX` slots) and the standalone duplicate
+  is an unanchored `Proto*` cache key (dormant GC hazard in the closed world). Build each
+  Proto exactly once.
+- **C4 (polish).** `build/tmp/luac_user_<pid>.o` / `luac_protoinit_<pid>.c` (+ their objs in
+  `pe_link_v2.c`) are never cleaned up; consider unlink-on-exit. ProtoInit/aot_entry objects
+  are compiled without the runtime's `-Os/-g0` hardening flags (layout-safe, but a fragility).
+- **Minors.** `closed_world.c` `"dump"` gate is over-broad (rejects any `.dump` field; misses
+  `s:dump()` via `OP_SELF`) — tighten to the `string` library. Add a 2-function/multi-reloc
+  COFF test before relying on the (correct-by-reading-but-untested) multi-function path in M1.
+
 ## Self-review (run against the spec)
 
 - **Spec coverage:** pipeline (§4) → Tasks 6–17; constants/Proto-without-blob (§5) → Tasks
