@@ -700,6 +700,97 @@ static int lower_helper3( LcCodeBuf *B, LcInst *in, const char *Sym, int reload 
     return LcCg_EmitHelperCall3( B, Sym, in->a, in->b, in->c, reload );
 }
 
+/* -O level, set by lc_codegen from m->opt_level. 0 = faithful boxed baseline;
+   >=1 enables the M1 typed fastpaths below. */
+static int g_lc_opt_level = 0;
+
+typedef enum { LC_AR_ADD, LC_AR_SUB, LC_AR_MUL } LcArOp;
+
+/* rax <op>= [RDI + disp]. ADD via X64Emit_AddMemToReg; SUB (48 2B /r) and MUL
+   (imul, 48 0F AF /r) by raw bytes (reg=RAX=0, rm=RDI=7). Ports v1 EmitArithRax. */
+static int emit_arith_rax_mem( LcCodeBuf *B, LcArOp op, int32_t disp ) {
+    uint8_t b[8]; int n = 0;
+    if ( op == LC_AR_ADD ) return X64Emit_AddMemToReg( B, X64_RAX, X64_RDI, disp );
+    b[n++] = 0x48;                                   /* REX.W */
+    if ( op == LC_AR_SUB ) { b[n++] = 0x2B; }
+    else                   { b[n++] = 0x0F; b[n++] = 0xAF; }  /* imul r64, r/m64 */
+    if ( disp == 0 ) {
+        b[n++] = ( uint8_t )( ( 0 << 6 ) | ( 0 << 3 ) | 7 );
+    } else if ( disp >= -128 && disp <= 127 ) {
+        b[n++] = ( uint8_t )( ( 1 << 6 ) | ( 0 << 3 ) | 7 );
+        b[n++] = ( uint8_t )( int8_t )disp;
+    } else {
+        b[n++] = ( uint8_t )( ( 2 << 6 ) | ( 0 << 3 ) | 7 );
+        b[n++] = ( uint8_t )( disp & 0xFF );
+        b[n++] = ( uint8_t )( ( disp >> 8 ) & 0xFF );
+        b[n++] = ( uint8_t )( ( disp >> 16 ) & 0xFF );
+        b[n++] = ( uint8_t )( ( disp >> 24 ) & 0xFF );
+    }
+    return LcCodeBuf_Append( B, b, ( size_t )n );
+}
+
+/*!
+ * @brief
+ *  M1 (-O1+): runtime-checked int/float arithmetic fastpath for ADD/SUB/MUL,
+ *  with the complete Rt_*Op helper as the fallback. ALWAYS correct — it
+ *  dynamically dispatches on the operand tags, so only genuine int+int or
+ *  float+float take the inline path (which replicates 5.4 wrapping/IEEE
+ *  semantics exactly); mixed/string/table operands fall to the helper
+ *  (luaO_arith). This is a pure speedup over the always-boxed M0 path, with no
+ *  static type proof required. Ports v1 EmitBinArith (memory-form: M0 keeps
+ *  every Lua register at [RDI+N*16], no RegAlloc cache). a/b/c = A/B/C regs.
+ */
+static int lower_arith_fast( LcCodeBuf *Bb, LcInst *in, LcArOp op,
+                             const char *slow_sym ) {
+    int    A = in->a, Br = in->b, Cr = in->c;
+    size_t jne_fB, jne_fC, jmp_df, jne_iB, jne_iC, jmp_di, int_check, slow, done;
+    int    ok;
+
+    /* --- float fast path: both operands LUA_VNUMFLT --- */
+    if ( !X64Emit_CmpMem8Imm8( Bb, X64_RDI, Br * 16 + 8, LUA_VNUMFLT ) ) return 0;
+    if ( !X64Emit_JneRel8( Bb, 0 ) ) return 0; jne_fB = Bb->used - 1;
+    if ( !X64Emit_CmpMem8Imm8( Bb, X64_RDI, Cr * 16 + 8, LUA_VNUMFLT ) ) return 0;
+    if ( !X64Emit_JneRel8( Bb, 0 ) ) return 0; jne_fC = Bb->used - 1;
+    if ( !X64Emit_MovsdMemToXmm0( Bb, X64_RDI, Br * 16 ) ) return 0;
+    ok = ( op == LC_AR_ADD ) ? X64Emit_AddsdMemToXmm0( Bb, X64_RDI, Cr * 16 )
+       : ( op == LC_AR_SUB ) ? X64Emit_SubsdMemToXmm0( Bb, X64_RDI, Cr * 16 )
+                             : X64Emit_MulsdMemToXmm0( Bb, X64_RDI, Cr * 16 );
+    if ( !ok ) return 0;
+    if ( !X64Emit_MovsdXmm0ToMem( Bb, X64_RDI, A * 16 ) ) return 0;
+    if ( !X64Emit_MovImm32ToMem( Bb, X64_RDI, A * 16 + 8, LUA_VNUMFLT ) ) return 0;
+    jmp_df = X64Emit_JmpRel32_Placeholder( Bb );
+    if ( jmp_df == ( size_t )-1 ) return 0;
+
+    /* int_check: float JNEs land here */
+    int_check = Bb->used;
+    if ( !X64Emit_PatchRel8( Bb, jne_fB, int_check ) ) return 0;
+    if ( !X64Emit_PatchRel8( Bb, jne_fC, int_check ) ) return 0;
+
+    /* --- int fast path: both operands LUA_VNUMINT --- */
+    if ( !X64Emit_CmpMem8Imm8( Bb, X64_RDI, Br * 16 + 8, LUA_VNUMINT ) ) return 0;
+    if ( !X64Emit_JneRel8( Bb, 0 ) ) return 0; jne_iB = Bb->used - 1;
+    if ( !X64Emit_CmpMem8Imm8( Bb, X64_RDI, Cr * 16 + 8, LUA_VNUMINT ) ) return 0;
+    if ( !X64Emit_JneRel8( Bb, 0 ) ) return 0; jne_iC = Bb->used - 1;
+    if ( !X64Emit_MovMemToReg( Bb, X64_RAX, X64_RDI, Br * 16 ) ) return 0;
+    if ( !emit_arith_rax_mem( Bb, op, Cr * 16 ) ) return 0;
+    if ( !X64Emit_MovRegToMem( Bb, X64_RDI, A * 16, X64_RAX ) ) return 0;
+    if ( !X64Emit_MovImm32ToMem( Bb, X64_RDI, A * 16 + 8, LUA_VNUMINT ) ) return 0;
+    jmp_di = X64Emit_JmpRel32_Placeholder( Bb );
+    if ( jmp_di == ( size_t )-1 ) return 0;
+
+    /* slow: int JNEs land here -> the complete helper (handles mixed/string/TM) */
+    slow = Bb->used;
+    if ( !X64Emit_PatchRel8( Bb, jne_iB, slow ) ) return 0;
+    if ( !X64Emit_PatchRel8( Bb, jne_iC, slow ) ) return 0;
+    if ( !LcCg_EmitHelperCall3( Bb, slow_sym, A, Br, Cr, /*reload*/1 ) ) return 0;
+
+    /* done: both JMPs land here */
+    done = Bb->used;
+    if ( !X64Emit_PatchRel32( Bb, jmp_df, done ) ) return 0;
+    if ( !X64Emit_PatchRel32( Bb, jmp_di, done ) ) return 0;
+    return 1;
+}
+
 /*!
  * @brief
  *  Dispatch one IR instruction to its lowering, keyed on in->bc_op (the exact
@@ -771,9 +862,15 @@ static int lower_inst( LcBranchCtx *Br, LcFunc *f, LcInst *in ) {
         case OP_LFALSESKIP:  return lower_lfalseskip( Br, in );
 
         /* --- arithmetic (complete helpers, call unconditionally) --- */
-        case OP_ADD:   return lower_helper3( B, in, "Rt_AddOp",  1 );
-        case OP_SUB:   return lower_helper3( B, in, "Rt_SubOp",  1 );
-        case OP_MUL:   return lower_helper3( B, in, "Rt_MulOp",  1 );
+        case OP_ADD:   return ( g_lc_opt_level >= 1 )
+                           ? lower_arith_fast( B, in, LC_AR_ADD, "Rt_AddOp" )
+                           : lower_helper3( B, in, "Rt_AddOp", 1 );
+        case OP_SUB:   return ( g_lc_opt_level >= 1 )
+                           ? lower_arith_fast( B, in, LC_AR_SUB, "Rt_SubOp" )
+                           : lower_helper3( B, in, "Rt_SubOp", 1 );
+        case OP_MUL:   return ( g_lc_opt_level >= 1 )
+                           ? lower_arith_fast( B, in, LC_AR_MUL, "Rt_MulOp" )
+                           : lower_helper3( B, in, "Rt_MulOp", 1 );
         case OP_DIV:   return lower_helper3( B, in, "Rt_DivOp",  1 );
         case OP_MOD:   return lower_helper3( B, in, "Rt_ModOp",  1 );
         case OP_IDIV:  return lower_helper3( B, in, "Rt_IDivOp", 1 );
@@ -874,6 +971,7 @@ static int lower_inst( LcBranchCtx *Br, LcFunc *f, LcInst *in ) {
 
 LcCodeModule *lc_codegen(LcModule *m) {
   if (!m) return NULL;
+  g_lc_opt_level = m->opt_level;   /* -O1+ enables the M1 arith fastpaths */
   LcCodeModule *cm = (LcCodeModule *)calloc(1, sizeof(LcCodeModule));
   if (!cm) return NULL;
   cm->nfuncs = m->nfuncs;

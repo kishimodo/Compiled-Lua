@@ -227,6 +227,9 @@ struct LcModule {
   ** callees are recorded as a sentinel so passes treat them as barriers. */
   uint32_t **callees;
   uint32_t  *ncallees;
+  int        opt_level;        /* -O level (driver sets it); codegen uses it */
+                               /* to choose M1 typed fastpaths over boxed     */
+                               /* helpers. 0 = faithful boxed baseline.       */
 };
 
 /* ------------------------------------------------------------------ */

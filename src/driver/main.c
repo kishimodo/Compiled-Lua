@@ -209,6 +209,7 @@ int lc_drive( const LcDriverOptions *opt ) {
         fprintf( stderr, "aotc: error: lifting failed\n" );
         goto cleanup;
     }
+    m->opt_level = opt->opt_level;   /* codegen picks M1 fastpaths at -O1+ */
 
     /* Tag each REQUIRED module's main-chunk LcFunc with its require-name so the
     ** ProtoInit emitter registers it in package.preload at startup (the entry,
