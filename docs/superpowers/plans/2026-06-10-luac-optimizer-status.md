@@ -68,29 +68,47 @@ called the per-opcode helper that hardcodes the wrong TM, so a metatable'd `a<<K
 (compiled to `SHRI a,a,-K`) dispatched `__shr` and errored — fixed by routing to
 `Rt_ShiftI`, which reads the trailing `MMBINI`.
 
-## Remaining — designed, sound-conservative, not yet built
+## Completed since (2026-06-10, the "final wave" — all differential-green + attack-validated)
 
-### Rest of M1 (per-function, incremental)
-- **Float-K / immediate arm** for ADDK/SUBK/MULK with float constants (load the
-  `k[]` double, `addsd`): would speed up the common `x + 1.5` float loop, which
-  currently folds to ADDK → boxed helper.
-- **FLT compare elision** (`ucomisd` + correct unordered/NaN flag handling): lower
-  value, real NaN subtlety — deferred behind the cheaper wins.
-- **Register-residency unboxing** (`lc_pass_unbox_locals`): keep a proven scalar
-  in a GPR/XMM across a region instead of re-loading/-storing the TValue slot each
-  op, re-boxing only at slot stores / escapes. The type proof above is the
-  prerequisite; this is the next real speed lever (removes the memory traffic the
-  current elision still pays). Wants SSA (below) to be clean.
-- `lc_pass_raw_table` (TABLE_GET/SET → RAW when no reachable metatable — needs the
-  metatable-reachability proof), `lc_pass_devirt_local`, `lc_pass_inline_small`.
-  Note: table *get/set* already match v1 — the fast path lives inside the
-  `Rt_GetI`/`Rt_GetField` C helpers (`luaV_fastgeti`), which codegen already calls;
-  there is no codegen-level table win to take over v1 here.
+- **Inline integer FORLOOP** (`851682e`) → **bare integer FORLOOP** (`8de3a4f`):
+  the integer-loop proof (index+step INT; count integral by FORPREP semantics, so
+  unknown limits qualify) drops the per-iteration helper call, then the step
+  tag-check and float arm entirely. ~6.5× alone.
+- **Float-K arm** (`e29f78d`): ADDK/SUBK/MULK/DIVK with proven-FLT R[B] + any
+  numeric K → bare SSE with compile-time K bits; reg-reg DIV FLT÷FLT → divsd.
+  Plus the **ADDI float arm** (`8de3a4f`): `f + 1` / `f - 1` (sC-range ints are
+  ADDI, not ADDK) → addsd of the possibly-negated imm, exact `-0.0 - 0` identity.
+- **FLT compare elision** (`d57920b`): both-proven-float compares → bare ucomisd
+  (CF-based conditions are false-on-NaN for free; EQ requires ZF&&!PF); imm forms
+  convert the statically-int immediate at compile time. Float while-loop 4.5×.
+- **Loop-region register residency** (`8de3a4f`): up to five proven-int slots
+  live in the prologue-reserved cache registers R12–R15/RSI across qualified
+  innermost FORLOOP regions (every body op frame-blind/fully-elided; fills once
+  at entry before the back-edge label, spills value+INT-tag once at the
+  fall-through exit; zero-trip skips both; no helper can run inside, so the
+  stale frame is never observable). Tight int loop **9.3×** (~2 cycles/iter),
+  branchy int kernel **7.1×**. This achieved the unboxing win on the memory-form
+  IR — no SSA needed for the loop-region scope.
 
-### Prereq for the deeper passes — SSA (`lc_pass_mem2reg`)
-Deferred at M0 (decision M0-A: the boxed baseline gains nothing from SSA). It is
-the foundation for register-residency unboxing, escape analysis, and
-interprocedural propagation. The IR (`ir.h`) is already SSA-shaped.
+## Remaining — designed, sound-conservative, not built (honest valuations)
+
+### Residency follow-ups (build only if a real workload demands them)
+- **Spill-around observation points**: allow helper-calling ops inside residency
+  regions by spilling residents before / refilling after each one. Extends
+  residency to loops with table writes or calls; costs spill traffic exactly
+  where the loop is already paying a helper call, so the marginal win is small.
+- **XMM residency for floats**: xmm6+ are callee-saved on Win64 but the prologue
+  doesn't save them — needs prologue + unwind-info work before float
+  accumulators can live in registers.
+
+### `lc_pass_raw_table`, `lc_pass_devirt_local`, `lc_pass_inline_small`
+Table get/set already match v1 (the fast path lives inside `Rt_GetI`/
+`Rt_GetField` via `luaV_fastgeti`); there is no codegen-level table win here.
+
+### SSA (`lc_pass_mem2reg`)
+No longer blocks residency (done region-scoped without it). Still the
+foundation for *general* (cross-region, cross-call) residency and the
+interprocedural passes — build it when M2 is actually wanted.
 
 ### M2 (whole-program / interprocedural) — SSA-gated, lower marginal value here
 `lc_build_callgraph`, `lc_pass_ip_typeprop`, `lc_pass_monomorphize`,
