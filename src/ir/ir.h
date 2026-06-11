@@ -203,6 +203,11 @@ struct LcInst {
                       /* retag corrupts it (found by attack round 8).        */
   uint64_t res_entry_flt; /* OP_FORLOOP only: same mask for proven-FLOAT     */
                       /* slots -- the entry gate for XMM float residency.    */
+  int8_t   call_ret_ti;   /* OP_CALL only (M2 ip_typeprop): the statically-   */
+                      /* identified callee's proven single-value return type  */
+                      /* (TI_INT/TI_FLT), or 0. Consumed by ti_transfer when  */
+                      /* the call takes exactly one result (C == 2): the      */
+                      /* result register inherits the proof instead of UNK.   */
   LcInst  *next, *prev;
 };
 
