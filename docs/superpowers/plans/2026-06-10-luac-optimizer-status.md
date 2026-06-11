@@ -103,15 +103,35 @@ called the per-opcode helper that hardcodes the wrong TM, so a metatable'd `a<<K
   floor).** Lesson recorded: validate that an optimization ENGAGES (not just
   that outputs match) — a too-strict guard fails silently toward correctness.
 
-## Remaining — designed, sound-conservative, not built (honest valuations)
+- **Spill-around observation points** (`cb6cf40`, 2026-06-11): helper ops
+  (table get/set, calls, NEWTABLE, SELF, CONCAT, non-elided arith/compares,
+  even RETURN out of the loop) are admissible inside residency regions as
+  observation points — all residents spill (value+tag) right before the op
+  and are NOT refilled (helpers can observe but never mutate a non-captured
+  local's value; their frame write-sets are dirtied out of candidacy). Pure
+  stores write no frame slots, so `t[i] = v` loops keep full residency.
+  Table-store loop 711→475ms; cold-helper-path loop 330→92ms.
+- **M2 interprocedural type propagation** (`acee003`, 2026-06-11):
+  scope-aware once-assigned closure tracking (slot reuse handled; backward-
+  edge and capture guards), parameter-type meets over enumerated call sites,
+  reachability-filtered single-value return summaries, three-phase inference.
+  CALL results of tracked helpers are proven int/float at single-result call
+  sites, extending elision and residency across helper calls.
+  `LC_IP_DEBUG=1` prints engagement — sites found / summaries applied.
 
-### Residency follow-up (build only if a real workload demands it)
-- **Spill-around observation points**: allow helper-calling ops inside residency
-  regions by spilling residents before / refilling after each one. Extends
-  residency to loops with table writes or calls; costs spill traffic exactly
-  where the loop is already paying a helper call, so the marginal win is small —
-  and the float-residency result above suggests measuring a real workload
-  before building it.
+## Remaining — honest valuations after building the above
+
+### M3
+- **Barrier elide: NO SURFACE in this architecture.** Codegen never emits GC
+  write barriers — they live inside the `Rt_*` C helpers (`luaC_barrierback`
+  in lvm/ltable code paths). There is nothing at codegen level to elide;
+  the pass as specced is vacuous here. Recorded so it isn't re-planned.
+- **Escape analysis → scalar replacement**: the feasible slice is narrow and
+  large to build — non-escaping, constant-keyed, metatable-free NEWTABLE
+  locals rewritten into scalar slots (requires IR rewriting, maxstacksize
+  growth, and new soundness surface). Table field access already runs the
+  `luaV_fastget` C fast path. Build only against a concrete workload where
+  table-as-struct dominates a hot loop; it is its own plan-sized effort.
 
 ### `lc_pass_raw_table`, `lc_pass_devirt_local`, `lc_pass_inline_small`
 Table get/set already match v1 (the fast path lives inside `Rt_GetI`/
