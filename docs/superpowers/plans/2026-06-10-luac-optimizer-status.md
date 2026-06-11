@@ -94,11 +94,14 @@ called the per-opcode helper that hardcodes the wrong TM, so a metatable'd `a<<K
   xmm6–xmm10 across qualified regions (prologue/epilogue save the 128-bit
   callee-saved registers only in functions that use float residents; entry-FLT
   gate symmetric with the round-8 INT gate; in-place accumulate peephole).
-  **Honest result: float accumulator loop 6.2× vs -O0 — only ~25% beyond
-  tag-elision alone.** Float loops are bound by addsd LATENCY (the serial FP
-  dependency chain), not the memory traffic that residency removes; the int
-  case (9.3×) had no such floor. Recorded so nobody re-derives this the hard
-  way.
+- **MMBIN whitelist fix** (`942661c`): every arith op's trailing MMBIN*
+  no-op was rejecting its region, so residency had never actually engaged on
+  arithmetic loops — the earlier "float gains only ~25%, addsd-latency-bound"
+  conclusion was an artifact of that rejection and is WITHDRAWN. With the fix:
+  **tight int loop ~510ms (17.3× vs -O0, ~3.7 cycles/iter); float accumulator
+  ~584ms (14× vs -O0, ~1.2ns/iter — now genuinely at the addsd latency
+  floor).** Lesson recorded: validate that an optimization ENGAGES (not just
+  that outputs match) — a too-strict guard fails silently toward correctness.
 
 ## Remaining — designed, sound-conservative, not built (honest valuations)
 
