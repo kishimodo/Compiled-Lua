@@ -564,7 +564,12 @@ static int cmp_setcc( int bc_op, int *is_regreg ) {
     }
 }
 
-static int lower_cmp( LcBranchCtx *Br, LcInst *in, const char *Helper ) {
+/* `harg2` is the value passed as the slow helper's second argument: in->b for
+   the reg-reg/EQK/EQI helpers, or the comparison's own raw instruction word
+   for Rt_OrderISlow (LTI/LEI/GTI/GEI), which needs the sB immediate plus the
+   float-immediate flag in C to type a metamethod operand correctly. The
+   inline fastpath always compares against in->b (the sB immediate). */
+static int lower_cmp( LcBranchCtx *Br, LcInst *in, const char *Helper, int harg2 ) {
     LcCodeBuf *B = Br->buf;
     int A = in->a, Bop = in->b, K = in->c;
     int is_regreg, cc;
@@ -608,7 +613,7 @@ static int lower_cmp( LcBranchCtx *Br, LcInst *in, const char *Helper ) {
         slow = B->used;
         if ( !X64Emit_PatchRel8( B, jneA, slow ) ) return 0;
         if ( is_regreg && !X64Emit_PatchRel8( B, jneB, slow ) ) return 0;
-        if ( !LcCg_EmitHelperCall3( B, Helper, A, Bop, 0, /*reload*/0 ) ) return 0;
+        if ( !LcCg_EmitHelperCall3( B, Helper, A, harg2, 0, /*reload*/0 ) ) return 0;
         { unsigned char S[ 3 ] = { 0x41, 0x89, 0xC3 };           /* mov r11d, eax */
           if ( !LcCodeBuf_Append( B, S, 3 ) ) return 0; }
         if ( !LcCg_EmitReloadRdiAndCache( B ) ) return 0;
@@ -621,7 +626,7 @@ static int lower_cmp( LcBranchCtx *Br, LcInst *in, const char *Helper ) {
     }
 
     /* --- M0 baseline: complete helper -> RAX 0/1, then branch. --- */
-    if ( !LcCg_EmitHelperCall3( B, Helper, A, Bop, 0, /*reload*/0 ) ) return 0;
+    if ( !LcCg_EmitHelperCall3( B, Helper, A, harg2, 0, /*reload*/0 ) ) return 0;
     { unsigned char S[ 3 ] = { 0x41, 0x89, 0xC3 };
       if ( !LcCodeBuf_Append( B, S, 3 ) ) return 0; }
     if ( !LcCg_EmitReloadRdiAndCache( B ) ) return 0;
@@ -980,10 +985,13 @@ static int emit_arith_rax_imm32( LcCodeBuf *B, LcArOp op, int32_t imm ) {
  *  M1 (-O1+): integer fastpath for an op whose second operand is a compile-time
  *  immediate (ADDI / ADDK / SUBK / MULK with an int constant). Checks only R[B]'s
  *  tag (the constant is statically int); inline `rax = R[B] <op> imm`, else the
- *  helper. No float arm — a float R[B] falls to the helper (correct: -> float).
+ *  Rt_ArithIK slow path driven by the trailing MMBINI/MMBINK word `mmw` (which
+ *  carries the true metamethod event + operand order -- e.g. `x - 1` is
+ *  ADDI x,-1 + MMBINI(TM_SUB), and a metatable'd x must get __sub, not __add).
+ *  No float arm — a float R[B] falls to the slow path (correct: -> float).
  */
 static int lower_arith_imm_fast( LcCodeBuf *Bb, LcInst *in, LcArOp op,
-                                 int32_t imm, const char *slow_sym ) {
+                                 int32_t imm, int mmw ) {
     int    A = in->a, Br = in->b;
     size_t jne_iB, jmp_di, slow, done;
 
@@ -1007,10 +1015,24 @@ static int lower_arith_imm_fast( LcCodeBuf *Bb, LcInst *in, LcArOp op,
     if ( jmp_di == ( size_t )-1 ) return 0;
     slow = Bb->used;
     if ( !X64Emit_PatchRel8( Bb, jne_iB, slow ) ) return 0;
-    if ( !LcCg_EmitHelperCall3( Bb, slow_sym, A, Br, in->c, /*reload*/1 ) ) return 0;
+    if ( !LcCg_EmitHelperCall3( Bb, "Rt_ArithIK", A, Br, mmw, /*reload*/1 ) ) return 0;
     done = Bb->used;
     if ( !X64Emit_PatchRel32( Bb, jmp_di, done ) ) return 0;
     return 1;
+}
+
+/* The trailing OP_MMBINI/OP_MMBINK word for an immediate/K arith op at bc_pc
+   (always present: lcode.c finishbinexpval emits it right after the op). */
+static int arith_mm_word( LcFunc *f, LcInst *in ) {
+    return ( int )( unsigned )f->source->code[ in->bc_pc + 1 ];
+}
+
+/* Complete (baseline) lowering for every immediate/K arith op: the Rt_ArithIK
+   helper IS the op -- raw arith for numbers/strings, correct metamethod
+   (event + operand order from the MMBIN* word) otherwise. */
+static int lower_arith_ik( LcCodeBuf *B, LcFunc *f, LcInst *in ) {
+    return LcCg_EmitHelperCall3( B, "Rt_ArithIK", in->a, in->b,
+                                 arith_mm_word( f, in ), /*reload*/1 );
 }
 
 /*!
@@ -1162,37 +1184,37 @@ static int lower_inst( LcBranchCtx *Br, LcFunc *f, LcInst *in ) {
         case OP_IDIV:  return lower_helper3( B, in, "Rt_IDivOp", 1 );
         case OP_POW:   return lower_helper3( B, in, "Rt_PowOp",  1 );
         case OP_ADDI:  return ( g_lc_opt_level >= 1 )
-                           ? lower_arith_imm_fast( B, in, LC_AR_ADD, in->c, "Rt_AddIOp" )
-                           : lower_helper3( B, in, "Rt_AddIOp", 1 );
+                           ? lower_arith_imm_fast( B, in, LC_AR_ADD, in->c, arith_mm_word( f, in ) )
+                           : lower_arith_ik( B, f, in );
         case OP_ADDK:  { int32_t kv; uint64_t kb;
                          if ( g_lc_opt_level >= 1 && ( in->known & LC_KNOWN_B_FLT )
                               && k_flt_bits( f, in->c, &kb ) )
                              return lower_arithk_flt_elide( B, in, 0x58, kb );
                          if ( g_lc_opt_level >= 1 && k_int32( f, in->c, &kv ) )
-                             return lower_arith_imm_fast( B, in, LC_AR_ADD, kv, "Rt_AddKOp" );
-                         return lower_helper3( B, in, "Rt_AddKOp",  1 ); }
+                             return lower_arith_imm_fast( B, in, LC_AR_ADD, kv, arith_mm_word( f, in ) );
+                         return lower_arith_ik( B, f, in ); }
         case OP_SUBK:  { int32_t kv; uint64_t kb;
                          if ( g_lc_opt_level >= 1 && ( in->known & LC_KNOWN_B_FLT )
                               && k_flt_bits( f, in->c, &kb ) )
                              return lower_arithk_flt_elide( B, in, 0x5C, kb );
                          if ( g_lc_opt_level >= 1 && k_int32( f, in->c, &kv ) )
-                             return lower_arith_imm_fast( B, in, LC_AR_SUB, kv, "Rt_SubKOp" );
-                         return lower_helper3( B, in, "Rt_SubKOp",  1 ); }
+                             return lower_arith_imm_fast( B, in, LC_AR_SUB, kv, arith_mm_word( f, in ) );
+                         return lower_arith_ik( B, f, in ); }
         case OP_MULK:  { int32_t kv; uint64_t kb;
                          if ( g_lc_opt_level >= 1 && ( in->known & LC_KNOWN_B_FLT )
                               && k_flt_bits( f, in->c, &kb ) )
                              return lower_arithk_flt_elide( B, in, 0x59, kb );
                          if ( g_lc_opt_level >= 1 && k_int32( f, in->c, &kv ) )
-                             return lower_arith_imm_fast( B, in, LC_AR_MUL, kv, "Rt_MulKOp" );
-                         return lower_helper3( B, in, "Rt_MulKOp",  1 ); }
+                             return lower_arith_imm_fast( B, in, LC_AR_MUL, kv, arith_mm_word( f, in ) );
+                         return lower_arith_ik( B, f, in ); }
         case OP_DIVK:  { uint64_t kb;
                          if ( g_lc_opt_level >= 1 && ( in->known & LC_KNOWN_B_FLT )
                               && k_flt_bits( f, in->c, &kb ) )
                              return lower_arithk_flt_elide( B, in, 0x5E, kb );
-                         return lower_helper3( B, in, "Rt_DivKOp",  1 ); }
-        case OP_MODK:  return lower_helper3( B, in, "Rt_ModKOp",  1 );
-        case OP_IDIVK: return lower_helper3( B, in, "Rt_IDivKOp", 1 );
-        case OP_POWK:  return lower_helper3( B, in, "Rt_PowKOp",  1 );
+                         return lower_arith_ik( B, f, in ); }
+        case OP_MODK:  return lower_arith_ik( B, f, in );
+        case OP_IDIVK: return lower_arith_ik( B, f, in );
+        case OP_POWK:  return lower_arith_ik( B, f, in );
 
         /* --- bitwise: -O1 int fastpath (no float arm — bitwise is integer-only;
            float/non-integral operands fall to the coercing helper). --- */
@@ -1209,16 +1231,16 @@ static int lower_inst( LcBranchCtx *Br, LcFunc *f, LcInst *in ) {
         case OP_SHR:   return lower_helper3( B, in, "Rt_ShrOp",  1 );
         case OP_BANDK: { int32_t kv;
                          if ( g_lc_opt_level >= 1 && k_int32( f, in->c, &kv ) )
-                             return lower_arith_imm_fast( B, in, LC_AR_AND, kv, "Rt_BAndKOp" );
-                         return lower_helper3( B, in, "Rt_BAndKOp", 1 ); }
+                             return lower_arith_imm_fast( B, in, LC_AR_AND, kv, arith_mm_word( f, in ) );
+                         return lower_arith_ik( B, f, in ); }
         case OP_BORK:  { int32_t kv;
                          if ( g_lc_opt_level >= 1 && k_int32( f, in->c, &kv ) )
-                             return lower_arith_imm_fast( B, in, LC_AR_OR, kv, "Rt_BOrKOp" );
-                         return lower_helper3( B, in, "Rt_BOrKOp",  1 ); }
+                             return lower_arith_imm_fast( B, in, LC_AR_OR, kv, arith_mm_word( f, in ) );
+                         return lower_arith_ik( B, f, in ); }
         case OP_BXORK: { int32_t kv;
                          if ( g_lc_opt_level >= 1 && k_int32( f, in->c, &kv ) )
-                             return lower_arith_imm_fast( B, in, LC_AR_XOR, kv, "Rt_BXorKOp" );
-                         return lower_helper3( B, in, "Rt_BXorKOp", 1 ); }
+                             return lower_arith_imm_fast( B, in, LC_AR_XOR, kv, arith_mm_word( f, in ) );
+                         return lower_arith_ik( B, f, in ); }
         case OP_SHRI:
         case OP_SHLI:
             /* a>>K, a<<K (Lua compiles this to SHRI a,a,-K), and K<<a all carry
@@ -1273,15 +1295,24 @@ static int lower_inst( LcBranchCtx *Br, LcFunc *f, LcInst *in ) {
 
         /* --- control flow --- */
         case OP_JMP:     return LcBr_EmitBranch( Br, -1, in->c, in->bc_pc );
-        case OP_EQ:      return lower_cmp( Br, in, "Rt_EqSlow" );
-        case OP_LT:      return lower_cmp( Br, in, "Rt_LtSlow" );
-        case OP_LE:      return lower_cmp( Br, in, "Rt_LeSlow" );
-        case OP_EQK:     return lower_cmp( Br, in, "Rt_EqKSlow" );
-        case OP_EQI:     return lower_cmp( Br, in, "Rt_EqISlow" );
-        case OP_LTI:     return lower_cmp( Br, in, "Rt_LtISlow" );
-        case OP_LEI:     return lower_cmp( Br, in, "Rt_LeISlow" );
-        case OP_GTI:     return lower_cmp( Br, in, "Rt_GtISlow" );
-        case OP_GEI:     return lower_cmp( Br, in, "Rt_GeISlow" );
+        case OP_EQ:      return lower_cmp( Br, in, "Rt_EqSlow", in->b );
+        case OP_LT:      return lower_cmp( Br, in, "Rt_LtSlow", in->b );
+        case OP_LE:      return lower_cmp( Br, in, "Rt_LeSlow", in->b );
+        case OP_EQK:     return lower_cmp( Br, in, "Rt_EqKSlow", in->b );
+        case OP_EQI:     return lower_cmp( Br, in, "Rt_EqISlow", in->b );
+        /* LTI/LEI/GTI/GEI share Rt_OrderISlow, which decodes the raw word
+           (sB + the float-immediate C flag lvm.c's op_orderI passes to a
+           __lt/__le metamethod -- `t < 2.0` must hand the metamethod 2.0,
+           not 2). EQI keeps Rt_EqISlow: lvm.c dispatches no metamethod for
+           a number-vs-non-number equality, so the flag is unobservable. */
+        case OP_LTI:     return lower_cmp( Br, in, "Rt_OrderISlow",
+                                           ( int )( unsigned )f->source->code[ in->bc_pc ] );
+        case OP_LEI:     return lower_cmp( Br, in, "Rt_OrderISlow",
+                                           ( int )( unsigned )f->source->code[ in->bc_pc ] );
+        case OP_GTI:     return lower_cmp( Br, in, "Rt_OrderISlow",
+                                           ( int )( unsigned )f->source->code[ in->bc_pc ] );
+        case OP_GEI:     return lower_cmp( Br, in, "Rt_OrderISlow",
+                                           ( int )( unsigned )f->source->code[ in->bc_pc ] );
         case OP_TEST:    return lower_test( Br, in );
         case OP_TESTSET: return lower_testset( Br, in );
         case OP_FORPREP: return lower_forprep( Br, in );

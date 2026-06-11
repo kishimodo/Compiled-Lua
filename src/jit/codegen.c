@@ -1700,6 +1700,7 @@ static int Lower_Le( PEXEC_MEM_SLOT_T Slot, Proto *P, int Pc, PBRANCH_CTX_T Bran
 
 extern int Rt_EqISlow( lua_State *L, int A, int sB );
 extern int Rt_LtISlow( lua_State *L, int A, int sB );
+extern int Rt_OrderISlow( lua_State *L, int A, int RawIns );
 extern int Rt_LeISlow( lua_State *L, int A, int sB );
 extern int Rt_GtISlow( lua_State *L, int A, int sB );
 extern int Rt_GeISlow( lua_State *L, int A, int sB );
@@ -1740,7 +1741,7 @@ extern int Rt_EqKSlow( lua_State *L, int A, int B );
 static int EmitImmCompareAndBranch( PEXEC_MEM_SLOT_T Slot, Proto *P, int Pc,
                                      PBRANCH_CTX_T Branches, int *ExtraPc,
                                      int A, int B,
-                                     int IsConstPool,
+                                     int IsConstPool, int SlowArg2,
                                      void *SlowHelper, unsigned CcWhenTrue,
                                      int InvertResult ) {
     Instruction Ins = P->code[ Pc ];
@@ -1757,7 +1758,7 @@ static int EmitImmCompareAndBranch( PEXEC_MEM_SLOT_T Slot, Proto *P, int Pc,
     if ( IsConstPool && !ttisinteger( &P->k[ B ] ) ) {
         if ( !EmitRestoreL( Slot ) ) return 0;
         if ( !EmitX64_MovImm64ToReg( Slot, X64_RDX, ( uint64_t )( int64_t )A ) ) return 0;
-        if ( !EmitX64_MovImm64ToReg( Slot, X64_R8,  ( uint64_t )( int64_t )B ) ) return 0;
+        if ( !EmitX64_MovImm64ToReg( Slot, X64_R8,  ( uint64_t )( int64_t )SlowArg2 ) ) return 0;
         if ( !EmitX64_CallAbs( Slot, SlowHelper ) ) return 0;
         /* Rt_EqKSlow may invoke __eq (Lua, can relocate the stack): stash the
            result, reload RDI+cache, THEN test and branch -- so both the taken
@@ -1850,7 +1851,7 @@ static int EmitImmCompareAndBranch( PEXEC_MEM_SLOT_T Slot, Proto *P, int Pc,
     if ( !EmitX64_PatchRel8( Slot, JneSlowPatch, SlowStart ) ) return 0;
     if ( !EmitRestoreL( Slot ) ) return 0;
     if ( !EmitX64_MovImm64ToReg( Slot, X64_RDX, ( uint64_t )( int64_t )A ) ) return 0;
-    if ( !EmitX64_MovImm64ToReg( Slot, X64_R8,  ( uint64_t )( int64_t )B ) ) return 0;
+    if ( !EmitX64_MovImm64ToReg( Slot, X64_R8,  ( uint64_t )( int64_t )SlowArg2 ) ) return 0;
     if ( !EmitX64_CallAbs( Slot, SlowHelper ) ) return 0;
 
     /* The slow helper (Rt_*ISlow/Rt_EqKSlow) calls luaV_equalobj/lessthan/
@@ -1871,7 +1872,7 @@ static int Lower_Eqi( PEXEC_MEM_SLOT_T Slot, Proto *P, int Pc, PBRANCH_CTX_T Bra
     int A  = GETARG_A( Ins );
     int sB = GETARG_sB( Ins );
     /* equality: JE (0x4), no invert */
-    return EmitImmCompareAndBranch( Slot, P, Pc, Branches, ExtraPc, A, sB, 0,
+    return EmitImmCompareAndBranch( Slot, P, Pc, Branches, ExtraPc, A, sB, 0, sB,
                                      ( void * )Rt_EqISlow, 0x4, 0 );
 }
 
@@ -1880,8 +1881,12 @@ static int Lower_Lti( PEXEC_MEM_SLOT_T Slot, Proto *P, int Pc, PBRANCH_CTX_T Bra
     int A  = GETARG_A( Ins );
     int sB = GETARG_sB( Ins );
     /* CMP R[A]-sB; R[A] < sB -> JL (0xC) */
+    /* slow path: Rt_OrderISlow decodes the raw word (sB + the float-immediate
+       C flag + the opcode's swap), so an __lt/__le metamethod sees the operand
+       exactly as lvm.c op_orderI passes it. */
     return EmitImmCompareAndBranch( Slot, P, Pc, Branches, ExtraPc, A, sB, 0,
-                                     ( void * )Rt_LtISlow, 0xC, 0 );
+                                     ( int )P->code[ Pc ],
+                                     ( void * )Rt_OrderISlow, 0xC, 0 );
 }
 
 static int Lower_Lei( PEXEC_MEM_SLOT_T Slot, Proto *P, int Pc, PBRANCH_CTX_T Branches, int *ExtraPc ) {
@@ -1889,8 +1894,12 @@ static int Lower_Lei( PEXEC_MEM_SLOT_T Slot, Proto *P, int Pc, PBRANCH_CTX_T Bra
     int A  = GETARG_A( Ins );
     int sB = GETARG_sB( Ins );
     /* CMP R[A]-sB; R[A] <= sB -> JLE (0xE) */
+    /* slow path: Rt_OrderISlow decodes the raw word (sB + the float-immediate
+       C flag + the opcode's swap), so an __lt/__le metamethod sees the operand
+       exactly as lvm.c op_orderI passes it. */
     return EmitImmCompareAndBranch( Slot, P, Pc, Branches, ExtraPc, A, sB, 0,
-                                     ( void * )Rt_LeISlow, 0xE, 0 );
+                                     ( int )P->code[ Pc ],
+                                     ( void * )Rt_OrderISlow, 0xE, 0 );
 }
 
 static int Lower_Gti( PEXEC_MEM_SLOT_T Slot, Proto *P, int Pc, PBRANCH_CTX_T Branches, int *ExtraPc ) {
@@ -1899,8 +1908,12 @@ static int Lower_Gti( PEXEC_MEM_SLOT_T Slot, Proto *P, int Pc, PBRANCH_CTX_T Bra
     int sB = GETARG_sB( Ins );
     /* R[A] > sB == sB < R[A]: swap operands (Rt_GtISlow), NOT !(R[A] <= sB),
        which is wrong for NaN. Fast int path JG (0xF); no result inversion. */
+    /* slow path: Rt_OrderISlow decodes the raw word (sB + the float-immediate
+       C flag + the opcode's swap), so an __lt/__le metamethod sees the operand
+       exactly as lvm.c op_orderI passes it. */
     return EmitImmCompareAndBranch( Slot, P, Pc, Branches, ExtraPc, A, sB, 0,
-                                     ( void * )Rt_GtISlow, 0xF, 0 );
+                                     ( int )P->code[ Pc ],
+                                     ( void * )Rt_OrderISlow, 0xF, 0 );
 }
 
 static int Lower_Gei( PEXEC_MEM_SLOT_T Slot, Proto *P, int Pc, PBRANCH_CTX_T Branches, int *ExtraPc ) {
@@ -1909,15 +1922,19 @@ static int Lower_Gei( PEXEC_MEM_SLOT_T Slot, Proto *P, int Pc, PBRANCH_CTX_T Bra
     int sB = GETARG_sB( Ins );
     /* R[A] >= sB == sB <= R[A]: swap operands (Rt_GeISlow), NOT !(R[A] < sB),
        which is wrong for NaN. Fast int path JGE (0xD); no result inversion. */
+    /* slow path: Rt_OrderISlow decodes the raw word (sB + the float-immediate
+       C flag + the opcode's swap), so an __lt/__le metamethod sees the operand
+       exactly as lvm.c op_orderI passes it. */
     return EmitImmCompareAndBranch( Slot, P, Pc, Branches, ExtraPc, A, sB, 0,
-                                     ( void * )Rt_GeISlow, 0xD, 0 );
+                                     ( int )P->code[ Pc ],
+                                     ( void * )Rt_OrderISlow, 0xD, 0 );
 }
 
 static int Lower_Eqk( PEXEC_MEM_SLOT_T Slot, Proto *P, int Pc, PBRANCH_CTX_T Branches, int *ExtraPc ) {
     Instruction Ins = P->code[ Pc ];
     int A = GETARG_A( Ins );
     int B = GETARG_B( Ins );
-    return EmitImmCompareAndBranch( Slot, P, Pc, Branches, ExtraPc, A, B, 1,
+    return EmitImmCompareAndBranch( Slot, P, Pc, Branches, ExtraPc, A, B, 1, B,
                                      ( void * )Rt_EqKSlow, 0x4, 0 );
 }
 
@@ -2687,94 +2704,74 @@ extern int Rt_BXorKOp( lua_State *L, int A, int B, int C );
 extern int Rt_ShrIOp ( lua_State *L, int A, int B, int sC );
 extern int Rt_ShlIOp ( lua_State *L, int A, int B, int sC );
 extern int Rt_AddIOp ( lua_State *L, int A, int B, int sC );
+extern int Rt_ArithIK( lua_State *L, int A, int B, int MmIns );
 
-static int Lower_AddI( PEXEC_MEM_SLOT_T Slot, Proto *P, int Pc ) {
+/* Shared immediate/K arith lowering driven by the trailing OP_MMBINI/OP_MMBINK
+   word: Rt_ArithIK reads the TRUE metamethod event, original operand, and
+   operand order from it, so `x - 1` (ADDI x,-1 + MMBINI TM_SUB) dispatches
+   __sub(x, 1) -- not __add(x, -1) -- and flipped commutative forms (`1 + x`,
+   `2 * x`, `K & x`) hand the metamethod (K, x). The MMBIN* always follows
+   (lcode.c finishbinexpval); if it somehow doesn't, fall back to the old
+   per-opcode helper (only the raw numeric path can then occur). */
+static int Lower_ArithIK( PEXEC_MEM_SLOT_T Slot, Proto *P, int Pc,
+                          int ArgC, void *Fallback ) {
     Instruction Ins = P->code[ Pc ];
     int         A   = GETARG_A( Ins );
-    /* OP_ADDI uses sC (signed) for the immediate. */
-    if ( !EmitCall3ArgHelper( Slot, A, GETARG_B( Ins ), GETARG_sC( Ins ),
-                              ( void * )Rt_AddIOp ) ) return 0;
-    /* resync RDI + cache regs — Rt_AddIOp luaO_arith path may call a metamethod (Lua fn) and grow the stack */
+    int         B   = GETARG_B( Ins );
+    OpCode      Nx;
+    if ( Pc + 1 < P->sizecode
+         && ( ( Nx = GET_OPCODE( P->code[ Pc + 1 ] ) ) == OP_MMBINI
+              || Nx == OP_MMBINK ) ) {
+        if ( !EmitCall3ArgHelper( Slot, A, B, ( int )P->code[ Pc + 1 ],
+                                  ( void * )Rt_ArithIK ) ) return 0;
+    } else {
+        if ( !EmitCall3ArgHelper( Slot, A, B, ArgC, Fallback ) ) return 0;
+    }
+    /* resync RDI + cache regs -- the metamethod path may call a Lua fn and
+       grow the stack */
     if ( !EmitReloadRdiAndCache( Slot ) ) return 0;
     ClearKnownFfi( A );
     return 1;
+}
+
+static int Lower_AddI( PEXEC_MEM_SLOT_T Slot, Proto *P, int Pc ) {
+    Instruction Ins = P->code[ Pc ];
+    return Lower_ArithIK( Slot, P, Pc, GETARG_sC( Ins ), ( void * )Rt_AddIOp );
 }
 
 static int Lower_AddK( PEXEC_MEM_SLOT_T Slot, Proto *P, int Pc ) {
     Instruction Ins = P->code[ Pc ];
-    int         A   = GETARG_A( Ins );
-    if ( !EmitCall3ArgHelper( Slot, A, GETARG_B( Ins ), GETARG_C( Ins ),
-                              ( void * )Rt_AddKOp ) ) return 0;
-    /* resync RDI + cache regs — Rt_AddKOp luaO_arith path may call a metamethod (Lua fn) and grow the stack */
-    if ( !EmitReloadRdiAndCache( Slot ) ) return 0;
-    ClearKnownFfi( A );
-    return 1;
+    return Lower_ArithIK( Slot, P, Pc, GETARG_C( Ins ), ( void * )Rt_AddKOp );
 }
 
 static int Lower_SubK( PEXEC_MEM_SLOT_T Slot, Proto *P, int Pc ) {
     Instruction Ins = P->code[ Pc ];
-    int         A   = GETARG_A( Ins );
-    if ( !EmitCall3ArgHelper( Slot, A, GETARG_B( Ins ), GETARG_C( Ins ),
-                              ( void * )Rt_SubKOp ) ) return 0;
-    /* resync RDI + cache regs — Rt_SubKOp luaO_arith path may call a metamethod (Lua fn) and grow the stack */
-    if ( !EmitReloadRdiAndCache( Slot ) ) return 0;
-    ClearKnownFfi( A );
-    return 1;
+    return Lower_ArithIK( Slot, P, Pc, GETARG_C( Ins ), ( void * )Rt_SubKOp );
 }
 
 static int Lower_MulK( PEXEC_MEM_SLOT_T Slot, Proto *P, int Pc ) {
     Instruction Ins = P->code[ Pc ];
-    int         A   = GETARG_A( Ins );
-    if ( !EmitCall3ArgHelper( Slot, A, GETARG_B( Ins ), GETARG_C( Ins ),
-                              ( void * )Rt_MulKOp ) ) return 0;
-    /* resync RDI + cache regs — Rt_MulKOp luaO_arith path may call a metamethod (Lua fn) and grow the stack */
-    if ( !EmitReloadRdiAndCache( Slot ) ) return 0;
-    ClearKnownFfi( A );
-    return 1;
+    return Lower_ArithIK( Slot, P, Pc, GETARG_C( Ins ), ( void * )Rt_MulKOp );
 }
 
 static int Lower_DivK( PEXEC_MEM_SLOT_T Slot, Proto *P, int Pc ) {
     Instruction Ins = P->code[ Pc ];
-    int         A   = GETARG_A( Ins );
-    if ( !EmitCall3ArgHelper( Slot, A, GETARG_B( Ins ), GETARG_C( Ins ),
-                              ( void * )Rt_DivKOp ) ) return 0;
-    /* resync RDI + cache regs — Rt_DivKOp luaO_arith path may call a metamethod (Lua fn) and grow the stack */
-    if ( !EmitReloadRdiAndCache( Slot ) ) return 0;
-    ClearKnownFfi( A );
-    return 1;
+    return Lower_ArithIK( Slot, P, Pc, GETARG_C( Ins ), ( void * )Rt_DivKOp );
 }
 
 static int Lower_ModK( PEXEC_MEM_SLOT_T Slot, Proto *P, int Pc ) {
     Instruction Ins = P->code[ Pc ];
-    int         A   = GETARG_A( Ins );
-    if ( !EmitCall3ArgHelper( Slot, A, GETARG_B( Ins ), GETARG_C( Ins ),
-                              ( void * )Rt_ModKOp ) ) return 0;
-    /* resync RDI + cache regs — Rt_ModKOp luaO_arith path may call a metamethod (Lua fn) and grow the stack */
-    if ( !EmitReloadRdiAndCache( Slot ) ) return 0;
-    ClearKnownFfi( A );
-    return 1;
+    return Lower_ArithIK( Slot, P, Pc, GETARG_C( Ins ), ( void * )Rt_ModKOp );
 }
 
 static int Lower_IDivK( PEXEC_MEM_SLOT_T Slot, Proto *P, int Pc ) {
     Instruction Ins = P->code[ Pc ];
-    int         A   = GETARG_A( Ins );
-    if ( !EmitCall3ArgHelper( Slot, A, GETARG_B( Ins ), GETARG_C( Ins ),
-                              ( void * )Rt_IDivKOp ) ) return 0;
-    /* resync RDI + cache regs — Rt_IDivKOp luaO_arith path may call a metamethod (Lua fn) and grow the stack */
-    if ( !EmitReloadRdiAndCache( Slot ) ) return 0;
-    ClearKnownFfi( A );
-    return 1;
+    return Lower_ArithIK( Slot, P, Pc, GETARG_C( Ins ), ( void * )Rt_IDivKOp );
 }
 
 static int Lower_PowK( PEXEC_MEM_SLOT_T Slot, Proto *P, int Pc ) {
     Instruction Ins = P->code[ Pc ];
-    int         A   = GETARG_A( Ins );
-    if ( !EmitCall3ArgHelper( Slot, A, GETARG_B( Ins ), GETARG_C( Ins ),
-                              ( void * )Rt_PowKOp ) ) return 0;
-    /* resync RDI + cache regs — Rt_PowKOp luaO_arith path may call a metamethod (Lua fn) and grow the stack */
-    if ( !EmitReloadRdiAndCache( Slot ) ) return 0;
-    ClearKnownFfi( A );
-    return 1;
+    return Lower_ArithIK( Slot, P, Pc, GETARG_C( Ins ), ( void * )Rt_PowKOp );
 }
 
 static int Lower_BAnd( PEXEC_MEM_SLOT_T Slot, Proto *P, int Pc ) {
@@ -2834,35 +2831,17 @@ static int Lower_Shr( PEXEC_MEM_SLOT_T Slot, Proto *P, int Pc ) {
 
 static int Lower_BAndK( PEXEC_MEM_SLOT_T Slot, Proto *P, int Pc ) {
     Instruction Ins = P->code[ Pc ];
-    int         A   = GETARG_A( Ins );
-    if ( !EmitCall3ArgHelper( Slot, A, GETARG_B( Ins ), GETARG_C( Ins ),
-                              ( void * )Rt_BAndKOp ) ) return 0;
-    /* resync RDI + cache regs — Rt_BAndKOp luaO_arith path may call a metamethod (Lua fn) and grow the stack */
-    if ( !EmitReloadRdiAndCache( Slot ) ) return 0;
-    ClearKnownFfi( A );
-    return 1;
+    return Lower_ArithIK( Slot, P, Pc, GETARG_C( Ins ), ( void * )Rt_BAndKOp );
 }
 
 static int Lower_BOrK( PEXEC_MEM_SLOT_T Slot, Proto *P, int Pc ) {
     Instruction Ins = P->code[ Pc ];
-    int         A   = GETARG_A( Ins );
-    if ( !EmitCall3ArgHelper( Slot, A, GETARG_B( Ins ), GETARG_C( Ins ),
-                              ( void * )Rt_BOrKOp ) ) return 0;
-    /* resync RDI + cache regs — Rt_BOrKOp luaO_arith path may call a metamethod (Lua fn) and grow the stack */
-    if ( !EmitReloadRdiAndCache( Slot ) ) return 0;
-    ClearKnownFfi( A );
-    return 1;
+    return Lower_ArithIK( Slot, P, Pc, GETARG_C( Ins ), ( void * )Rt_BOrKOp );
 }
 
 static int Lower_BXorK( PEXEC_MEM_SLOT_T Slot, Proto *P, int Pc ) {
     Instruction Ins = P->code[ Pc ];
-    int         A   = GETARG_A( Ins );
-    if ( !EmitCall3ArgHelper( Slot, A, GETARG_B( Ins ), GETARG_C( Ins ),
-                              ( void * )Rt_BXorKOp ) ) return 0;
-    /* resync RDI + cache regs — Rt_BXorKOp luaO_arith path may call a metamethod (Lua fn) and grow the stack */
-    if ( !EmitReloadRdiAndCache( Slot ) ) return 0;
-    ClearKnownFfi( A );
-    return 1;
+    return Lower_ArithIK( Slot, P, Pc, GETARG_C( Ins ), ( void * )Rt_BXorKOp );
 }
 
 /* SHRI/SHLI share one helper (Rt_ShiftI) that reads the trailing OP_MMBINI for

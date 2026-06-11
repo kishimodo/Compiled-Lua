@@ -402,17 +402,29 @@ int Rt_ForPrep( lua_State *L, int A ) {
         }
         if ( ttisinteger( Limit ) ) {
             LimitI = ivalue( Limit );
-        } else if ( ttisfloat( Limit ) ) {
-            /* Coerce float limit to integer: positive step rounds down (floor),
-               negative step rounds up (ceil), matching forlimit() in lvm.c. */
-            if ( !luaV_tointeger( Limit, &LimitI, ( StepI < 0 ? F2Iceil : F2Ifloor ) ) ) {
-                /* limit can't be represented as integer in this direction */
-                LimitI = ( StepI > 0 ) ? LUA_MININTEGER : LUA_MAXINTEGER;
+        } else if ( !luaV_tointeger( Limit, &LimitI,
+                                     ( StepI < 0 ? F2Iceil : F2Ifloor ) ) ) {
+            /* Limit not coercible to an integer (float out of int64 range, NaN,
+               or a non-number) -- mirror lvm.c forlimit() EXACTLY: a too-large
+               positive limit with a positive step TRUNCATES to LUA_MAXINTEGER
+               and the loop RUNS (`for i = 1, math.huge` must iterate); only a
+               limit on the wrong side of the step direction skips. (The old
+               code unconditionally skipped -- and clamped in the inverted
+               direction -- so every integer loop with an out-of-int64-range
+               float limit silently ran zero iterations.) luaV_tointeger also
+               coerces string limits, as upstream does. */
+            lua_Number FLim;
+            if ( !ForNum( Limit, &FLim ) ) {
+                luaG_forerror( L, Limit, "limit" );  /* not a number: error */
                 return 1;
             }
-        } else {
-            luaG_forerror( L, Limit, "limit" );   /* limit is neither int nor float */
-            return 1;
+            if ( luai_numlt( 0, FLim ) ) {     /* positive: above any integer */
+                if ( StepI < 0 ) return 1;     /* counting down -> zero trips */
+                LimitI = LUA_MAXINTEGER;       /* truncate */
+            } else {                           /* negative (or NaN): below any */
+                if ( StepI > 0 ) return 1;     /* counting up -> zero trips */
+                LimitI = LUA_MININTEGER;       /* truncate */
+            }
         }
 
         /* Zero-iteration check: (StepI > 0 && InitI > LimitI) ||
@@ -1289,6 +1301,76 @@ int Rt_ShiftI( lua_State *L, int A, int B, int MmIns ) {
     /* restore the metamethod-top invariant (see the arith helpers above) */
     L->top.p = L->ci->top.p;
     return 0;
+}
+
+/*!
+ *  Generic immediate/constant arith slow path, driven -- like Rt_ShiftI -- by
+ *  the trailing OP_MMBINI/OP_MMBINK word, which carries the TRUE metamethod
+ *  event, original operand, and operand order for every source form. The
+ *  per-opcode helpers (Rt_AddIOp/Rt_AddKOp/...) derive the event and operand
+ *  order from the OPCODE, which is wrong in two ways the interpreter is not:
+ *    - `x - 1` compiles to ADDI x,-1 + MMBINI(TM_SUB, imm=+1): a metatable'd x
+ *      must dispatch __sub(x, 1), not __add(x, -1);
+ *    - `1 + x` / `2 * x` / `K & x` swap commutative operands into ADDK/MULK/
+ *      BANDK x,K + MMBIN*(k=1): the metamethod must see (K, x) order.
+ *  Decoding the MMBIN* word gives: event = C (TM_*, same order as LUA_OP*, so
+ *  luaO_arith gets `event - TM_ADD + LUA_OPADD`), constant = sB (MMBINI
+ *  immediate, already un-negated) or k[B] (MMBINK), flip = k. luaO_arith
+ *  performs the raw arith for numbers/strings and dispatches the correct
+ *  metamethod otherwise -- observationally identical to the interpreter's
+ *  fast-op + MMBIN* pair. Every ADDI and K-variant arith op is followed by its
+ *  MMBIN* word (lcode.c finishbinexpval), so `MmIns` is reliable.
+ *
+ * @param MmIns  the raw 32-bit OP_MMBINI/OP_MMBINK instruction word.
+ */
+int Rt_ArithIK( lua_State *L, int A, int B, int MmIns ) {
+    StkId       Base = L->ci->func.p + 1;
+    Instruction Mm   = ( Instruction )( unsigned )MmIns;
+    int         Op   = ( int )GETARG_C( Mm ) - TM_ADD + LUA_OPADD;
+    int         Flip = GETARG_k( Mm );
+    TValue      ImmV;
+    TValue     *P2;
+    if ( GET_OPCODE( Mm ) == OP_MMBINK ) {
+        P2 = &clLvalue( s2v( L->ci->func.p ) )->p->k[ GETARG_B( Mm ) ];
+    } else {
+        setivalue( &ImmV, ( lua_Integer )GETARG_sB( Mm ) );
+        P2 = &ImmV;
+    }
+    if ( !Flip )
+        luaO_arith( L, Op, s2v( Base + B ), P2, Base + A );     /* value <op> K */
+    else
+        luaO_arith( L, Op, P2, s2v( Base + B ), Base + A );     /* K <op> value */
+    /* restore the metamethod-top invariant (see the arith helpers above) */
+    L->top.p = L->ci->top.p;
+    return 0;
+}
+
+/*!
+ *  Unified LTI/LEI/GTI/GEI slow path, driven by the raw comparison instruction
+ *  word. Two fidelity details the old per-opcode helpers missed:
+ *    - the C field is lvm.c's `isf` flag: the immediate was originally a FLOAT
+ *      constant (`t < 2.0` -> LTI t,2,C=1), so an __lt/__le metamethod must
+ *      receive 2.0 (math.type "float"), not 2;
+ *    - GTI/GEI dispatch the SWAPPED __lt/__le (imm on the left), mirroring
+ *      lvm.c op_orderI's `inv` flag (already handled here via operand order).
+ *
+ * @param RawIns  the raw 32-bit OP_LTI/OP_LEI/OP_GTI/OP_GEI instruction word.
+ */
+int Rt_OrderISlow( lua_State *L, int A, int RawIns ) {
+    StkId       Base = L->ci->func.p + 1;
+    Instruction I    = ( Instruction )( unsigned )RawIns;
+    int         Im   = GETARG_sB( I );
+    TValue      Imm;
+    if ( GETARG_C( I ) ) { setfltvalue( &Imm, cast_num( Im ) ); }
+    else                 { setivalue( &Imm, ( lua_Integer )Im ); }
+    L->top.p = L->ci->top.p;   /* order-metamethod scratch space above live regs */
+    switch ( GET_OPCODE( I ) ) {
+        case OP_LTI: return luaV_lessthan ( L, s2v( Base + A ), &Imm );
+        case OP_LEI: return luaV_lessequal( L, s2v( Base + A ), &Imm );
+        case OP_GTI: return luaV_lessthan ( L, &Imm, s2v( Base + A ) );
+        case OP_GEI: return luaV_lessequal( L, &Imm, s2v( Base + A ) );
+        default:     return 0;  /* unreachable: only the *I order ops call this */
+    }
 }
 
 int Rt_Tbc( lua_State *L, int A ) {

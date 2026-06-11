@@ -108,6 +108,15 @@ int Rt_LtISlow( lua_State *L, int A, int sB );
 int Rt_LeISlow( lua_State *L, int A, int sB );
 int Rt_EqKSlow( lua_State *L, int A, int B );
 
+/* Rt_OrderISlow: unified LTI/LEI/GTI/GEI slow path; RawIns = the comparison's
+   own raw instruction word (carries sB, the float-immediate flag in C, and the
+   opcode selecting direction/swap). Returns the 0/1 comparison result. */
+int Rt_OrderISlow( lua_State *L, int A, int RawIns );
+
+/* Rt_ArithIK: unified immediate/constant arith slow path; MmIns = the trailing
+   OP_MMBINI/OP_MMBINK word (true metamethod event, original operand, flip). */
+int Rt_ArithIK( lua_State *L, int A, int B, int MmIns );
+
 /*!
  * @brief
  *  Initialise a numeric for loop. Reads R[A], R[A+1], R[A+2] as
