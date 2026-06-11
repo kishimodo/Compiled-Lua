@@ -1728,6 +1728,13 @@ static int res_qualify( LcFunc *f, LcInst **map, int T, int P, LcResRegion *out 
         case OP_LOADNIL:
             for ( i = in->a; i <= in->a + in->b; i++ ) RES_WR_OTH( i );
             break;
+        /* metamethod-bin markers + extraarg: zero-byte no-ops in codegen --
+           frame-blind by definition. EVERY binary arith op is followed by its
+           MMBIN/MMBINI/MMBINK word, so without these cases no loop containing
+           arithmetic could ever qualify (found while building spill-around:
+           residency had only ever engaged on arith-free bodies). */
+        case OP_MMBIN: case OP_MMBINI: case OP_MMBINK: case OP_EXTRAARG:
+            break;
         /* contained control flow */
         case OP_JMP:
             if ( in->c < T || in->c > P ) goto reject;
