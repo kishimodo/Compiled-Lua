@@ -292,10 +292,10 @@ void lc_pass_local_typeinfer(LcFunc *f) {
     int o1 = -1, o2 = -1;
     in = insts[i];
     switch (in->bc_op) {
-      case OP_ADD: case OP_SUB: case OP_MUL:
+      case OP_ADD: case OP_SUB: case OP_MUL: case OP_DIV:
       case OP_BAND: case OP_BOR: case OP_BXOR:
         o1 = in->b; o2 = in->c; break;                 /* reg-reg: op1=B, op2=C */
-      case OP_ADDI: case OP_ADDK: case OP_SUBK: case OP_MULK:
+      case OP_ADDI: case OP_ADDK: case OP_SUBK: case OP_MULK: case OP_DIVK:
       case OP_BANDK: case OP_BORK: case OP_BXORK:
         o1 = in->b; o2 = -1; break;                    /* reg + immediate/K     */
       case OP_EQ: case OP_LT: case OP_LE:
@@ -306,8 +306,9 @@ void lc_pass_local_typeinfer(LcFunc *f) {
     }
     if (o1 >= 0 && ti_reg(sin, o1, nregs) == TI_INT) in->known |= LC_KNOWN_B_INT;
     if (o2 >= 0 && ti_reg(sin, o2, nregs) == TI_INT) in->known |= LC_KNOWN_C_INT;
-    /* float proofs too (codegen uses these only for reg-reg ADD/SUB/MUL float
-       elision; harmless on the other annotated ops, which ignore them). */
+    /* float proofs too (codegen uses these for the reg-reg ADD/SUB/MUL/DIV
+       float elision and the float-K arith elision; harmless on the other
+       annotated ops, which ignore them). */
     if (o1 >= 0 && ti_reg(sin, o1, nregs) == TI_FLT) in->known |= LC_KNOWN_B_FLT;
     if (o2 >= 0 && ti_reg(sin, o2, nregs) == TI_FLT) in->known |= LC_KNOWN_C_FLT;
   }

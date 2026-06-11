@@ -386,6 +386,30 @@ int X64Emit_MovqReg64ToXmm0( LcCodeBuf *Buf, X64_GPR_T Src ) {
     return LcCodeBuf_Append( Buf, Tmp, ( size_t )N );
 }
 
+int X64Emit_MovqReg64ToXmmN( LcCodeBuf *Buf, int XmmN, X64_GPR_T Src ) {
+    /* 66 REX.W 0F 6E /r -- MOVQ xmm, r/m64.  ModR/M reg = XmmN, rm = Src. */
+    unsigned char Tmp[ 5 ];
+    int N = 0;
+    if ( XmmN < 0 || XmmN > 7 ) return 0;
+    Tmp[ N++ ] = 0x66;
+    Tmp[ N++ ] = ( unsigned char )( 0x48 | ( ( ( int )Src & 8 ) ? 0x01 : 0 ) );
+    Tmp[ N++ ] = 0x0F;
+    Tmp[ N++ ] = 0x6E;
+    Tmp[ N++ ] = ( unsigned char )( 0xC0 | ( ( XmmN & 7 ) << 3 ) | ( ( int )Src & 7 ) );
+    return LcCodeBuf_Append( Buf, Tmp, ( size_t )N );
+}
+
+int X64Emit_ArithSdXmm0Xmm1( LcCodeBuf *Buf, unsigned char Op ) {
+    /* F2 0F <Op> /r -- scalar-double op, ModR/M C1 = xmm0, xmm1. */
+    unsigned char Tmp[ 4 ];
+    if ( Op != 0x58 && Op != 0x5C && Op != 0x59 && Op != 0x5E ) return 0;
+    Tmp[ 0 ] = 0xF2;
+    Tmp[ 1 ] = 0x0F;
+    Tmp[ 2 ] = Op;
+    Tmp[ 3 ] = 0xC1;
+    return LcCodeBuf_Append( Buf, Tmp, 4 );
+}
+
 /* ---- AOT-only reloc emitters -------------------------------------------- */
 
 int X64Emit_CallSym( LcCodeBuf *Buf, const char *Sym ) {

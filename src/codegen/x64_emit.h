@@ -250,6 +250,21 @@ int X64Emit_MovqReg64ToXmm0( LcCodeBuf *Buf, X64_GPR_T Src );
 
 /*!
  * @brief
+ *  MOVQ xmmN, r64 (N = 0..7). Encoding: 66 REX.W 0F 6E /r with ModR/M
+ *  reg = XmmN. Used to materialize a compile-time double bit pattern into a
+ *  scratch xmm for the float-K arith elision.
+ */
+int X64Emit_MovqReg64ToXmmN( LcCodeBuf *Buf, int XmmN, X64_GPR_T Src );
+
+/*!
+ * @brief
+ *  ADDSD/SUBSD/MULSD/DIVSD xmm0, xmm1. Encoding: F2 0F <Op> C1 with
+ *  Op = 0x58 (add), 0x5C (sub), 0x59 (mul), 0x5E (div).
+ */
+int X64Emit_ArithSdXmm0Xmm1( LcCodeBuf *Buf, unsigned char Op );
+
+/*!
+ * @brief
  *  CALL rel32 to an external symbol. Emits E8 <disp32=0> and records an
  *  LC_RELOC_REL32 against `Sym` at the disp32 offset. The linker resolves it.
  */

@@ -1071,6 +1071,43 @@ static int k_int32( LcFunc *f, int idx, int32_t *out ) {
     return 1;
 }
 
+/* If func's constant #idx is numeric, store its value-as-double bit pattern in
+   *out and return 1 (enables the float-K arith elision). An integer K is
+   converted with the same C cast the runtime helper applies (cast_num), so the
+   inline op is bit-identical to the helper for any proven-float R[B]. NaN K is
+   rejected defensively (lcode's constant folding never emits one). */
+static int k_flt_bits( LcFunc *f, int idx, uint64_t *out ) {
+    TValue *k;
+    double d;
+    if ( f == NULL || f->source == NULL || idx < 0 || idx >= f->source->sizek )
+        return 0;
+    k = &f->source->k[ idx ];
+    if ( ttisfloat( k ) )        d = fltvalue( k );
+    else if ( ttisinteger( k ) ) d = ( double )ivalue( k );
+    else return 0;
+    if ( d != d ) return 0;
+    memcpy( out, &d, 8 );
+    return 1;
+}
+
+/* M1 elision, float-K arm: R[A] = R[B] <op> K with R[B] PROVEN float and K a
+   compile-time numeric constant -> bare SSE op, no tag-check, no helper.
+   Sound: float arith on a proven float and a number never dispatches a
+   metamethod and always yields a float (DIV included). xmm0 = R[B],
+   xmm1 = K bits via rax, then op xmm0,xmm1 keeps operand order exact --
+   no commutativity assumptions. */
+static int lower_arithk_flt_elide( LcCodeBuf *B, LcInst *in,
+                                   unsigned char sse_op, uint64_t kbits ) {
+    int A = in->a, Br = in->b;
+    if ( !X64Emit_MovsdMemToXmm0( B, X64_RDI, Br * 16 ) ) return 0;
+    if ( !X64Emit_MovImm64ToReg( B, X64_RAX, kbits ) ) return 0;
+    if ( !X64Emit_MovqReg64ToXmmN( B, 1, X64_RAX ) ) return 0;
+    if ( !X64Emit_ArithSdXmm0Xmm1( B, sse_op ) ) return 0;
+    if ( !X64Emit_MovsdXmm0ToMem( B, X64_RDI, A * 16 ) ) return 0;
+    if ( !X64Emit_MovImm32ToMem( B, X64_RDI, A * 16 + 8, LUA_VNUMFLT ) ) return 0;
+    return 1;
+}
+
 static int lower_inst( LcBranchCtx *Br, LcFunc *f, LcInst *in ) {
     LcCodeBuf *B = Br->buf;
     /* LUAC-001: keep ci->u.l.savedpc current before any throw-capable op so a
@@ -1110,26 +1147,49 @@ static int lower_inst( LcBranchCtx *Br, LcFunc *f, LcInst *in ) {
         case OP_MUL:   return ( g_lc_opt_level >= 1 )
                            ? lower_arith_fast( B, in, LC_AR_MUL, "Rt_MulOp", 1 )
                            : lower_helper3( B, in, "Rt_MulOp", 1 );
-        case OP_DIV:   return lower_helper3( B, in, "Rt_DivOp",  1 );
+        case OP_DIV:   /* M1 elision: both operands PROVEN float -> bare divsd
+                          (DIV of two floats is always a float, no metamethod). */
+                       if ( g_lc_opt_level >= 1 && ( in->known & LC_KNOWN_B_FLT )
+                            && ( in->known & LC_KNOWN_C_FLT ) ) {
+                           if ( !X64Emit_MovsdMemToXmm0( B, X64_RDI, in->b * 16 ) ) return 0;
+                           if ( !X64Emit_DivsdMemToXmm0( B, X64_RDI, in->c * 16 ) ) return 0;
+                           if ( !X64Emit_MovsdXmm0ToMem( B, X64_RDI, in->a * 16 ) ) return 0;
+                           if ( !X64Emit_MovImm32ToMem( B, X64_RDI, in->a * 16 + 8, LUA_VNUMFLT ) ) return 0;
+                           return 1;
+                       }
+                       return lower_helper3( B, in, "Rt_DivOp",  1 );
         case OP_MOD:   return lower_helper3( B, in, "Rt_ModOp",  1 );
         case OP_IDIV:  return lower_helper3( B, in, "Rt_IDivOp", 1 );
         case OP_POW:   return lower_helper3( B, in, "Rt_PowOp",  1 );
         case OP_ADDI:  return ( g_lc_opt_level >= 1 )
                            ? lower_arith_imm_fast( B, in, LC_AR_ADD, in->c, "Rt_AddIOp" )
                            : lower_helper3( B, in, "Rt_AddIOp", 1 );
-        case OP_ADDK:  { int32_t kv;
+        case OP_ADDK:  { int32_t kv; uint64_t kb;
+                         if ( g_lc_opt_level >= 1 && ( in->known & LC_KNOWN_B_FLT )
+                              && k_flt_bits( f, in->c, &kb ) )
+                             return lower_arithk_flt_elide( B, in, 0x58, kb );
                          if ( g_lc_opt_level >= 1 && k_int32( f, in->c, &kv ) )
                              return lower_arith_imm_fast( B, in, LC_AR_ADD, kv, "Rt_AddKOp" );
                          return lower_helper3( B, in, "Rt_AddKOp",  1 ); }
-        case OP_SUBK:  { int32_t kv;
+        case OP_SUBK:  { int32_t kv; uint64_t kb;
+                         if ( g_lc_opt_level >= 1 && ( in->known & LC_KNOWN_B_FLT )
+                              && k_flt_bits( f, in->c, &kb ) )
+                             return lower_arithk_flt_elide( B, in, 0x5C, kb );
                          if ( g_lc_opt_level >= 1 && k_int32( f, in->c, &kv ) )
                              return lower_arith_imm_fast( B, in, LC_AR_SUB, kv, "Rt_SubKOp" );
                          return lower_helper3( B, in, "Rt_SubKOp",  1 ); }
-        case OP_MULK:  { int32_t kv;
+        case OP_MULK:  { int32_t kv; uint64_t kb;
+                         if ( g_lc_opt_level >= 1 && ( in->known & LC_KNOWN_B_FLT )
+                              && k_flt_bits( f, in->c, &kb ) )
+                             return lower_arithk_flt_elide( B, in, 0x59, kb );
                          if ( g_lc_opt_level >= 1 && k_int32( f, in->c, &kv ) )
                              return lower_arith_imm_fast( B, in, LC_AR_MUL, kv, "Rt_MulKOp" );
                          return lower_helper3( B, in, "Rt_MulKOp",  1 ); }
-        case OP_DIVK:  return lower_helper3( B, in, "Rt_DivKOp",  1 );
+        case OP_DIVK:  { uint64_t kb;
+                         if ( g_lc_opt_level >= 1 && ( in->known & LC_KNOWN_B_FLT )
+                              && k_flt_bits( f, in->c, &kb ) )
+                             return lower_arithk_flt_elide( B, in, 0x5E, kb );
+                         return lower_helper3( B, in, "Rt_DivKOp",  1 ); }
         case OP_MODK:  return lower_helper3( B, in, "Rt_ModKOp",  1 );
         case OP_IDIVK: return lower_helper3( B, in, "Rt_IDivKOp", 1 );
         case OP_POWK:  return lower_helper3( B, in, "Rt_PowKOp",  1 );
