@@ -23,6 +23,7 @@ int Rt_AddSlow( lua_State *L, int A, int B, int C ) {
     /* Defer to upstream's arith handler. luaO_arith handles metamethods,
        float promotion, and errors. */
     StkId Base = L->ci->func.p + 1;
+    L->top.p = L->ci->top.p;   /* TM/error pushes go ABOVE live regs (round-6 fix) */
     luaO_arith( L, LUA_OPADD, s2v( Base + B ), s2v( Base + C ), Base + A );
     /* A metamethod (string coercion / overloaded operator) reaches Lua via
        luaT_callTMres, which leaves L->top.p at the TM result -- below the
@@ -35,6 +36,7 @@ int Rt_AddSlow( lua_State *L, int A, int B, int C ) {
 
 int Rt_SubSlow( lua_State *L, int A, int B, int C ) {
     StkId Base = L->ci->func.p + 1;
+    L->top.p = L->ci->top.p;   /* TM/error pushes go ABOVE live regs (round-6 fix) */
     luaO_arith( L, LUA_OPSUB, s2v( Base + B ), s2v( Base + C ), Base + A );
     /* A metamethod (string coercion / overloaded operator) reaches Lua via
        luaT_callTMres, which leaves L->top.p at the TM result -- below the
@@ -47,6 +49,7 @@ int Rt_SubSlow( lua_State *L, int A, int B, int C ) {
 
 int Rt_MulSlow( lua_State *L, int A, int B, int C ) {
     StkId Base = L->ci->func.p + 1;
+    L->top.p = L->ci->top.p;   /* TM/error pushes go ABOVE live regs (round-6 fix) */
     luaO_arith( L, LUA_OPMUL, s2v( Base + B ), s2v( Base + C ), Base + A );
     /* A metamethod (string coercion / overloaded operator) reaches Lua via
        luaT_callTMres, which leaves L->top.p at the TM result -- below the
@@ -703,6 +706,7 @@ int Rt_SetList( lua_State *L, int A, int B, int C ) {
 
 int Rt_Len( lua_State *L, int A, int B ) {
     StkId Base = L->ci->func.p + 1;
+    L->top.p = L->ci->top.p;   /* TM/error pushes go ABOVE live regs (round-6 fix) */
     luaV_objlen( L, Base + A, s2v( Base + B ) );
     L->top.p = L->ci->top.p;   /* restore ceiling (a __len metamethod leaves top low) */
     return 0;
@@ -923,6 +927,7 @@ int Rt_NotOp( lua_State *L, int A, int B ) {
 int Rt_UnmOp( lua_State *L, int A, int B ) {
     StkId Base = L->ci->func.p + 1;
     /* for unary ops, luaO_arith takes the value as both operands */
+    L->top.p = L->ci->top.p;   /* TM/error pushes go ABOVE live regs (round-6 fix) */
     luaO_arith( L, LUA_OPUNM, s2v( Base + B ), s2v( Base + B ), Base + A );
     /* A metamethod (string coercion / overloaded operator) reaches Lua via
        luaT_callTMres, which leaves L->top.p at the TM result -- below the
@@ -935,6 +940,7 @@ int Rt_UnmOp( lua_State *L, int A, int B ) {
 
 int Rt_BNotOp( lua_State *L, int A, int B ) {
     StkId Base = L->ci->func.p + 1;
+    L->top.p = L->ci->top.p;   /* TM/error pushes go ABOVE live regs (round-6 fix) */
     luaO_arith( L, LUA_OPBNOT, s2v( Base + B ), s2v( Base + B ), Base + A );
     /* A metamethod (string coercion / overloaded operator) reaches Lua via
        luaT_callTMres, which leaves L->top.p at the TM result -- below the
@@ -947,6 +953,7 @@ int Rt_BNotOp( lua_State *L, int A, int B ) {
 
 int Rt_DivOp( lua_State *L, int A, int B, int C ) {
     StkId Base = L->ci->func.p + 1;
+    L->top.p = L->ci->top.p;   /* TM/error pushes go ABOVE live regs (round-6 fix) */
     luaO_arith( L, LUA_OPDIV, s2v( Base + B ), s2v( Base + C ), Base + A );
     /* A metamethod (string coercion / overloaded operator) reaches Lua via
        luaT_callTMres, which leaves L->top.p at the TM result -- below the
@@ -959,6 +966,7 @@ int Rt_DivOp( lua_State *L, int A, int B, int C ) {
 
 int Rt_AddOp( lua_State *L, int A, int B, int C ) {
     StkId Base = L->ci->func.p + 1;
+    L->top.p = L->ci->top.p;   /* TM/error pushes go ABOVE live regs (round-6 fix) */
     luaO_arith( L, LUA_OPADD, s2v( Base + B ), s2v( Base + C ), Base + A );
     /* A metamethod (string coercion / overloaded operator) reaches Lua via
        luaT_callTMres, which leaves L->top.p at the TM result -- below the
@@ -971,6 +979,7 @@ int Rt_AddOp( lua_State *L, int A, int B, int C ) {
 
 int Rt_SubOp( lua_State *L, int A, int B, int C ) {
     StkId Base = L->ci->func.p + 1;
+    L->top.p = L->ci->top.p;   /* TM/error pushes go ABOVE live regs (round-6 fix) */
     luaO_arith( L, LUA_OPSUB, s2v( Base + B ), s2v( Base + C ), Base + A );
     /* A metamethod (string coercion / overloaded operator) reaches Lua via
        luaT_callTMres, which leaves L->top.p at the TM result -- below the
@@ -983,6 +992,7 @@ int Rt_SubOp( lua_State *L, int A, int B, int C ) {
 
 int Rt_MulOp( lua_State *L, int A, int B, int C ) {
     StkId Base = L->ci->func.p + 1;
+    L->top.p = L->ci->top.p;   /* TM/error pushes go ABOVE live regs (round-6 fix) */
     luaO_arith( L, LUA_OPMUL, s2v( Base + B ), s2v( Base + C ), Base + A );
     /* A metamethod (string coercion / overloaded operator) reaches Lua via
        luaT_callTMres, which leaves L->top.p at the TM result -- below the
@@ -995,6 +1005,7 @@ int Rt_MulOp( lua_State *L, int A, int B, int C ) {
 
 int Rt_ModOp( lua_State *L, int A, int B, int C ) {
     StkId Base = L->ci->func.p + 1;
+    L->top.p = L->ci->top.p;   /* TM/error pushes go ABOVE live regs (round-6 fix) */
     luaO_arith( L, LUA_OPMOD, s2v( Base + B ), s2v( Base + C ), Base + A );
     /* A metamethod (string coercion / overloaded operator) reaches Lua via
        luaT_callTMres, which leaves L->top.p at the TM result -- below the
@@ -1007,6 +1018,7 @@ int Rt_ModOp( lua_State *L, int A, int B, int C ) {
 
 int Rt_IDivOp( lua_State *L, int A, int B, int C ) {
     StkId Base = L->ci->func.p + 1;
+    L->top.p = L->ci->top.p;   /* TM/error pushes go ABOVE live regs (round-6 fix) */
     luaO_arith( L, LUA_OPIDIV, s2v( Base + B ), s2v( Base + C ), Base + A );
     /* A metamethod (string coercion / overloaded operator) reaches Lua via
        luaT_callTMres, which leaves L->top.p at the TM result -- below the
@@ -1019,6 +1031,7 @@ int Rt_IDivOp( lua_State *L, int A, int B, int C ) {
 
 int Rt_PowOp( lua_State *L, int A, int B, int C ) {
     StkId Base = L->ci->func.p + 1;
+    L->top.p = L->ci->top.p;   /* TM/error pushes go ABOVE live regs (round-6 fix) */
     luaO_arith( L, LUA_OPPOW, s2v( Base + B ), s2v( Base + C ), Base + A );
     /* A metamethod (string coercion / overloaded operator) reaches Lua via
        luaT_callTMres, which leaves L->top.p at the TM result -- below the
@@ -1032,6 +1045,7 @@ int Rt_PowOp( lua_State *L, int A, int B, int C ) {
 int Rt_AddKOp( lua_State *L, int A, int B, int C ) {
     StkId   Base = L->ci->func.p + 1;
     TValue *K    = &clLvalue( s2v( L->ci->func.p ) )->p->k[ C ];
+    L->top.p = L->ci->top.p;   /* TM/error pushes go ABOVE live regs (round-6 fix) */
     luaO_arith( L, LUA_OPADD, s2v( Base + B ), K, Base + A );
     /* A metamethod (string coercion / overloaded operator) reaches Lua via
        luaT_callTMres, which leaves L->top.p at the TM result -- below the
@@ -1047,6 +1061,7 @@ int Rt_AddIOp( lua_State *L, int A, int B, int sC ) {
     StkId  Base = L->ci->func.p + 1;
     TValue Imm  = { 0 };
     setivalue( &Imm, ( lua_Integer )sC );
+    L->top.p = L->ci->top.p;   /* TM/error pushes go ABOVE live regs (round-6 fix) */
     luaO_arith( L, LUA_OPADD, s2v( Base + B ), &Imm, Base + A );
     /* A metamethod (string coercion / overloaded operator) reaches Lua via
        luaT_callTMres, which leaves L->top.p at the TM result -- below the
@@ -1060,6 +1075,7 @@ int Rt_AddIOp( lua_State *L, int A, int B, int sC ) {
 int Rt_SubKOp( lua_State *L, int A, int B, int C ) {
     StkId   Base = L->ci->func.p + 1;
     TValue *K    = &clLvalue( s2v( L->ci->func.p ) )->p->k[ C ];
+    L->top.p = L->ci->top.p;   /* TM/error pushes go ABOVE live regs (round-6 fix) */
     luaO_arith( L, LUA_OPSUB, s2v( Base + B ), K, Base + A );
     /* A metamethod (string coercion / overloaded operator) reaches Lua via
        luaT_callTMres, which leaves L->top.p at the TM result -- below the
@@ -1073,6 +1089,7 @@ int Rt_SubKOp( lua_State *L, int A, int B, int C ) {
 int Rt_MulKOp( lua_State *L, int A, int B, int C ) {
     StkId   Base = L->ci->func.p + 1;
     TValue *K    = &clLvalue( s2v( L->ci->func.p ) )->p->k[ C ];
+    L->top.p = L->ci->top.p;   /* TM/error pushes go ABOVE live regs (round-6 fix) */
     luaO_arith( L, LUA_OPMUL, s2v( Base + B ), K, Base + A );
     /* A metamethod (string coercion / overloaded operator) reaches Lua via
        luaT_callTMres, which leaves L->top.p at the TM result -- below the
@@ -1086,6 +1103,7 @@ int Rt_MulKOp( lua_State *L, int A, int B, int C ) {
 int Rt_DivKOp( lua_State *L, int A, int B, int C ) {
     StkId   Base = L->ci->func.p + 1;
     TValue *K    = &clLvalue( s2v( L->ci->func.p ) )->p->k[ C ];
+    L->top.p = L->ci->top.p;   /* TM/error pushes go ABOVE live regs (round-6 fix) */
     luaO_arith( L, LUA_OPDIV, s2v( Base + B ), K, Base + A );
     /* A metamethod (string coercion / overloaded operator) reaches Lua via
        luaT_callTMres, which leaves L->top.p at the TM result -- below the
@@ -1099,6 +1117,7 @@ int Rt_DivKOp( lua_State *L, int A, int B, int C ) {
 int Rt_ModKOp( lua_State *L, int A, int B, int C ) {
     StkId   Base = L->ci->func.p + 1;
     TValue *K    = &clLvalue( s2v( L->ci->func.p ) )->p->k[ C ];
+    L->top.p = L->ci->top.p;   /* TM/error pushes go ABOVE live regs (round-6 fix) */
     luaO_arith( L, LUA_OPMOD, s2v( Base + B ), K, Base + A );
     /* A metamethod (string coercion / overloaded operator) reaches Lua via
        luaT_callTMres, which leaves L->top.p at the TM result -- below the
@@ -1112,6 +1131,7 @@ int Rt_ModKOp( lua_State *L, int A, int B, int C ) {
 int Rt_IDivKOp( lua_State *L, int A, int B, int C ) {
     StkId   Base = L->ci->func.p + 1;
     TValue *K    = &clLvalue( s2v( L->ci->func.p ) )->p->k[ C ];
+    L->top.p = L->ci->top.p;   /* TM/error pushes go ABOVE live regs (round-6 fix) */
     luaO_arith( L, LUA_OPIDIV, s2v( Base + B ), K, Base + A );
     /* A metamethod (string coercion / overloaded operator) reaches Lua via
        luaT_callTMres, which leaves L->top.p at the TM result -- below the
@@ -1125,6 +1145,7 @@ int Rt_IDivKOp( lua_State *L, int A, int B, int C ) {
 int Rt_PowKOp( lua_State *L, int A, int B, int C ) {
     StkId   Base = L->ci->func.p + 1;
     TValue *K    = &clLvalue( s2v( L->ci->func.p ) )->p->k[ C ];
+    L->top.p = L->ci->top.p;   /* TM/error pushes go ABOVE live regs (round-6 fix) */
     luaO_arith( L, LUA_OPPOW, s2v( Base + B ), K, Base + A );
     /* A metamethod (string coercion / overloaded operator) reaches Lua via
        luaT_callTMres, which leaves L->top.p at the TM result -- below the
@@ -1137,6 +1158,7 @@ int Rt_PowKOp( lua_State *L, int A, int B, int C ) {
 
 int Rt_BAndOp( lua_State *L, int A, int B, int C ) {
     StkId Base = L->ci->func.p + 1;
+    L->top.p = L->ci->top.p;   /* TM/error pushes go ABOVE live regs (round-6 fix) */
     luaO_arith( L, LUA_OPBAND, s2v( Base + B ), s2v( Base + C ), Base + A );
     /* A metamethod (string coercion / overloaded operator) reaches Lua via
        luaT_callTMres, which leaves L->top.p at the TM result -- below the
@@ -1149,6 +1171,7 @@ int Rt_BAndOp( lua_State *L, int A, int B, int C ) {
 
 int Rt_BOrOp( lua_State *L, int A, int B, int C ) {
     StkId Base = L->ci->func.p + 1;
+    L->top.p = L->ci->top.p;   /* TM/error pushes go ABOVE live regs (round-6 fix) */
     luaO_arith( L, LUA_OPBOR, s2v( Base + B ), s2v( Base + C ), Base + A );
     /* A metamethod (string coercion / overloaded operator) reaches Lua via
        luaT_callTMres, which leaves L->top.p at the TM result -- below the
@@ -1161,6 +1184,7 @@ int Rt_BOrOp( lua_State *L, int A, int B, int C ) {
 
 int Rt_BXorOp( lua_State *L, int A, int B, int C ) {
     StkId Base = L->ci->func.p + 1;
+    L->top.p = L->ci->top.p;   /* TM/error pushes go ABOVE live regs (round-6 fix) */
     luaO_arith( L, LUA_OPBXOR, s2v( Base + B ), s2v( Base + C ), Base + A );
     /* A metamethod (string coercion / overloaded operator) reaches Lua via
        luaT_callTMres, which leaves L->top.p at the TM result -- below the
@@ -1173,6 +1197,7 @@ int Rt_BXorOp( lua_State *L, int A, int B, int C ) {
 
 int Rt_ShlOp( lua_State *L, int A, int B, int C ) {
     StkId Base = L->ci->func.p + 1;
+    L->top.p = L->ci->top.p;   /* TM/error pushes go ABOVE live regs (round-6 fix) */
     luaO_arith( L, LUA_OPSHL, s2v( Base + B ), s2v( Base + C ), Base + A );
     /* A metamethod (string coercion / overloaded operator) reaches Lua via
        luaT_callTMres, which leaves L->top.p at the TM result -- below the
@@ -1185,6 +1210,7 @@ int Rt_ShlOp( lua_State *L, int A, int B, int C ) {
 
 int Rt_ShrOp( lua_State *L, int A, int B, int C ) {
     StkId Base = L->ci->func.p + 1;
+    L->top.p = L->ci->top.p;   /* TM/error pushes go ABOVE live regs (round-6 fix) */
     luaO_arith( L, LUA_OPSHR, s2v( Base + B ), s2v( Base + C ), Base + A );
     /* A metamethod (string coercion / overloaded operator) reaches Lua via
        luaT_callTMres, which leaves L->top.p at the TM result -- below the
@@ -1198,6 +1224,7 @@ int Rt_ShrOp( lua_State *L, int A, int B, int C ) {
 int Rt_BAndKOp( lua_State *L, int A, int B, int C ) {
     StkId   Base = L->ci->func.p + 1;
     TValue *K    = &clLvalue( s2v( L->ci->func.p ) )->p->k[ C ];
+    L->top.p = L->ci->top.p;   /* TM/error pushes go ABOVE live regs (round-6 fix) */
     luaO_arith( L, LUA_OPBAND, s2v( Base + B ), K, Base + A );
     /* A metamethod (string coercion / overloaded operator) reaches Lua via
        luaT_callTMres, which leaves L->top.p at the TM result -- below the
@@ -1211,6 +1238,7 @@ int Rt_BAndKOp( lua_State *L, int A, int B, int C ) {
 int Rt_BOrKOp( lua_State *L, int A, int B, int C ) {
     StkId   Base = L->ci->func.p + 1;
     TValue *K    = &clLvalue( s2v( L->ci->func.p ) )->p->k[ C ];
+    L->top.p = L->ci->top.p;   /* TM/error pushes go ABOVE live regs (round-6 fix) */
     luaO_arith( L, LUA_OPBOR, s2v( Base + B ), K, Base + A );
     /* A metamethod (string coercion / overloaded operator) reaches Lua via
        luaT_callTMres, which leaves L->top.p at the TM result -- below the
@@ -1224,6 +1252,7 @@ int Rt_BOrKOp( lua_State *L, int A, int B, int C ) {
 int Rt_BXorKOp( lua_State *L, int A, int B, int C ) {
     StkId   Base = L->ci->func.p + 1;
     TValue *K    = &clLvalue( s2v( L->ci->func.p ) )->p->k[ C ];
+    L->top.p = L->ci->top.p;   /* TM/error pushes go ABOVE live regs (round-6 fix) */
     luaO_arith( L, LUA_OPBXOR, s2v( Base + B ), K, Base + A );
     /* A metamethod (string coercion / overloaded operator) reaches Lua via
        luaT_callTMres, which leaves L->top.p at the TM result -- below the
@@ -1238,6 +1267,7 @@ int Rt_ShrIOp( lua_State *L, int A, int B, int sC ) {
     StkId  Base = L->ci->func.p + 1;
     TValue Imm;
     setivalue( &Imm, ( lua_Integer )sC );
+    L->top.p = L->ci->top.p;   /* TM/error pushes go ABOVE live regs (round-6 fix) */
     luaO_arith( L, LUA_OPSHR, s2v( Base + B ), &Imm, Base + A );
     /* A metamethod (string coercion / overloaded operator) reaches Lua via
        luaT_callTMres, which leaves L->top.p at the TM result -- below the
@@ -1253,6 +1283,7 @@ int Rt_ShlIOp( lua_State *L, int A, int B, int sC ) {
     StkId  Base = L->ci->func.p + 1;
     TValue Imm;
     setivalue( &Imm, ( lua_Integer )sC );
+    L->top.p = L->ci->top.p;   /* TM/error pushes go ABOVE live regs (round-6 fix) */
     luaO_arith( L, LUA_OPSHL, &Imm, s2v( Base + B ), Base + A );
     /* A metamethod (string coercion / overloaded operator) reaches Lua via
        luaT_callTMres, which leaves L->top.p at the TM result -- below the
@@ -1294,6 +1325,7 @@ int Rt_ShiftI( lua_State *L, int A, int B, int MmIns ) {
     int         Op   = ( GETARG_C( Mm ) == TM_SHL ) ? LUA_OPSHL : LUA_OPSHR;
     int         Flip = GETARG_k( Mm );
     setivalue( &ImmV, ( lua_Integer )GETARG_sB( Mm ) );
+    L->top.p = L->ci->top.p;   /* TM/error pushes go ABOVE live regs (round-6 fix) */
     if ( !Flip )
         luaO_arith( L, Op, s2v( Base + B ), &ImmV, Base + A );  /* value <op> imm */
     else
@@ -1326,7 +1358,7 @@ int Rt_ShiftI( lua_State *L, int A, int B, int MmIns ) {
 int Rt_ArithIK( lua_State *L, int A, int B, int MmIns ) {
     StkId       Base = L->ci->func.p + 1;
     Instruction Mm   = ( Instruction )( unsigned )MmIns;
-    int         Op   = ( int )GETARG_C( Mm ) - TM_ADD + LUA_OPADD;
+    int         Ev   = ( int )GETARG_C( Mm );          /* TM_* event */
     int         Flip = GETARG_k( Mm );
     TValue      ImmV;
     TValue     *P2;
@@ -1336,12 +1368,37 @@ int Rt_ArithIK( lua_State *L, int A, int B, int MmIns ) {
         setivalue( &ImmV, ( lua_Integer )GETARG_sB( Mm ) );
         P2 = &ImmV;
     }
-    if ( !Flip )
-        luaO_arith( L, Op, s2v( Base + B ), P2, Base + A );     /* value <op> K */
-    else
-        luaO_arith( L, Op, P2, s2v( Base + B ), Base + A );     /* K <op> value */
-    /* restore the metamethod-top invariant (see the arith helpers above) */
+
+    /* RAW numeric path first -- replicating the ORIGINAL opcode's arithmetic,
+       which is NOT always the MMBIN event's operation: `x - 0` compiles to
+       ADDI x,0 + MMBINI(TM_SUB, imm=+0), and lvm.c's ADDI arm computes the
+       ADDITION x + (-imm). Observable at x = -0.0: -0.0 + 0.0 == +0.0 but
+       -0.0 - 0.0 == -0.0. The event drives ONLY the metamethod dispatch. */
+    {
+        TValue        RawImm;
+        const TValue *R1, *R2;
+        int           RawOp = Ev - TM_ADD + LUA_OPADD;
+        if ( GET_OPCODE( Mm ) == OP_MMBINI && Ev == TM_SUB && !Flip ) {
+            /* original op was ADDI with sC = -imm: raw path adds the negation */
+            setivalue( &RawImm, -( lua_Integer )GETARG_sB( Mm ) );
+            RawOp = LUA_OPADD;  R1 = s2v( Base + B );  R2 = &RawImm;
+        } else if ( !Flip ) { R1 = s2v( Base + B );  R2 = P2; }
+        else                { R1 = P2;               R2 = s2v( Base + B ); }
+        if ( luaO_rawarith( L, RawOp, R1, R2, s2v( Base + A ) ) )
+            return 0;                                /* pure numeric: done */
+    }
+
+    /* Metamethod path: scratch space ABOVE the live registers (a stale low
+       top makes luaT pushes clobber the operand slots -- the round-6 bug),
+       then dispatch the MMBIN event with the ORIGINAL operand and order,
+       exactly like lvm.c OP_MMBINI/OP_MMBINK. luaT_trybinTM raises the
+       proper typed error when there is no handler. */
     L->top.p = L->ci->top.p;
+    if ( !Flip )
+        luaT_trybinTM( L, s2v( Base + B ), P2, Base + A, ( TMS )Ev );
+    else
+        luaT_trybinTM( L, P2, s2v( Base + B ), Base + A, ( TMS )Ev );
+    L->top.p = L->ci->top.p;   /* the TM leaves top at its result: restore */
     return 0;
 }
 

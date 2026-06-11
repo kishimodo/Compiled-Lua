@@ -9,9 +9,31 @@
 */
 #include "passes.h"
 #include "lobject.h"
+#include "lstate.h"    /* gco2ts for tsvalue/getstr (the "debug" constant scan) */
 #include "lopcodes.h"
 #include <stdlib.h>
 #include <string.h>
+
+/* TRUE iff any function in the module carries the string constant "debug".
+   debug.setlocal/setupvalue can rewrite ANY local of any live frame at
+   runtime, falsifying every static type proof -- so when the module so much
+   as mentions the debug global, the type-inference elisions are disabled
+   module-wide (the checked fastpaths, which re-verify tags at runtime, stay).
+   Conservative by constant-scan: a table FIELD named "debug" also trips it
+   (harmless), while a debug table assembled dynamically (_G["de".."bug"])
+   evades it -- documented residual, the standard optimizing-compiler
+   reflection caveat. */
+static bool module_uses_debug(LcModule *m) {
+  for (uint32_t i = 0; i < m->nfuncs; i++) {
+    Proto *p = m->funcs[i] ? m->funcs[i]->source : NULL;
+    if (!p) continue;
+    for (int k = 0; k < p->sizek; k++) {
+      const TValue *kv = &p->k[k];
+      if (ttisstring(kv) && strcmp(getstr(tsvalue(kv)), "debug") == 0) return true;
+    }
+  }
+  return false;
+}
 
 bool lc_optimize(LcModule *m, const LcPassConfig *cfg) {
   if (!m || !cfg) return false;
@@ -30,9 +52,10 @@ bool lc_optimize(LcModule *m, const LcPassConfig *cfg) {
   }
 
   if (cfg->opt_level >= 1) {
+    bool no_proofs = module_uses_debug(m);
     for (uint32_t i = 0; i < m->nfuncs; i++) {
       LcFunc *f = m->funcs[i];
-      lc_pass_local_typeinfer(f);
+      if (!no_proofs) lc_pass_local_typeinfer(f);
       lc_pass_specialize_arith(f);
       lc_pass_unbox_locals(f);
       lc_pass_devirt_local(f);
