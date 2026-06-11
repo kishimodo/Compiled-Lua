@@ -644,7 +644,8 @@ void lc_pass_ip_typeprop(LcModule *m) {
     uint32_t bi; LcInst *in;
     if (!f) continue;
     for (bi = 0; bi < f->nblocks; bi++)
-      for (in = f->blocks[bi]->first; in; in = in->next) in->call_ret_ti = 0;
+      for (in = f->blocks[bi]->first; in; in = in->next)
+        { in->call_ret_ti = 0; in->call_callee = -1; }
     ti_run(f, NULL, &A[fi]);
     if (f->source && f->source->numparams > 0) {
       ip[fi].param_meet = (int8_t *)calloc((size_t)f->source->numparams, 1);
@@ -790,7 +791,7 @@ inloop_ok: ;
         int argc = (call->b >= 1) ? call->b - 1 : -1;   /* -1 = to-top */
         const int8_t *sin = &t->st[(size_t)i * t->nregs];
         ip[callee].nsites++;
-        call->call_ret_ti = (int8_t)(0x40 | (callee & 0x3F)); /* stash idx; resolved later */
+        call->call_callee = callee;          /* resolved to a TI after B1 */
         if (ip[callee].param_meet) {
           for (k = 0; k < npar; k++) {
             int ti = TI_UNK;
@@ -901,8 +902,8 @@ next_fn:
       if (!f) continue;
       for (bi = 0; bi < f->nblocks; bi++)
         for (in = f->blocks[bi]->first; in; in = in->next) {
-          if (in->bc_op == OP_CALL && (in->call_ret_ti & 0x40)) {
-            int callee = in->call_ret_ti & 0x3F;
+          if (in->bc_op == OP_CALL && in->call_callee >= 0) {
+            int callee = in->call_callee;
             sites++;
             in->call_ret_ti = ((uint32_t)callee < m->nfuncs)
                                 ? ip[callee].ret_ti : 0;

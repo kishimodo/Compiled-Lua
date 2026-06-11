@@ -208,6 +208,11 @@ struct LcInst {
                       /* (TI_INT/TI_FLT), or 0. Consumed by ti_transfer when  */
                       /* the call takes exactly one result (C == 2): the      */
                       /* result register inherits the proof instead of UNK.   */
+  int32_t  call_callee;   /* OP_CALL only: module index of the statically-    */
+                      /* identified callee, or -1. A FULL-WIDTH field: attack  */
+                      /* round 12 proved that packing the index into 6 bits    */
+                      /* of call_ret_ti aliased fn65 onto fn1 and retagged a   */
+                      /* float return as the bits of an integer.               */
   LcInst  *next, *prev;
 };
 

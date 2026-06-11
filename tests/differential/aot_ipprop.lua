@@ -76,3 +76,51 @@ local function g1(x) return x + 10 end
 local function g2(x) return x * 2 end
 print(g1(g2(5)))                           -- 20
 print("done")
+
+-- attack round 12 regression: > 64 functions in the module -- the callee
+-- index must never alias (a 6-bit stash mapped fn65 onto fn1 and retagged a
+-- float return as raw integer bits)
+local fs = {}
+do
+  local function h01() return 0 end local function h02() return 0 end
+  local function h03() return 0 end local function h04() return 0 end
+  local function h05() return 0 end local function h06() return 0 end
+  local function h07() return 0 end local function h08() return 0 end
+  fs[1] = h01() + h02() + h03() + h04() + h05() + h06() + h07() + h08()
+end
+local function q01() return 1 end  local function q02() return 2 end
+local function q03() return 3 end  local function q04() return 4 end
+local function q05() return 5 end  local function q06() return 6 end
+local function q07() return 7 end  local function q08() return 8 end
+local function q09() return 9 end  local function q10() return 10 end
+local function q11() return 11 end local function q12() return 12 end
+local function q13() return 13 end local function q14() return 14 end
+local function q15() return 15 end local function q16() return 16 end
+local function q17() return 17 end local function q18() return 18 end
+local function q19() return 19 end local function q20() return 20 end
+local function q21() return 21 end local function q22() return 22 end
+local function q23() return 23 end local function q24() return 24 end
+local function q25() return 25 end local function q26() return 26 end
+local function q27() return 27 end local function q28() return 28 end
+local function q29() return 29 end local function q30() return 30 end
+local function q31() return 31 end local function q32() return 32 end
+local function q33() return 33 end local function q34() return 34 end
+local function q35() return 35 end local function q36() return 36 end
+local function q37() return 37 end local function q38() return 38 end
+local function q39() return 39 end local function q40() return 40 end
+local function q41() return 41 end local function q42() return 42 end
+local function q43() return 43 end local function q44() return 44 end
+local function q45() return 45 end local function q46() return 46 end
+local function q47() return 47 end local function q48() return 48 end
+local function q49() return 49 end local function q50() return 50 end
+local function q51() return 51 end local function q52() return 52 end
+local function q53() return 53 end local function q54() return 54 end
+local function q55() return 55 end local function q56() return 56 end
+local function q57() return 57 end local function q58() return 58 end
+local function q59() return 59 end local function q60() return 60 end
+local fT1 = nil
+local function fT() return 2.5 end
+local x = fT()
+print(x, math.type(x), x + 1, x * 2)       -- 2.5 float 3.5 5.0
+print(q01() + q60(), fs[1])                -- 61 0
+print("done2")
