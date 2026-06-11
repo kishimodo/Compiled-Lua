@@ -350,11 +350,14 @@ void lc_pass_local_typeinfer(LcFunc *f) {
              holding its loop-entry value (attack round 8: 1.5/"s"/nil/true
              were retagged as integers by the unconditional INT-tag spill). */
           in->res_entry_int = 0;
+          in->res_entry_flt = 0;
           if (in->c >= 0 && in->c <= maxpc && idxof[in->c] >= 0) {
             const int8_t *entry = &st[(size_t)idxof[in->c] * nregs];
             int s, lim = nregs < 64 ? nregs : 64;
-            for (s = 0; s < lim; s++)
+            for (s = 0; s < lim; s++) {
               if (entry[s] == TI_INT) in->res_entry_int |= ((uint64_t)1 << s);
+              if (entry[s] == TI_FLT) in->res_entry_flt |= ((uint64_t)1 << s);
+            }
           }
         }
         continue;

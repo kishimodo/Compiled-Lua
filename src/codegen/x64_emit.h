@@ -282,6 +282,31 @@ int X64Emit_ArithRaxReg( LcCodeBuf *Buf, unsigned char Op, X64_GPR_T Src );
 
 /*!
  * @brief
+ *  Wide-bank (xmm0..xmm15, REX.R/REX.B as needed) scalar-double and 128-bit
+ *  SSE forms for the float register residency:
+ *    MovsdLoadXmm / MovsdStoreXmm  -- xmmN <-> qword [Base + Disp]
+ *    MovsdXmmXmm                   -- xmmDst = xmmSrc (low 64)
+ *    ArithSdXmm0Xmm / ArithSdXmm0Mem -- addsd/subsd/mulsd/divsd xmm0, rhs
+ *                                        (Op = 0x58/0x5C/0x59/0x5E)
+ *    UcomisdXmm0Xmm                -- ucomisd xmm0, xmmN
+ *    MovupsStoreXmm / MovupsLoadXmm -- full 128-bit save/restore (prologue
+ *                                      xmm6..xmm10 spill area)
+ */
+int X64Emit_MovsdLoadXmm( LcCodeBuf *Buf, int XmmN, X64_GPR_T Base, int32_t Disp );
+int X64Emit_MovsdStoreXmm( LcCodeBuf *Buf, int XmmN, X64_GPR_T Base, int32_t Disp );
+int X64Emit_MovsdXmmXmm( LcCodeBuf *Buf, int Dst, int Src );
+int X64Emit_ArithSdXmm0Xmm( LcCodeBuf *Buf, unsigned char Op, int Src );
+int X64Emit_ArithSdXmm0Mem( LcCodeBuf *Buf, unsigned char Op,
+                            X64_GPR_T Base, int32_t Disp );
+int X64Emit_UcomisdXmm0Xmm( LcCodeBuf *Buf, int Src );
+int X64Emit_ArithSdXmmXmm( LcCodeBuf *Buf, unsigned char Op, int Dst, int Src );
+int X64Emit_ArithSdXmmMem( LcCodeBuf *Buf, unsigned char Op, int Dst,
+                           X64_GPR_T Base, int32_t Disp );
+int X64Emit_MovupsStoreXmm( LcCodeBuf *Buf, int XmmN, X64_GPR_T Base, int32_t Disp );
+int X64Emit_MovupsLoadXmm( LcCodeBuf *Buf, int XmmN, X64_GPR_T Base, int32_t Disp );
+
+/*!
+ * @brief
  *  CALL rel32 to an external symbol. Emits E8 <disp32=0> and records an
  *  LC_RELOC_REL32 against `Sym` at the disp32 offset. The linker resolves it.
  */

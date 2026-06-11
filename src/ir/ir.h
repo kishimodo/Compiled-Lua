@@ -201,6 +201,8 @@ struct LcInst {
                       /* still holding its loop-entry value, so that value   */
                       /* itself must be a proven int or the spill's INT      */
                       /* retag corrupts it (found by attack round 8).        */
+  uint64_t res_entry_flt; /* OP_FORLOOP only: same mask for proven-FLOAT     */
+                      /* slots -- the entry gate for XMM float residency.    */
   LcInst  *next, *prev;
 };
 

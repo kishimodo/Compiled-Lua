@@ -346,6 +346,76 @@ int X64Emit_UcomisdXmm0Mem( LcCodeBuf *Buf, X64_GPR_T Base, int32_t Disp ) {
     return EmitSse66MemForm( Buf, 0x2E, Base, Disp );
 }
 
+/*!
+ * @brief
+ *  General SSE "<Pfx> [REX] 0F <Op> /r" encoder with an XMM reg-field operand
+ *  (0..15) and either an XMM register r/m (RmXmm >= 0) or a [Base + Disp]
+ *  memory r/m (RmXmm < 0; Base must be a low GPR -- RDI/RSP here). Pfx 0
+ *  emits no prefix byte (movups). Emits REX only when an XMM operand is >= 8
+ *  (REX.R for the reg field, REX.B for a register r/m).
+ */
+static int EmitSseXmmRm( LcCodeBuf *Buf, int Pfx, unsigned char Op,
+                          int XmmReg, int RmXmm, X64_GPR_T Base, int32_t Disp ) {
+    unsigned char Tmp[ 10 ];
+    int N = 0;
+    unsigned char Rex = 0x40;
+    if ( XmmReg < 0 || XmmReg > 15 ) return 0;
+    if ( Pfx ) Tmp[ N++ ] = ( unsigned char )Pfx;
+    if ( XmmReg >= 8 ) Rex |= 0x04;                       /* REX.R */
+    if ( RmXmm >= 8 )  Rex |= 0x01;                       /* REX.B */
+    if ( Rex != 0x40 ) Tmp[ N++ ] = Rex;
+    Tmp[ N++ ] = 0x0F;
+    Tmp[ N++ ] = Op;
+    if ( RmXmm >= 0 ) {                                   /* register form */
+        Tmp[ N++ ] = ( unsigned char )( 0xC0 | ( ( XmmReg & 7 ) << 3 ) | ( RmXmm & 7 ) );
+    } else {                                              /* [Base + Disp] */
+        int Mod = ( Disp == 0 && ( int )Base != X64_RBP ) ? 0
+                : ( Disp >= -128 && Disp <= 127 ) ? 1 : 2;
+        if ( ( int )Base > 7 ) return 0;
+        Tmp[ N++ ] = ( unsigned char )( ( Mod << 6 ) | ( ( XmmReg & 7 ) << 3 ) | ( ( int )Base & 7 ) );
+        if ( ( int )Base == X64_RSP ) Tmp[ N++ ] = 0x24;  /* SIB */
+        if ( Mod == 1 ) {
+            Tmp[ N++ ] = ( unsigned char )( int8_t )Disp;
+        } else if ( Mod == 2 ) {
+            memcpy( &Tmp[ N ], &Disp, 4 ); N += 4;
+        }
+    }
+    return LcCodeBuf_Append( Buf, Tmp, ( size_t )N );
+}
+
+int X64Emit_MovsdLoadXmm( LcCodeBuf *Buf, int XmmN, X64_GPR_T Base, int32_t Disp ) {
+    return EmitSseXmmRm( Buf, 0xF2, 0x10, XmmN, -1, Base, Disp );   /* xmmN = m64 */
+}
+int X64Emit_MovsdStoreXmm( LcCodeBuf *Buf, int XmmN, X64_GPR_T Base, int32_t Disp ) {
+    return EmitSseXmmRm( Buf, 0xF2, 0x11, XmmN, -1, Base, Disp );   /* m64 = xmmN */
+}
+int X64Emit_MovsdXmmXmm( LcCodeBuf *Buf, int Dst, int Src ) {
+    return EmitSseXmmRm( Buf, 0xF2, 0x10, Dst, Src, X64_RAX, 0 );   /* xmmD = xmmS */
+}
+int X64Emit_ArithSdXmm0Xmm( LcCodeBuf *Buf, unsigned char Op, int Src ) {
+    return EmitSseXmmRm( Buf, 0xF2, Op, 0, Src, X64_RAX, 0 );       /* xmm0 op= xmmS */
+}
+int X64Emit_ArithSdXmm0Mem( LcCodeBuf *Buf, unsigned char Op,
+                            X64_GPR_T Base, int32_t Disp ) {
+    return EmitSseXmmRm( Buf, 0xF2, Op, 0, -1, Base, Disp );        /* xmm0 op= m64 */
+}
+int X64Emit_UcomisdXmm0Xmm( LcCodeBuf *Buf, int Src ) {
+    return EmitSseXmmRm( Buf, 0x66, 0x2E, 0, Src, X64_RAX, 0 );
+}
+int X64Emit_ArithSdXmmXmm( LcCodeBuf *Buf, unsigned char Op, int Dst, int Src ) {
+    return EmitSseXmmRm( Buf, 0xF2, Op, Dst, Src, X64_RAX, 0 );
+}
+int X64Emit_ArithSdXmmMem( LcCodeBuf *Buf, unsigned char Op, int Dst,
+                           X64_GPR_T Base, int32_t Disp ) {
+    return EmitSseXmmRm( Buf, 0xF2, Op, Dst, -1, Base, Disp );
+}
+int X64Emit_MovupsStoreXmm( LcCodeBuf *Buf, int XmmN, X64_GPR_T Base, int32_t Disp ) {
+    return EmitSseXmmRm( Buf, 0, 0x11, XmmN, -1, Base, Disp );      /* m128 = xmmN */
+}
+int X64Emit_MovupsLoadXmm( LcCodeBuf *Buf, int XmmN, X64_GPR_T Base, int32_t Disp ) {
+    return EmitSseXmmRm( Buf, 0, 0x10, XmmN, -1, Base, Disp );      /* xmmN = m128 */
+}
+
 int X64Emit_UcomisdXmm0Xmm1( LcCodeBuf *Buf ) {
     /* 66 0F 2E C1 -- UCOMISD xmm0, xmm1. */
     unsigned char Tmp[ 4 ] = { 0x66, 0x0F, 0x2E, 0xC1 };
@@ -434,12 +504,14 @@ int X64Emit_MovqReg64ToXmm0( LcCodeBuf *Buf, X64_GPR_T Src ) {
 }
 
 int X64Emit_MovqReg64ToXmmN( LcCodeBuf *Buf, int XmmN, X64_GPR_T Src ) {
-    /* 66 REX.W 0F 6E /r -- MOVQ xmm, r/m64.  ModR/M reg = XmmN, rm = Src. */
+    /* 66 REX.W 0F 6E /r -- MOVQ xmm, r/m64.  ModR/M reg = XmmN (0..15, REX.R
+       for the high bank), rm = Src. */
     unsigned char Tmp[ 5 ];
     int N = 0;
-    if ( XmmN < 0 || XmmN > 7 ) return 0;
+    if ( XmmN < 0 || XmmN > 15 ) return 0;
     Tmp[ N++ ] = 0x66;
-    Tmp[ N++ ] = ( unsigned char )( 0x48 | ( ( ( int )Src & 8 ) ? 0x01 : 0 ) );
+    Tmp[ N++ ] = ( unsigned char )( 0x48 | ( ( XmmN & 8 ) ? 0x04 : 0 )
+                                         | ( ( ( int )Src & 8 ) ? 0x01 : 0 ) );
     Tmp[ N++ ] = 0x0F;
     Tmp[ N++ ] = 0x6E;
     Tmp[ N++ ] = ( unsigned char )( 0xC0 | ( ( XmmN & 7 ) << 3 ) | ( ( int )Src & 7 ) );

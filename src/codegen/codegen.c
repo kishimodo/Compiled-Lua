@@ -72,6 +72,12 @@ static int g_lc_opt_level = 0;
  *  Stack layout: 7 pushes (56 bytes) + return address (8) = 64.
  *  sub rsp, 0x20 (32) -> 96 total, which is 16-aligned at calls.
  */
+/* Float-residency constants needed by the prologue/epilogue (the full
+   definitions of the residency machinery follow the lowering section). */
+#define LC_RES_NREGS 5
+static const int k_res_xmm[ LC_RES_NREGS ] = { 6, 7, 8, 9, 10 };
+static int       g_res_fn_xmm = 0;   /* fn uses float residents: save xmm6-10 */
+
 int LcCg_EmitPrologue( LcCodeBuf *B ) {
     /* save all callee-saved registers we'll use: RBX (L), RDI (regbase),
        then R12-R15 and RSI (cache regs in M1; pushed now for frame parity) */
@@ -83,6 +89,16 @@ int LcCg_EmitPrologue( LcCodeBuf *B ) {
     if ( !X64Emit_PushReg( B, X64_R15 ) ) return 0;
     if ( !X64Emit_PushReg( B, X64_RSI ) ) return 0;
     /* 7 pushes = 56 bytes; with return address (8) = 64; +0x20 shadow = 96, 16-aligned */
+    /* xmm6..xmm10 are Win64 callee-saved (full 128 bits); save them only when
+       this function uses float residency (g_res_fn_xmm, set by res_analyze
+       before the prologue is emitted). 5*16 = 80 keeps RSP 16-aligned. */
+    if ( g_res_fn_xmm ) {
+        int xi;
+        if ( !X64Emit_SubRspImm( B, 0x50 ) ) return 0;
+        for ( xi = 0; xi < LC_RES_NREGS; xi++ )
+            if ( !X64Emit_MovupsStoreXmm( B, k_res_xmm[ xi ], X64_RSP, xi * 16 ) )
+                return 0;
+    }
     if ( !X64Emit_SubRspImm( B, 0x20 ) )  return 0;
     /* rbx = rcx (save L in a callee-saved register; rcx is volatile across calls) */
     if ( !X64Emit_MovRegToReg( B, X64_RBX, X64_RCX ) ) return 0;
@@ -105,6 +121,13 @@ int LcCg_EmitPrologue( LcCodeBuf *B ) {
  */
 int LcCg_EmitEpilogue( LcCodeBuf *B ) {
     if ( !X64Emit_AddRspImm( B, 0x20 ) )  return 0;
+    if ( g_res_fn_xmm ) {                 /* mirror the prologue's xmm saves */
+        int xi;
+        for ( xi = 0; xi < LC_RES_NREGS; xi++ )
+            if ( !X64Emit_MovupsLoadXmm( B, k_res_xmm[ xi ], X64_RSP, xi * 16 ) )
+                return 0;
+        if ( !X64Emit_AddRspImm( B, 0x50 ) ) return 0;
+    }
     if ( !X64Emit_PopReg( B, X64_RSI ) )  return 0;
     if ( !X64Emit_PopReg( B, X64_R15 ) )  return 0;
     if ( !X64Emit_PopReg( B, X64_R14 ) )  return 0;
@@ -270,15 +293,16 @@ typedef enum { LC_AR_ADD, LC_AR_SUB, LC_AR_MUL,
 /* slot tags stay INT throughout. The zero-trip FORPREP branch targets  */
 /* the pc after the spills, skipping fill and spill alike.              */
 /* ------------------------------------------------------------------ */
-#define LC_RES_NREGS 5
 typedef struct LcResRegion {
     int    start;                  /* first body pc (FORLOOP back-edge target) */
     int    end;                    /* the OP_FORLOOP pc                        */
-    int8_t slot[ LC_RES_NREGS ];   /* resident Lua slot per cache reg, or -1  */
+    int8_t slot[ LC_RES_NREGS ];   /* resident int slot per cache GPR, or -1  */
+    int8_t fslot[ LC_RES_NREGS ];  /* resident float slot per cache XMM, -1   */
 } LcResRegion;
 
 static const X64_GPR_T k_res_gpr[ LC_RES_NREGS ] =
     { X64_R12, X64_R13, X64_R14, X64_R15, X64_RSI };
+/* (k_res_xmm / g_res_fn_xmm are defined above the prologue, which needs them.) */
 
 static LcResRegion *g_res_regions = NULL;   /* current function's regions */
 static int          g_res_n   = 0;
@@ -310,6 +334,46 @@ static int res_load_rax( LcCodeBuf *B, int slot )      { return res_load_reg( B,
 static int res_store_rax_int( LcCodeBuf *B, int slot ) { return res_store_reg_int( B, slot, X64_RAX ); }
 static int res_arith_rax( LcCodeBuf *B, LcArOp op, int slot );  /* after emit_arith_rax_mem */
 static int res_cmp_rax( LcCodeBuf *B, int slot );               /* after emit_cmp_rax_mem  */
+
+/* Cache XMM holding `slot` in the active region, or -1 (memory form). */
+static int res_freg_of( int slot ) {
+    int i;
+    if ( g_res_cur < 0 ) return -1;
+    for ( i = 0; i < LC_RES_NREGS; i++ )
+        if ( g_res_regions[ g_res_cur ].fslot[ i ] == slot ) return k_res_xmm[ i ];
+    return -1;
+}
+/* xmm0 = slot (resident xmm move, or frame-slot load). */
+static int res_f_load_xmm0( LcCodeBuf *B, int slot ) {
+    int x = res_freg_of( slot );
+    return ( x >= 0 ) ? X64Emit_MovsdXmmXmm( B, 0, x )
+                      : X64Emit_MovsdMemToXmm0( B, X64_RDI, slot * 16 );
+}
+/* xmmN = slot (N may be 1 for the K-compare forms). */
+static int res_f_load_xmmn( LcCodeBuf *B, int n, int slot ) {
+    int x = res_freg_of( slot );
+    return ( x >= 0 ) ? X64Emit_MovsdXmmXmm( B, n, x )
+                      : X64Emit_MovsdLoadXmm( B, n, X64_RDI, slot * 16 );
+}
+/* slot = xmm0, as a proven float (xmm move, or value store + FLT tag). */
+static int res_f_store_xmm0_flt( LcCodeBuf *B, int slot ) {
+    int x = res_freg_of( slot );
+    if ( x >= 0 ) return X64Emit_MovsdXmmXmm( B, x, 0 );
+    if ( !X64Emit_MovsdXmm0ToMem( B, X64_RDI, slot * 16 ) ) return 0;
+    return X64Emit_MovImm32ToMem( B, X64_RDI, slot * 16 + 8, LUA_VNUMFLT );
+}
+/* xmm0 <sse-op>= slot (0x58 add / 0x5C sub / 0x59 mul / 0x5E div). */
+static int res_f_arith_xmm0( LcCodeBuf *B, unsigned char sse_op, int slot ) {
+    int x = res_freg_of( slot );
+    return ( x >= 0 ) ? X64Emit_ArithSdXmm0Xmm( B, sse_op, x )
+                      : X64Emit_ArithSdXmm0Mem( B, sse_op, X64_RDI, slot * 16 );
+}
+/* ucomisd xmm0, slot. */
+static int res_f_ucomisd_xmm0( LcCodeBuf *B, int slot ) {
+    int x = res_freg_of( slot );
+    return ( x >= 0 ) ? X64Emit_UcomisdXmm0Xmm( B, x )
+                      : X64Emit_UcomisdXmm0Mem( B, X64_RDI, slot * 16 );
+}
 
 /*!
  * @brief
@@ -478,6 +542,11 @@ static int lower_move( LcCodeBuf *B, LcInst *in ) {
         if ( !res_load_rax( B, Bs ) ) return 0;
         return res_store_rax_int( B, A );
     }
+    /* Proven-float source: same, with the FLT tag. */
+    if ( g_lc_opt_level >= 1 && ( in->known & LC_KNOWN_B_FLT ) ) {
+        if ( !res_f_load_xmm0( B, Bs ) ) return 0;
+        return res_f_store_xmm0_flt( B, A );
+    }
     /* value half via R10 */
     if ( !X64Emit_MovMemToReg( B, X64_R10, X64_RDI, Bs * 16 ) )       return 0;
     if ( !X64Emit_MovRegToMem( B, X64_RDI, A * 16, X64_R10 ) )        return 0;
@@ -501,11 +570,19 @@ static int lower_loadi( LcCodeBuf *B, LcInst *in ) {
 }
 
 /* LOADF A sBx: R[A] = (double)sBx (bit pattern), tag LUA_VNUMFLT. */
+static int res_f_loadf_resident( LcCodeBuf *B, int xreg, uint64_t bits ) {
+    if ( !X64Emit_MovImm64ToReg( B, X64_RAX, bits ) ) return 0;
+    return X64Emit_MovqReg64ToXmmN( B, xreg, X64_RAX );
+}
 static int lower_loadf( LcCodeBuf *B, LcInst *in ) {
     int A = in->a;
     double d = ( double )in->b;     /* sBx carried in `b` */
     uint64_t bits = 0;
+    int x;
     memcpy( &bits, &d, 8 );
+    x = res_freg_of( A );
+    if ( x >= 0 )                   /* resident dst: materialize straight in */
+        return res_f_loadf_resident( B, x, bits );
     if ( !X64Emit_MovImm64ToReg( B, X64_RAX, bits ) )                return 0;
     if ( !X64Emit_MovRegToMem( B, X64_RDI, A * 16, X64_RAX ) )        return 0;
     if ( !X64Emit_MovImm32ToMem( B, X64_RDI, A * 16 + 8, LUA_VNUMFLT ) ) return 0;
@@ -682,15 +759,15 @@ static int lower_cmp( LcBranchCtx *Br, LcInst *in, const char *Helper, int harg2
         if ( op1_flt && op2_flt && in->bc_op != OP_EQI ) {
             if ( is_regreg ) {
                 if ( in->bc_op == OP_EQ ) {
-                    if ( !X64Emit_MovsdMemToXmm0( B, X64_RDI, A * 16 ) ) return 0;
-                    if ( !X64Emit_UcomisdXmm0Mem( B, X64_RDI, Bop * 16 ) ) return 0;
+                    if ( !res_f_load_xmm0( B, A ) ) return 0;
+                    if ( !res_f_ucomisd_xmm0( B, Bop ) ) return 0;
                     if ( !emit_setcc_movzx_r11( B, 0x4 ) ) return 0;   /* r11d = ZF */
                     { unsigned char S[ 6 ] = { 0x0F, 0x9B, 0xC0,       /* setnp al  */
                                                0x41, 0x20, 0xC3 };     /* and r11b, al */
                       if ( !LcCodeBuf_Append( B, S, 6 ) ) return 0; }
                 } else {            /* LT / LE: compare swapped, then seta/setae */
-                    if ( !X64Emit_MovsdMemToXmm0( B, X64_RDI, Bop * 16 ) ) return 0;
-                    if ( !X64Emit_UcomisdXmm0Mem( B, X64_RDI, A * 16 ) ) return 0;
+                    if ( !res_f_load_xmm0( B, Bop ) ) return 0;
+                    if ( !res_f_ucomisd_xmm0( B, A ) ) return 0;
                     if ( !emit_setcc_movzx_r11( B,
                             in->bc_op == OP_LT ? 0x7 : 0x3 ) ) return 0;
                 }
@@ -699,13 +776,13 @@ static int lower_cmp( LcBranchCtx *Br, LcInst *in, const char *Helper, int harg2
                 uint64_t kbits; memcpy( &kbits, &kd, 8 );
                 int gt = ( in->bc_op == OP_GTI || in->bc_op == OP_GEI );
                 if ( gt ) {         /* a > K / a >= K: xmm0 = a, xmm1 = K */
-                    if ( !X64Emit_MovsdMemToXmm0( B, X64_RDI, A * 16 ) ) return 0;
+                    if ( !res_f_load_xmm0( B, A ) ) return 0;
                     if ( !X64Emit_MovImm64ToReg( B, X64_RAX, kbits ) ) return 0;
                     if ( !X64Emit_MovqReg64ToXmmN( B, 1, X64_RAX ) ) return 0;
                 } else {            /* a < K / a <= K: xmm0 = K, xmm1 = a */
                     if ( !X64Emit_MovImm64ToReg( B, X64_RAX, kbits ) ) return 0;
                     if ( !X64Emit_MovqReg64ToXmm0( B, X64_RAX ) ) return 0;
-                    if ( !X64Emit_MovsdMemToXmmN( B, 1, X64_RDI, A * 16 ) ) return 0;
+                    if ( !res_f_load_xmmn( B, 1, A ) ) return 0;
                 }
                 if ( !X64Emit_UcomisdXmm0Xmm1( B ) ) return 0;
                 if ( !emit_setcc_movzx_r11( B,
@@ -1067,13 +1144,17 @@ static int lower_arith_fast( LcCodeBuf *Bb, LcInst *in, LcArOp op,
        no helper. has_float gates it to ADD/SUB/MUL (never bitwise). Sound: float
        arith carries no metamethod, so two proven floats always yield a float. */
     if ( has_float && ( in->known & LC_KNOWN_B_FLT ) && ( in->known & LC_KNOWN_C_FLT ) ) {
-        if ( !X64Emit_MovsdMemToXmm0( Bb, X64_RDI, Br * 16 ) ) return 0;
-        ok = ( op == LC_AR_ADD ) ? X64Emit_AddsdMemToXmm0( Bb, X64_RDI, Cr * 16 )
-           : ( op == LC_AR_SUB ) ? X64Emit_SubsdMemToXmm0( Bb, X64_RDI, Cr * 16 )
-                                 : X64Emit_MulsdMemToXmm0( Bb, X64_RDI, Cr * 16 );
-        if ( !ok ) return 0;
-        if ( !X64Emit_MovsdXmm0ToMem( Bb, X64_RDI, A * 16 ) ) return 0;
-        if ( !X64Emit_MovImm32ToMem( Bb, X64_RDI, A * 16 + 8, LUA_VNUMFLT ) ) return 0;
+        unsigned char sse =
+            ( op == LC_AR_ADD ) ? 0x58 : ( op == LC_AR_SUB ) ? 0x5C : 0x59;
+        int xa = res_freg_of( A );
+        if ( xa >= 0 && A == Br ) {            /* in-place: f = f <op> g */
+            int xc = res_freg_of( Cr );
+            return ( xc >= 0 ) ? X64Emit_ArithSdXmmXmm( Bb, sse, xa, xc )
+                               : X64Emit_ArithSdXmmMem( Bb, sse, xa, X64_RDI, Cr * 16 );
+        }
+        if ( !res_f_load_xmm0( Bb, Br ) ) return 0;
+        if ( !res_f_arith_xmm0( Bb, sse, Cr ) ) return 0;
+        if ( !res_f_store_xmm0_flt( Bb, A ) ) return 0;
         return 1;
     }
 
@@ -1279,12 +1360,20 @@ static int k_flt_bits( LcFunc *f, int idx, uint64_t *out ) {
 static int lower_arithk_flt_elide( LcCodeBuf *B, LcInst *in,
                                    unsigned char sse_op, uint64_t kbits ) {
     int A = in->a, Br = in->b;
-    if ( !X64Emit_MovsdMemToXmm0( B, X64_RDI, Br * 16 ) ) return 0;
+    int xa = res_freg_of( A );
+    /* In-place resident accumulate (f = f <op> K): operate directly on the
+       resident xmm -- the xmm0 round-trip costs two movsd on the loop's
+       critical dependency chain. */
+    if ( xa >= 0 && A == Br ) {
+        if ( !X64Emit_MovImm64ToReg( B, X64_RAX, kbits ) ) return 0;
+        if ( !X64Emit_MovqReg64ToXmmN( B, 1, X64_RAX ) ) return 0;
+        return X64Emit_ArithSdXmmXmm( B, sse_op, xa, 1 );
+    }
+    if ( !res_f_load_xmm0( B, Br ) ) return 0;
     if ( !X64Emit_MovImm64ToReg( B, X64_RAX, kbits ) ) return 0;
     if ( !X64Emit_MovqReg64ToXmmN( B, 1, X64_RAX ) ) return 0;
     if ( !X64Emit_ArithSdXmm0Xmm1( B, sse_op ) ) return 0;
-    if ( !X64Emit_MovsdXmm0ToMem( B, X64_RDI, A * 16 ) ) return 0;
-    if ( !X64Emit_MovImm32ToMem( B, X64_RDI, A * 16 + 8, LUA_VNUMFLT ) ) return 0;
+    if ( !res_f_store_xmm0_flt( B, A ) ) return 0;
     return 1;
 }
 
@@ -1331,10 +1420,9 @@ static int lower_inst( LcBranchCtx *Br, LcFunc *f, LcInst *in ) {
                           (DIV of two floats is always a float, no metamethod). */
                        if ( g_lc_opt_level >= 1 && ( in->known & LC_KNOWN_B_FLT )
                             && ( in->known & LC_KNOWN_C_FLT ) ) {
-                           if ( !X64Emit_MovsdMemToXmm0( B, X64_RDI, in->b * 16 ) ) return 0;
-                           if ( !X64Emit_DivsdMemToXmm0( B, X64_RDI, in->c * 16 ) ) return 0;
-                           if ( !X64Emit_MovsdXmm0ToMem( B, X64_RDI, in->a * 16 ) ) return 0;
-                           if ( !X64Emit_MovImm32ToMem( B, X64_RDI, in->a * 16 + 8, LUA_VNUMFLT ) ) return 0;
+                           if ( !res_f_load_xmm0( B, in->b ) ) return 0;
+                           if ( !res_f_arith_xmm0( B, 0x5E, in->c ) ) return 0;
+                           if ( !res_f_store_xmm0_flt( B, in->a ) ) return 0;
                            return 1;
                        }
                        return lower_helper3( B, in, "Rt_DivOp",  1 );
@@ -1521,12 +1609,17 @@ static int lower_inst( LcBranchCtx *Br, LcFunc *f, LcInst *in ) {
 /* path is emitted unchanged.                                           */
 /* ------------------------------------------------------------------ */
 #define RES_RD_INT( s ) do { int _s = ( s ); \
-    if ( _s >= 0 && _s < nslots ) cnt[ _s ]++; } while ( 0 )
+    if ( _s >= 0 && _s < nslots ) cnti[ _s ]++; } while ( 0 )
+#define RES_RD_FLT( s ) do { int _s = ( s ); \
+    if ( _s >= 0 && _s < nslots ) cntf[ _s ]++; } while ( 0 )
 #define RES_RD_OTH( s ) do { int _s = ( s ); \
     if ( _s >= 0 && _s < nslots ) dirty[ _s ] = 1; } while ( 0 )
 #define RES_WR_INT( s ) do { int _s = ( s ); \
     if ( _s >= La && _s <= La + 2 ) goto reject;  /* loop internals */ \
-    if ( _s >= 0 && _s < nslots ) cnt[ _s ]++; } while ( 0 )
+    if ( _s >= 0 && _s < nslots ) cnti[ _s ]++; } while ( 0 )
+#define RES_WR_FLT( s ) do { int _s = ( s ); \
+    if ( _s >= La && _s <= La + 2 ) goto reject; \
+    if ( _s >= 0 && _s < nslots ) cntf[ _s ]++; } while ( 0 )
 #define RES_WR_OTH( s ) do { int _s = ( s ); \
     if ( _s >= La && _s <= La + 2 ) goto reject; \
     if ( _s >= 0 && _s < nslots ) dirty[ _s ] = 1; } while ( 0 )
@@ -1534,16 +1627,18 @@ static int lower_inst( LcBranchCtx *Br, LcFunc *f, LcInst *in ) {
 static int res_qualify( LcFunc *f, LcInst **map, int T, int P, LcResRegion *out ) {
     int     nslots = ( f && f->source ) ? f->source->maxstacksize : 0;
     int     La     = map[ P ]->a;
-    int    *cnt    = NULL;
+    int    *cnti   = NULL;
+    int    *cntf   = NULL;
     uint8_t *dirty = NULL;
     int     pc, i, k;
 
     if ( nslots <= 0 || La + 3 >= nslots ) return 0;
     if ( T < 1 || T > P ) return 0;
     if ( !map[ T - 1 ] || map[ T - 1 ]->bc_op != OP_FORPREP ) return 0;
-    cnt   = ( int * )calloc( ( size_t )nslots, sizeof( int ) );
+    cnti  = ( int * )calloc( ( size_t )nslots, sizeof( int ) );
+    cntf  = ( int * )calloc( ( size_t )nslots, sizeof( int ) );
     dirty = ( uint8_t * )calloc( ( size_t )nslots, 1 );
-    if ( !cnt || !dirty ) goto reject;
+    if ( !cnti || !cntf || !dirty ) goto reject;
 
     for ( pc = T; pc < P; pc++ ) {
         LcInst *in = map[ pc ];
@@ -1555,7 +1650,7 @@ static int res_qualify( LcFunc *f, LcInst **map, int T, int P, LcResRegion *out 
             if ( ( in->known & LC_KNOWN_B_INT ) && ( in->known & LC_KNOWN_C_INT ) ) {
                 RES_RD_INT( in->b ); RES_RD_INT( in->c ); RES_WR_INT( in->a );
             } else if ( ( in->known & LC_KNOWN_B_FLT ) && ( in->known & LC_KNOWN_C_FLT ) ) {
-                RES_RD_OTH( in->b ); RES_RD_OTH( in->c ); RES_WR_OTH( in->a );
+                RES_RD_FLT( in->b ); RES_RD_FLT( in->c ); RES_WR_FLT( in->a );
             } else goto reject;                /* checked fastpath: helper arm */
             break;
         case OP_BAND: case OP_BOR: case OP_BXOR:
@@ -1565,27 +1660,27 @@ static int res_qualify( LcFunc *f, LcInst **map, int T, int P, LcResRegion *out 
             break;
         case OP_DIV:                            /* FLT/FLT divsd elide only */
             if ( ( in->known & LC_KNOWN_B_FLT ) && ( in->known & LC_KNOWN_C_FLT ) ) {
-                RES_RD_OTH( in->b ); RES_RD_OTH( in->c ); RES_WR_OTH( in->a );
+                RES_RD_FLT( in->b ); RES_RD_FLT( in->c ); RES_WR_FLT( in->a );
             } else goto reject;
             break;
         /* elided imm/K arith (mirror the dispatch + lower_arith_imm_fast) */
         case OP_ADDI:
             if ( in->known & LC_KNOWN_B_FLT ) {
-                RES_RD_OTH( in->b ); RES_WR_OTH( in->a );
+                RES_RD_FLT( in->b ); RES_WR_FLT( in->a );
             } else if ( in->known & LC_KNOWN_B_INT ) {
                 RES_RD_INT( in->b ); RES_WR_INT( in->a );
             } else goto reject;
             break;
         case OP_ADDK: case OP_SUBK: case OP_MULK:
             if ( ( in->known & LC_KNOWN_B_FLT ) && k_flt_bits( f, in->c, &kb ) ) {
-                RES_RD_OTH( in->b ); RES_WR_OTH( in->a );
+                RES_RD_FLT( in->b ); RES_WR_FLT( in->a );
             } else if ( ( in->known & LC_KNOWN_B_INT ) && k_int32( f, in->c, &kv ) ) {
                 RES_RD_INT( in->b ); RES_WR_INT( in->a );
             } else goto reject;
             break;
         case OP_DIVK:
             if ( ( in->known & LC_KNOWN_B_FLT ) && k_flt_bits( f, in->c, &kb ) ) {
-                RES_RD_OTH( in->b ); RES_WR_OTH( in->a );
+                RES_RD_FLT( in->b ); RES_WR_FLT( in->a );
             } else goto reject;
             break;
         case OP_BANDK: case OP_BORK: case OP_BXORK:
@@ -1599,13 +1694,13 @@ static int res_qualify( LcFunc *f, LcInst **map, int T, int P, LcResRegion *out 
             if ( ( in->known & LC_KNOWN_B_INT ) && ( in->known & LC_KNOWN_C_INT ) ) {
                 RES_RD_INT( in->a ); RES_RD_INT( in->b );
             } else if ( ( in->known & LC_KNOWN_B_FLT ) && ( in->known & LC_KNOWN_C_FLT ) ) {
-                RES_RD_OTH( in->a ); RES_RD_OTH( in->b );
+                RES_RD_FLT( in->a ); RES_RD_FLT( in->b );
             } else goto reject;
             break;
         case OP_LTI: case OP_LEI: case OP_GTI: case OP_GEI:
             if ( pc + 2 > P ) goto reject;
             if ( in->known & LC_KNOWN_B_INT )      { RES_RD_INT( in->a ); }
-            else if ( in->known & LC_KNOWN_B_FLT ) { RES_RD_OTH( in->a ); }
+            else if ( in->known & LC_KNOWN_B_FLT ) { RES_RD_FLT( in->a ); }
             else goto reject;
             break;
         case OP_EQI:
@@ -1617,13 +1712,17 @@ static int res_qualify( LcFunc *f, LcInst **map, int T, int P, LcResRegion *out 
         case OP_MOVE:
             if ( in->known & LC_KNOWN_B_INT ) {
                 RES_RD_INT( in->b ); RES_WR_INT( in->a );
+            } else if ( in->known & LC_KNOWN_B_FLT ) {
+                RES_RD_FLT( in->b ); RES_WR_FLT( in->a );
             } else {
                 RES_RD_OTH( in->b ); RES_WR_OTH( in->a );
             }
             break;
         case OP_LOADI:
             RES_WR_INT( in->a ); break;
-        case OP_LOADF: case OP_LOADK: case OP_LOADTRUE: case OP_LOADFALSE:
+        case OP_LOADF:
+            RES_WR_FLT( in->a ); break;
+        case OP_LOADK: case OP_LOADTRUE: case OP_LOADFALSE:
         case OP_LFALSESKIP:
             RES_WR_OTH( in->a ); break;
         case OP_LOADNIL:
@@ -1646,38 +1745,57 @@ static int res_qualify( LcFunc *f, LcInst **map, int T, int P, LcResRegion *out 
 
     if ( dirty[ La ] || dirty[ La + 1 ] || dirty[ La + 2 ] ) goto reject;
 
-    /* ENTRY-TYPE GATE (attack round 8): a candidate must be PROVEN integer in
-       the dataflow state at region entry (the FORLOOP's res_entry_int mask).
-       In-region access proofs alone are NOT enough -- a slot whose only
-       writes sit behind a branch can reach the exit spill still holding its
-       loop-entry float/string/nil/boolean, which the spill's unconditional
-       INT retag would silently corrupt (1.5 -> 4609434218613702656). The
-       loop internals La..La+2 are exempt: FORPREP rewrote them as integers
-       on the only edge that enters the region, and the body provably never
-       writes them (checked above). Slots >= 64 simply never qualify. */
+    /* A slot accessed as BOTH int and float (retyped mid-region) stays in
+       memory: each access is still elided per its own per-pc proof. */
+    for ( i = 0; i < nslots; i++ )
+        if ( cnti[ i ] && cntf[ i ] ) dirty[ i ] = 1;
+
+    /* ENTRY-TYPE GATE (attack round 8): a candidate must be PROVEN to hold
+       its class's type in the dataflow state at region entry (res_entry_int /
+       res_entry_flt masks on the FORLOOP). In-region access proofs alone are
+       NOT enough -- a slot whose only writes sit behind a branch can reach
+       the exit spill still holding its loop-entry value, which the spill's
+       unconditional retag would silently corrupt (round 8: 1.5 became
+       4609434218613702656). The loop internals La..La+2 are exempt: FORPREP
+       rewrote them as integers on the only edge that enters the region, and
+       the body provably never writes them (checked above). Slots >= 64
+       simply never qualify. */
     for ( i = 0; i < nslots; i++ ) {
         if ( i >= La && i <= La + 2 ) continue;
-        if ( i >= 64 || !( ( map[ P ]->res_entry_int >> i ) & 1 ) )
+        if ( cnti[ i ] &&
+             ( i >= 64 || !( ( map[ P ]->res_entry_int >> i ) & 1 ) ) )
+            dirty[ i ] = 1;
+        if ( cntf[ i ] &&
+             ( i >= 64 || !( ( map[ P ]->res_entry_flt >> i ) & 1 ) ) )
             dirty[ i ] = 1;
     }
 
     /* the FORLOOP touches index/count/step/ctrl every iteration */
-    cnt[ La ] += 1000; cnt[ La + 1 ] += 1000; cnt[ La + 2 ] += 500;
-    if ( !dirty[ La + 3 ] ) cnt[ La + 3 ] += 1000;
+    cnti[ La ] += 1000; cnti[ La + 1 ] += 1000; cnti[ La + 2 ] += 500;
+    if ( !dirty[ La + 3 ] && !cntf[ La + 3 ] ) cnti[ La + 3 ] += 1000;
 
     out->start = T;
     out->end   = P;
     for ( k = 0; k < LC_RES_NREGS; k++ ) {
         int best = -1, besti = -1;
         for ( i = 0; i < nslots; i++ )
-            if ( !dirty[ i ] && cnt[ i ] > 0 && cnt[ i ] > best ) { best = cnt[ i ]; besti = i; }
+            if ( !dirty[ i ] && cntf[ i ] == 0 && cnti[ i ] > 0 && cnti[ i ] > best )
+                { best = cnti[ i ]; besti = i; }
         out->slot[ k ] = ( int8_t )besti;
-        if ( besti >= 0 ) cnt[ besti ] = 0;     /* consumed */
+        if ( besti >= 0 ) cnti[ besti ] = 0;    /* consumed */
     }
-    free( cnt ); free( dirty );
-    return out->slot[ 0 ] >= 0;                 /* at least one resident */
+    for ( k = 0; k < LC_RES_NREGS; k++ ) {
+        int best = -1, besti = -1;
+        for ( i = 0; i < nslots; i++ )
+            if ( !dirty[ i ] && cnti[ i ] == 0 && cntf[ i ] > 0 && cntf[ i ] > best )
+                { best = cntf[ i ]; besti = i; }
+        out->fslot[ k ] = ( int8_t )besti;
+        if ( besti >= 0 ) cntf[ besti ] = 0;    /* consumed */
+    }
+    free( cnti ); free( cntf ); free( dirty );
+    return out->slot[ 0 ] >= 0 || out->fslot[ 0 ] >= 0;
 reject:
-    free( cnt ); free( dirty );
+    free( cnti ); free( cntf ); free( dirty );
     return 0;
 }
 
@@ -1688,7 +1806,7 @@ static void res_analyze( LcFunc *f ) {
     uint32_t  bi;
     LcInst   *in;
     int       pc;
-    g_res_regions = NULL; g_res_n = 0; g_res_cur = -1;
+    g_res_regions = NULL; g_res_n = 0; g_res_cur = -1; g_res_fn_xmm = 0;
     if ( g_lc_opt_level < 1 || sizecode <= 0 ) return;
     map = ( LcInst ** )calloc( ( size_t )sizecode, sizeof( LcInst * ) );
     if ( !map ) return;
@@ -1709,6 +1827,7 @@ static void res_analyze( LcFunc *f ) {
                 if ( !grown ) break;
                 g_res_regions = grown;
                 g_res_regions[ g_res_n++ ] = r;
+                if ( r.fslot[ 0 ] >= 0 ) g_res_fn_xmm = 1;
             }
         }
     }
@@ -1719,7 +1838,10 @@ static int res_emit_fills( LcCodeBuf *B, int ri ) {
     int i;
     for ( i = 0; i < LC_RES_NREGS; i++ ) {
         int s = g_res_regions[ ri ].slot[ i ];
+        int fs = g_res_regions[ ri ].fslot[ i ];
         if ( s >= 0 && !X64Emit_MovMemToReg( B, k_res_gpr[ i ], X64_RDI, s * 16 ) )
+            return 0;
+        if ( fs >= 0 && !X64Emit_MovsdLoadXmm( B, k_res_xmm[ i ], X64_RDI, fs * 16 ) )
             return 0;
     }
     return 1;
@@ -1727,10 +1849,16 @@ static int res_emit_fills( LcCodeBuf *B, int ri ) {
 static int res_emit_spills( LcCodeBuf *B ) {
     int i;
     for ( i = 0; i < LC_RES_NREGS; i++ ) {
-        int s = g_res_regions[ g_res_cur ].slot[ i ];
-        if ( s < 0 ) continue;
-        if ( !X64Emit_MovRegToMem( B, X64_RDI, s * 16, k_res_gpr[ i ] ) ) return 0;
-        if ( !X64Emit_MovImm32ToMem( B, X64_RDI, s * 16 + 8, LUA_VNUMINT ) ) return 0;
+        int s  = g_res_regions[ g_res_cur ].slot[ i ];
+        int fs = g_res_regions[ g_res_cur ].fslot[ i ];
+        if ( s >= 0 ) {
+            if ( !X64Emit_MovRegToMem( B, X64_RDI, s * 16, k_res_gpr[ i ] ) ) return 0;
+            if ( !X64Emit_MovImm32ToMem( B, X64_RDI, s * 16 + 8, LUA_VNUMINT ) ) return 0;
+        }
+        if ( fs >= 0 ) {
+            if ( !X64Emit_MovsdStoreXmm( B, k_res_xmm[ i ], X64_RDI, fs * 16 ) ) return 0;
+            if ( !X64Emit_MovImm32ToMem( B, X64_RDI, fs * 16 + 8, LUA_VNUMFLT ) ) return 0;
+        }
     }
     return 1;
 }
@@ -1773,13 +1901,16 @@ LcCodeModule *lc_codegen(LcModule *m) {
       }
     }
 
+    /* M1 register residency: qualify FORLOOP regions for this function
+       BEFORE the prologue -- it decides whether xmm6..xmm10 must be saved
+       (g_res_fn_xmm gates the prologue/epilogue xmm spill area). */
+    res_analyze(f);
+
     if (!LcCg_EmitPrologue(&buf)) {
+      free(g_res_regions); g_res_regions = NULL; g_res_n = 0; g_res_cur = -1;
       free(Br.pc_off); free(Br.seen); free(Br.fwd);
       LcCodeBuf_Free(&buf); lc_codemodule_free(cm); return NULL;
     }
-
-    /* M1 register residency: qualify FORLOOP regions for this function. */
-    res_analyze(f);
 
     for (uint32_t bi = 0; ok && f && bi < f->nblocks; bi++) {
       LcInst *in;
