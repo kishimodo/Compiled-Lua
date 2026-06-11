@@ -298,6 +298,9 @@ typedef struct LcResRegion {
     int    end;                    /* the OP_FORLOOP pc                        */
     int8_t slot[ LC_RES_NREGS ];   /* resident int slot per cache GPR, or -1  */
     int8_t fslot[ LC_RES_NREGS ];  /* resident float slot per cache XMM, -1   */
+    uint8_t *obs;                  /* per-body-pc observation flags            */
+                                   /* ([end-start] entries; pc T+i -> obs[i]): */
+                                   /* spill all residents BEFORE this op       */
 } LcResRegion;
 
 static const X64_GPR_T k_res_gpr[ LC_RES_NREGS ] =
@@ -1608,6 +1611,69 @@ static int lower_inst( LcBranchCtx *Br, LcFunc *f, LcInst *in ) {
 /* Anything unrecognized rejects the region -- the boxed/elided memory  */
 /* path is emitted unchanged.                                           */
 /* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ */
+/* Spill-around observation points.                                    */
+/*                                                                      */
+/* A helper-calling op inside a residency region is admissible as an    */
+/* OBSERVATION POINT: all residents are spilled (value + tag) right     */
+/* before it, making the frame fully current for whatever the helper    */
+/* does -- GC scan, error unwind, metamethod, coroutine switch, stack   */
+/* relocation. NO REFILL is needed afterwards: helpers can observe but  */
+/* can never MUTATE a non-captured local's VALUE (relocation moves      */
+/* addresses, not values; metamethods cannot reference this frame's     */
+/* locals; captured slots are excluded from residency entirely; debug   */
+/* reflection disables all proofs module-wide), so the resident         */
+/* registers remain authoritative. The one mutation channel a helper    */
+/* DOES have is its own frame WRITE-SET (CALL results, GETs' dest) --   */
+/* those slots are marked dirty so they can never be residents.        */
+/*                                                                      */
+/* res_obs_op classifies an op: returns 0 (not admissible -> region     */
+/* rejected), or 1 with *wr_lo..*wr_hi the frame write range (lo > hi   */
+/* = none), *cmpbr set when the op branches via pc+2 (containment must  */
+/* be checked), *term set for ops that LEAVE the function (the RETURN   */
+/* family and TAILCALL -- spill-before still makes them sound: the      */
+/* frame is current when control departs). */
+/* ------------------------------------------------------------------ */
+static int res_obs_op( LcInst *in, int nslots,
+                       int *wr_lo, int *wr_hi, int *cmpbr, int *term ) {
+    *wr_lo = 1; *wr_hi = 0; *cmpbr = 0; *term = 0;
+    switch ( in->bc_op ) {
+        /* helper ops writing one result slot */
+        case OP_GETTABUP: case OP_GETTABLE: case OP_GETI: case OP_GETFIELD:
+        case OP_GETUPVAL: case OP_NEWTABLE: case OP_CLOSURE: case OP_LOADKX:
+        case OP_NOT: case OP_UNM: case OP_BNOT: case OP_LEN: case OP_CONCAT:
+            *wr_lo = *wr_hi = in->a; return 1;
+        case OP_SELF:
+            *wr_lo = in->a; *wr_hi = in->a + 1; return 1;
+        /* pure stores: no frame writes at all */
+        case OP_SETTABUP: case OP_SETTABLE: case OP_SETI: case OP_SETFIELD:
+        case OP_SETLIST: case OP_SETUPVAL:
+            return 1;
+        /* calls: results land in [A, A+C-2]; C==0 -> all-to-top */
+        case OP_CALL:
+            if ( in->c >= 1 ) { *wr_lo = in->a; *wr_hi = in->a + in->c - 2; }
+            else              { *wr_lo = in->a; *wr_hi = nslots - 1; }
+            return 1;
+        /* checked-fastpath arith (elide conditions failed): one dest slot */
+        case OP_ADD: case OP_SUB: case OP_MUL: case OP_DIV: case OP_MOD:
+        case OP_IDIV: case OP_POW: case OP_BAND: case OP_BOR: case OP_BXOR:
+        case OP_SHL: case OP_SHR:
+        case OP_ADDI: case OP_ADDK: case OP_SUBK: case OP_MULK: case OP_DIVK:
+        case OP_MODK: case OP_IDIVK: case OP_POWK:
+        case OP_BANDK: case OP_BORK: case OP_BXORK: case OP_SHRI: case OP_SHLI:
+            *wr_lo = *wr_hi = in->a; return 1;
+        /* helper comparisons: branch via pc+2 (containment checked by caller) */
+        case OP_EQ: case OP_LT: case OP_LE: case OP_EQK: case OP_EQI:
+        case OP_LTI: case OP_LEI: case OP_GTI: case OP_GEI:
+            *cmpbr = 1; return 1;
+        /* control leaves the function: spill-before only */
+        case OP_RETURN: case OP_RETURN0: case OP_RETURN1: case OP_TAILCALL:
+            *term = 1; return 1;
+        default:
+            return 0;   /* VARARG / nested loops / close-tbc / unknown: reject */
+    }
+}
+
 #define RES_RD_INT( s ) do { int _s = ( s ); \
     if ( _s >= 0 && _s < nslots ) cnti[ _s ]++; } while ( 0 )
 #define RES_RD_FLT( s ) do { int _s = ( s ); \
@@ -1631,18 +1697,22 @@ static int res_qualify( LcFunc *f, LcInst **map, int T, int P, LcResRegion *out 
     int    *cntf   = NULL;
     uint8_t *dirty = NULL;
     int     pc, i, k;
+    int     n_obs = 0;
 
+    out->obs = NULL;
     if ( nslots <= 0 || La + 3 >= nslots ) return 0;
     if ( T < 1 || T > P ) return 0;
     if ( !map[ T - 1 ] || map[ T - 1 ]->bc_op != OP_FORPREP ) return 0;
     cnti  = ( int * )calloc( ( size_t )nslots, sizeof( int ) );
     cntf  = ( int * )calloc( ( size_t )nslots, sizeof( int ) );
     dirty = ( uint8_t * )calloc( ( size_t )nslots, 1 );
-    if ( !cnti || !cntf || !dirty ) goto reject;
+    out->obs = ( P > T ) ? ( uint8_t * )calloc( ( size_t )( P - T ), 1 ) : NULL;
+    if ( !cnti || !cntf || !dirty || ( P > T && !out->obs ) ) goto reject;
 
     for ( pc = T; pc < P; pc++ ) {
         LcInst *in = map[ pc ];
         int32_t kv; uint64_t kb;
+        int blind = 1;
         if ( !in ) goto reject;
         switch ( in->bc_op ) {
         /* elided arith reg-reg (mirror lower_arith_fast) */
@@ -1651,17 +1721,17 @@ static int res_qualify( LcFunc *f, LcInst **map, int T, int P, LcResRegion *out 
                 RES_RD_INT( in->b ); RES_RD_INT( in->c ); RES_WR_INT( in->a );
             } else if ( ( in->known & LC_KNOWN_B_FLT ) && ( in->known & LC_KNOWN_C_FLT ) ) {
                 RES_RD_FLT( in->b ); RES_RD_FLT( in->c ); RES_WR_FLT( in->a );
-            } else goto reject;                /* checked fastpath: helper arm */
+            } else blind = 0;                  /* checked fastpath: -> obs */
             break;
         case OP_BAND: case OP_BOR: case OP_BXOR:
             if ( ( in->known & LC_KNOWN_B_INT ) && ( in->known & LC_KNOWN_C_INT ) ) {
                 RES_RD_INT( in->b ); RES_RD_INT( in->c ); RES_WR_INT( in->a );
-            } else goto reject;
+            } else blind = 0;
             break;
         case OP_DIV:                            /* FLT/FLT divsd elide only */
             if ( ( in->known & LC_KNOWN_B_FLT ) && ( in->known & LC_KNOWN_C_FLT ) ) {
                 RES_RD_FLT( in->b ); RES_RD_FLT( in->c ); RES_WR_FLT( in->a );
-            } else goto reject;
+            } else blind = 0;
             break;
         /* elided imm/K arith (mirror the dispatch + lower_arith_imm_fast) */
         case OP_ADDI:
@@ -1669,24 +1739,24 @@ static int res_qualify( LcFunc *f, LcInst **map, int T, int P, LcResRegion *out 
                 RES_RD_FLT( in->b ); RES_WR_FLT( in->a );
             } else if ( in->known & LC_KNOWN_B_INT ) {
                 RES_RD_INT( in->b ); RES_WR_INT( in->a );
-            } else goto reject;
+            } else blind = 0;
             break;
         case OP_ADDK: case OP_SUBK: case OP_MULK:
             if ( ( in->known & LC_KNOWN_B_FLT ) && k_flt_bits( f, in->c, &kb ) ) {
                 RES_RD_FLT( in->b ); RES_WR_FLT( in->a );
             } else if ( ( in->known & LC_KNOWN_B_INT ) && k_int32( f, in->c, &kv ) ) {
                 RES_RD_INT( in->b ); RES_WR_INT( in->a );
-            } else goto reject;
+            } else blind = 0;
             break;
         case OP_DIVK:
             if ( ( in->known & LC_KNOWN_B_FLT ) && k_flt_bits( f, in->c, &kb ) ) {
                 RES_RD_FLT( in->b ); RES_WR_FLT( in->a );
-            } else goto reject;
+            } else blind = 0;
             break;
         case OP_BANDK: case OP_BORK: case OP_BXORK:
             if ( ( in->known & LC_KNOWN_B_INT ) && k_int32( f, in->c, &kv ) ) {
                 RES_RD_INT( in->b ); RES_WR_INT( in->a );
-            } else goto reject;
+            } else blind = 0;
             break;
         /* elided comparisons (mirror lower_cmp); their branch must stay in */
         case OP_EQ: case OP_LT: case OP_LE:
@@ -1695,18 +1765,18 @@ static int res_qualify( LcFunc *f, LcInst **map, int T, int P, LcResRegion *out 
                 RES_RD_INT( in->a ); RES_RD_INT( in->b );
             } else if ( ( in->known & LC_KNOWN_B_FLT ) && ( in->known & LC_KNOWN_C_FLT ) ) {
                 RES_RD_FLT( in->a ); RES_RD_FLT( in->b );
-            } else goto reject;
+            } else blind = 0;
             break;
         case OP_LTI: case OP_LEI: case OP_GTI: case OP_GEI:
             if ( pc + 2 > P ) goto reject;
             if ( in->known & LC_KNOWN_B_INT )      { RES_RD_INT( in->a ); }
             else if ( in->known & LC_KNOWN_B_FLT ) { RES_RD_FLT( in->a ); }
-            else goto reject;
+            else blind = 0;
             break;
         case OP_EQI:
             if ( pc + 2 > P ) goto reject;
             if ( in->known & LC_KNOWN_B_INT ) { RES_RD_INT( in->a ); }
-            else goto reject;                   /* float EQI keeps the helper */
+            else blind = 0;                     /* float EQI: helper -> obs */
             break;
         /* frame-blind data movement */
         case OP_MOVE:
@@ -1746,7 +1816,16 @@ static int res_qualify( LcFunc *f, LcInst **map, int T, int P, LcResRegion *out 
             if ( pc + 2 > P ) goto reject;
             RES_RD_OTH( in->b ); RES_WR_OTH( in->a ); break;
         default:
-            goto reject;                        /* anything helper-shaped */
+            blind = 0;                          /* helper-shaped: try obs */
+        }
+        if ( !blind ) {
+            int lo, hi, cmpbr, term;
+            if ( !res_obs_op( in, nslots, &lo, &hi, &cmpbr, &term ) )
+                goto reject;
+            if ( cmpbr && pc + 2 > P ) goto reject;   /* branch containment */
+            if ( ++n_obs > 6 ) goto reject;           /* crude spill-cost cap */
+            out->obs[ pc - T ] = 1;
+            for ( i = lo; i <= hi && i < nslots; i++ ) { RES_WR_OTH( i ); }
         }
     }
 
@@ -1803,6 +1882,7 @@ static int res_qualify( LcFunc *f, LcInst **map, int T, int P, LcResRegion *out 
     return out->slot[ 0 ] >= 0 || out->fslot[ 0 ] >= 0;
 reject:
     free( cnti ); free( cntf ); free( dirty );
+    free( out->obs ); out->obs = NULL;
     return 0;
 }
 
@@ -1914,6 +1994,7 @@ LcCodeModule *lc_codegen(LcModule *m) {
     res_analyze(f);
 
     if (!LcCg_EmitPrologue(&buf)) {
+      for (int ri = 0; ri < g_res_n; ri++) free(g_res_regions[ri].obs);
       free(g_res_regions); g_res_regions = NULL; g_res_n = 0; g_res_cur = -1;
       free(Br.pc_off); free(Br.seen); free(Br.fwd);
       LcCodeBuf_Free(&buf); lc_codemodule_free(cm); return NULL;
@@ -1939,6 +2020,17 @@ LcCodeModule *lc_codegen(LcModule *m) {
         /* Record this bytecode pc -> current code offset BEFORE lowering, so
            backward branches and the pc->offset resolution see the right base. */
         LcBr_RecordPc(&Br, in->bc_pc, buf.used);
+        /* Observation point: make the frame fully current before the helper
+           runs (residents stay authoritative afterwards -- no refill; see the
+           spill-around block comment). Emitted AFTER the pc label so a branch
+           to this pc also passes through the spill. */
+        if (g_res_cur >= 0) {
+          const LcResRegion *rg = &g_res_regions[g_res_cur];
+          if (in->bc_pc >= rg->start && in->bc_pc < rg->end &&
+              rg->obs && rg->obs[in->bc_pc - rg->start]) {
+            if (!res_emit_spills(&buf)) { ok = 0; break; }
+          }
+        }
         if (!lower_inst(&Br, f, in)) { ok = 0; break; }
         /* Region exit: the FORLOOP's fall-through (count==0) lands here --
            spill values + INT tags before the next pc's label is recorded.
@@ -1950,6 +2042,7 @@ LcCodeModule *lc_codegen(LcModule *m) {
         }
       }
     }
+    for (int ri = 0; ri < g_res_n; ri++) free(g_res_regions[ri].obs);
     free(g_res_regions); g_res_regions = NULL; g_res_n = 0; g_res_cur = -1;
 
     /* If the function fell through without an explicit RETURN (shouldn't
