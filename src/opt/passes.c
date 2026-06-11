@@ -325,6 +325,24 @@ void lc_pass_local_typeinfer(LcFunc *f) {
         o1 = in->a; o2 = in->b; break;                 /* reg-reg compare       */
       case OP_EQI: case OP_LTI: case OP_LEI: case OP_GTI: case OP_GEI:
         o1 = in->a; o2 = -1; break;                    /* reg vs immediate      */
+      case OP_MOVE:
+        o1 = in->b; o2 = -1; break;                    /* src proof: codegen's
+                                                          int-MOVE + residency */
+      case OP_FORLOOP:
+        /* Integer-loop proof: internal index (R[A]) and step (R[A+2]) proven
+           INT at the FORLOOP on every path. R[A+1] is NOT checked: the state
+           merges the entry edge (where it still types as the original limit,
+           possibly float/unknown) with the back edge, but FORPREP's integer
+           path rewrites it to the trip COUNT (always an integer) on the only
+           edge that actually reaches the FORLOOP, and erroring limits never
+           fall through -- so int init+step alone make the loop integral
+           (`for i = 1, n` with an unknown limit qualifies). Codegen may then
+           drop the step tag-check AND the float helper arm (bare inline
+           loop), and the loop slots become register-residency candidates. */
+        if (ti_reg(sin, in->a,     nregs) == TI_INT &&
+            ti_reg(sin, in->a + 2, nregs) == TI_INT)
+          in->known |= LC_KNOWN_B_INT;
+        continue;
       default: continue;
     }
     if (o1 >= 0 && ti_reg(sin, o1, nregs) == TI_INT) in->known |= LC_KNOWN_B_INT;

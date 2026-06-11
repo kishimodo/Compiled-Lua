@@ -49,6 +49,17 @@ int X64Emit_MovRegToReg( LcCodeBuf *Buf, X64_GPR_T Dst, X64_GPR_T Src ) {
     return 1;
 }
 
+int X64Emit_ArithRaxReg( LcCodeBuf *Buf, unsigned char Op, X64_GPR_T Src ) {
+    /* REX.W <Op> /r with reg = RAX, rm = Src (register-direct).
+       Op: 0x03 ADD, 0x2B SUB, 0x23 AND, 0x0B OR, 0x33 XOR, 0x3B CMP,
+       0xAF -> 0F AF IMUL rax, rN. */
+    unsigned char Rex = REX_BASE | REX_W | ( IsHi( Src ) ? REX_B : 0 );
+    if ( !AppendByte( Buf, Rex ) )                                return 0;
+    if ( Op == 0xAF && !AppendByte( Buf, 0x0F ) )                 return 0;
+    if ( !AppendByte( Buf, Op ) )                                 return 0;
+    return AppendByte( Buf, ModRm( 3, 0, Lo3( Src ) ) );
+}
+
 int X64Emit_Ret( LcCodeBuf *Buf ) {
     return AppendByte( Buf, 0xC3 );
 }

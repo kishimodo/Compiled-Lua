@@ -252,6 +252,65 @@ static int LcBr_Resolve( LcBranchCtx *Br ) {
 /* cached). Operands come from inst->a/b/c (decoded by lift.c).        */
 /* ------------------------------------------------------------------ */
 
+typedef enum { LC_AR_ADD, LC_AR_SUB, LC_AR_MUL,
+               LC_AR_AND, LC_AR_OR, LC_AR_XOR } LcArOp;
+
+/* ------------------------------------------------------------------ */
+/* M1 loop-region register residency.                                  */
+/*                                                                      */
+/* Within a qualified innermost FORLOOP region (every instruction       */
+/* frame-blind: fully-elided arith/compares, MOVE/LOADI/consts, JMPs    */
+/* contained, the FORLOOP itself proven integral — see res_analyze),    */
+/* up to five proven-int Lua slots live in the callee-saved cache       */
+/* registers R12-R15/RSI that the prologue already preserves. The frame */
+/* is filled into registers once at region entry (fall-in from FORPREP, */
+/* before the back-edge label) and spilled (value + INT tag) once at    */
+/* the FORLOOP fall-through exit. No helper can run inside the region,  */
+/* so no GC, error, or reflection can observe the stale slots; resident */
+/* slot tags stay INT throughout. The zero-trip FORPREP branch targets  */
+/* the pc after the spills, skipping fill and spill alike.              */
+/* ------------------------------------------------------------------ */
+#define LC_RES_NREGS 5
+typedef struct LcResRegion {
+    int    start;                  /* first body pc (FORLOOP back-edge target) */
+    int    end;                    /* the OP_FORLOOP pc                        */
+    int8_t slot[ LC_RES_NREGS ];   /* resident Lua slot per cache reg, or -1  */
+} LcResRegion;
+
+static const X64_GPR_T k_res_gpr[ LC_RES_NREGS ] =
+    { X64_R12, X64_R13, X64_R14, X64_R15, X64_RSI };
+
+static LcResRegion *g_res_regions = NULL;   /* current function's regions */
+static int          g_res_n   = 0;
+static int          g_res_cur = -1;         /* active region index, -1 = none */
+
+/* Cache GPR holding `slot` in the active region, or -1 (memory form). */
+static int res_reg_of( int slot ) {
+    int i;
+    if ( g_res_cur < 0 ) return -1;
+    for ( i = 0; i < LC_RES_NREGS; i++ )
+        if ( g_res_regions[ g_res_cur ].slot[ i ] == slot ) return ( int )k_res_gpr[ i ];
+    return -1;
+}
+
+/* dst = slot (resident reg move, or frame-slot load). */
+static int res_load_reg( LcCodeBuf *B, X64_GPR_T dst, int slot ) {
+    int r = res_reg_of( slot );
+    return ( r >= 0 ) ? X64Emit_MovRegToReg( B, dst, ( X64_GPR_T )r )
+                      : X64Emit_MovMemToReg( B, dst, X64_RDI, slot * 16 );
+}
+/* slot = src, as a proven integer (reg move, or value store + INT tag). */
+static int res_store_reg_int( LcCodeBuf *B, int slot, X64_GPR_T src ) {
+    int r = res_reg_of( slot );
+    if ( r >= 0 ) return X64Emit_MovRegToReg( B, ( X64_GPR_T )r, src );
+    if ( !X64Emit_MovRegToMem( B, X64_RDI, slot * 16, src ) ) return 0;
+    return X64Emit_MovImm32ToMem( B, X64_RDI, slot * 16 + 8, LUA_VNUMINT );
+}
+static int res_load_rax( LcCodeBuf *B, int slot )      { return res_load_reg( B, X64_RAX, slot ); }
+static int res_store_rax_int( LcCodeBuf *B, int slot ) { return res_store_reg_int( B, slot, X64_RAX ); }
+static int res_arith_rax( LcCodeBuf *B, LcArOp op, int slot );  /* after emit_arith_rax_mem */
+static int res_cmp_rax( LcCodeBuf *B, int slot );               /* after emit_cmp_rax_mem  */
+
 /*!
  * @brief
  *  LC_OP_VARARG (OP_VARARGPREP): call Rt_VarargPrep(L, A) then re-anchor RDI.
@@ -413,6 +472,12 @@ static int lower_tailcall( LcCodeBuf *B, LcInst *in ) {
 /* MOVE A B: 16-byte TValue copy [RDI+B*16] -> [RDI+A*16] (value + tag). */
 static int lower_move( LcCodeBuf *B, LcInst *in ) {
     int A = in->a, Bs = in->b;
+    /* Proven-int source: single value move + INT tag (identical observable
+       state to copying the tag), residency-aware on both sides. */
+    if ( g_lc_opt_level >= 1 && ( in->known & LC_KNOWN_B_INT ) ) {
+        if ( !res_load_rax( B, Bs ) ) return 0;
+        return res_store_rax_int( B, A );
+    }
     /* value half via R10 */
     if ( !X64Emit_MovMemToReg( B, X64_R10, X64_RDI, Bs * 16 ) )       return 0;
     if ( !X64Emit_MovRegToMem( B, X64_RDI, A * 16, X64_R10 ) )        return 0;
@@ -426,6 +491,9 @@ static int lower_move( LcCodeBuf *B, LcInst *in ) {
 static int lower_loadi( LcCodeBuf *B, LcInst *in ) {
     int A = in->a;
     int64_t v = ( int64_t )in->b;   /* sBx carried in `b` */
+    int r = res_reg_of( A );
+    if ( r >= 0 )                   /* resident dst: load the imm straight in */
+        return X64Emit_MovImm64ToReg( B, ( X64_GPR_T )r, ( uint64_t )v );
     if ( !X64Emit_MovImm64ToReg( B, X64_RAX, ( uint64_t )v ) )        return 0;
     if ( !X64Emit_MovRegToMem( B, X64_RDI, A * 16, X64_RAX ) )        return 0;
     if ( !X64Emit_MovImm32ToMem( B, X64_RDI, A * 16 + 8, LUA_VNUMINT ) ) return 0;
@@ -590,6 +658,16 @@ static int lower_cmp( LcBranchCtx *Br, LcInst *in, const char *Helper, int harg2
         int op1_flt = ( in->known & LC_KNOWN_B_FLT ) != 0;
         int op2_flt = is_regreg ? ( ( in->known & LC_KNOWN_C_FLT ) != 0 ) : 1;
 
+        if ( op1_int && op2_int ) {     /* INT elide, residency-aware */
+            if ( !res_load_rax( B, A ) ) return 0;
+            if ( is_regreg ) { if ( !res_cmp_rax( B, Bop ) ) return 0; }
+            else             { if ( !emit_cmp_rax_imm32( B, Bop ) ) return 0; }
+            if ( !emit_setcc_movzx_r11( B, ( unsigned )cc ) ) return 0;
+            { unsigned char C[ 4 ] = { 0x41, 0x83, 0xFB, ( unsigned char )( int8_t )K };
+              if ( !LcCodeBuf_Append( B, C, 4 ) ) return 0; }   /* cmp r11d, K */
+            return LcBr_EmitBranch( Br, 0x5 /* JNE */, in->bc_pc + 2, in->bc_pc );
+        }
+
         /* M1 FLT elision: operand(s) PROVEN float -> bare ucomisd, no
            tag-check, no helper. Lua NaN semantics come free: ucomisd's
            unordered result sets ZF=PF=CF=1, so the CF-based seta/setae are
@@ -634,16 +712,6 @@ static int lower_cmp( LcBranchCtx *Br, LcInst *in, const char *Helper, int harg2
                         ( in->bc_op == OP_LTI || in->bc_op == OP_GTI )
                             ? 0x7 : 0x3 ) ) return 0;
             }
-            { unsigned char C[ 4 ] = { 0x41, 0x83, 0xFB, ( unsigned char )( int8_t )K };
-              if ( !LcCodeBuf_Append( B, C, 4 ) ) return 0; }   /* cmp r11d, K */
-            return LcBr_EmitBranch( Br, 0x5 /* JNE */, in->bc_pc + 2, in->bc_pc );
-        }
-
-        if ( op1_int && op2_int ) {
-            if ( !X64Emit_MovMemToReg( B, X64_RAX, X64_RDI, A * 16 ) ) return 0;
-            if ( is_regreg ) { if ( !emit_cmp_rax_mem( B, Bop * 16 ) ) return 0; }
-            else             { if ( !emit_cmp_rax_imm32( B, Bop ) ) return 0; }
-            if ( !emit_setcc_movzx_r11( B, ( unsigned )cc ) ) return 0;
             { unsigned char C[ 4 ] = { 0x41, 0x83, 0xFB, ( unsigned char )( int8_t )K };
               if ( !LcCodeBuf_Append( B, C, 4 ) ) return 0; }   /* cmp r11d, K */
             return LcBr_EmitBranch( Br, 0x5 /* JNE */, in->bc_pc + 2, in->bc_pc );
@@ -774,6 +842,32 @@ static int lower_forloop( LcBranchCtx *Br, LcInst *in ) {
         return LcBr_EmitBranch( Br, 0x5 /* JNE */, in->c, in->bc_pc );
     }
 
+    /* -O1, PROVEN integer loop (index+step INT on every path; the count in
+       R[A+1] is an integer whenever FORPREP fell through): the BARE inline
+       loop -- no step tag-check, no helper arm -- with residency-aware slot
+       access. In a qualified region the whole update runs in cache registers. */
+    if ( in->known & LC_KNOWN_B_INT ) {
+        size_t jz_exit2, ex2;
+        if ( !res_load_rax( B, A + 1 ) ) return 0;                 /* count */
+        { unsigned char t[ 3 ] = { 0x48, 0x85, 0xC0 };             /* test rax, rax */
+          if ( !LcCodeBuf_Append( B, t, 3 ) ) return 0; }
+        jz_exit2 = X64Emit_JccRel32_Placeholder( B, 0x4 /* JZ -> exit */ );
+        if ( jz_exit2 == ( size_t )-1 ) return 0;
+        { unsigned char d[ 3 ] = { 0x48, 0xFF, 0xC8 };             /* dec rax */
+          if ( !LcCodeBuf_Append( B, d, 3 ) ) return 0; }
+        if ( !res_store_rax_int( B, A + 1 ) ) return 0;            /* count-1 */
+        if ( !res_load_reg( B, X64_RCX, A + 2 ) ) return 0;        /* step */
+        if ( !res_load_reg( B, X64_RDX, A ) ) return 0;            /* idx */
+        { unsigned char a2[ 3 ] = { 0x48, 0x01, 0xCA };            /* add rdx, rcx */
+          if ( !LcCodeBuf_Append( B, a2, 3 ) ) return 0; }
+        if ( !res_store_reg_int( B, A, X64_RDX ) ) return 0;       /* R[A] = idx */
+        if ( !res_store_reg_int( B, A + 3, X64_RDX ) ) return 0;   /* ctrl var */
+        if ( !LcBr_EmitBranch( Br, -1 /* JMP */, in->c, in->bc_pc ) ) return 0;
+        ex2 = B->used;                                             /* count==0 */
+        if ( !X64Emit_PatchRel32( B, jz_exit2, ex2 ) ) return 0;
+        return 1;
+    }
+
     /* -O1: inline the integer-loop fast path (mirrors lvm.c OP_FORLOOP integer
        case), runtime-checked on the step tag; float/other loops fall to the
        complete Rt_ForLoop helper. Removes the per-iteration call -- a win even
@@ -895,9 +989,6 @@ static int lower_helper3( LcCodeBuf *B, LcInst *in, const char *Sym, int reload 
     return LcCg_EmitHelperCall3( B, Sym, in->a, in->b, in->c, reload );
 }
 
-typedef enum { LC_AR_ADD, LC_AR_SUB, LC_AR_MUL,
-               LC_AR_AND, LC_AR_OR, LC_AR_XOR } LcArOp;
-
 /* rax <op>= [RDI + disp]. ADD via X64Emit_AddMemToReg; the rest by raw bytes
    (REX.W + opcode, reg=RAX=0, rm=RDI=7). Ports v1 EmitArithRax + the bitwise ops.
    SUB 2B, IMUL 0F AF, AND 23, OR 0B, XOR 33. */
@@ -928,6 +1019,21 @@ static int emit_arith_rax_mem( LcCodeBuf *B, LcArOp op, int32_t disp ) {
     return LcCodeBuf_Append( B, b, ( size_t )n );
 }
 
+/* rax <op>= slot (resident cache reg or frame slot). */
+static int res_arith_rax( LcCodeBuf *B, LcArOp op, int slot ) {
+    static const unsigned char regop[] =
+        { 0x03, 0x2B, 0xAF, 0x23, 0x0B, 0x33 };  /* ADD SUB IMUL AND OR XOR */
+    int r = res_reg_of( slot );
+    if ( r >= 0 ) return X64Emit_ArithRaxReg( B, regop[ op ], ( X64_GPR_T )r );
+    return emit_arith_rax_mem( B, op, slot * 16 );
+}
+/* cmp rax, slot (resident cache reg or frame slot). */
+static int res_cmp_rax( LcCodeBuf *B, int slot ) {
+    int r = res_reg_of( slot );
+    if ( r >= 0 ) return X64Emit_ArithRaxReg( B, 0x3B, ( X64_GPR_T )r );
+    return emit_cmp_rax_mem( B, slot * 16 );
+}
+
 /*!
  * @brief
  *  M1 (-O1+): runtime-checked int/float arithmetic fastpath for ADD/SUB/MUL,
@@ -947,12 +1053,13 @@ static int lower_arith_fast( LcCodeBuf *Bb, LcInst *in, LcArOp op,
 
     /* M1 type-inference elision: both operands PROVEN integer (lc_pass_local_
        typeinfer) -> emit the bare integer op with no tag-check, no float arm, no
-       helper. Sound iff the proof is sound (no runtime guard, per PROMPT §9). */
+       helper. Sound iff the proof is sound (no runtime guard, per PROMPT §9).
+       Slot access goes through the residency accessors (register-resident in a
+       qualified loop region, frame slot otherwise). */
     if ( ( in->known & LC_KNOWN_B_INT ) && ( in->known & LC_KNOWN_C_INT ) ) {
-        if ( !X64Emit_MovMemToReg( Bb, X64_RAX, X64_RDI, Br * 16 ) ) return 0;
-        if ( !emit_arith_rax_mem( Bb, op, Cr * 16 ) ) return 0;
-        if ( !X64Emit_MovRegToMem( Bb, X64_RDI, A * 16, X64_RAX ) ) return 0;
-        if ( !X64Emit_MovImm32ToMem( Bb, X64_RDI, A * 16 + 8, LUA_VNUMINT ) ) return 0;
+        if ( !res_load_rax( Bb, Br ) ) return 0;
+        if ( !res_arith_rax( Bb, op, Cr ) ) return 0;
+        if ( !res_store_rax_int( Bb, A ) ) return 0;
         return 1;
     }
 
@@ -1048,12 +1155,11 @@ static int lower_arith_imm_fast( LcCodeBuf *Bb, LcInst *in, LcArOp op,
     size_t jne_iB, jmp_di, slow, done;
 
     /* M1 elision: R[B] PROVEN integer -> bare int op with the immediate, no
-       tag-check, no helper. */
+       tag-check, no helper. Residency-aware slot access. */
     if ( in->known & LC_KNOWN_B_INT ) {
-        if ( !X64Emit_MovMemToReg( Bb, X64_RAX, X64_RDI, Br * 16 ) ) return 0;
+        if ( !res_load_rax( Bb, Br ) ) return 0;
         if ( !emit_arith_rax_imm32( Bb, op, imm ) ) return 0;
-        if ( !X64Emit_MovRegToMem( Bb, X64_RDI, A * 16, X64_RAX ) ) return 0;
-        if ( !X64Emit_MovImm32ToMem( Bb, X64_RDI, A * 16 + 8, LUA_VNUMINT ) ) return 0;
+        if ( !res_store_rax_int( Bb, A ) ) return 0;
         return 1;
     }
 
@@ -1235,7 +1341,17 @@ static int lower_inst( LcBranchCtx *Br, LcFunc *f, LcInst *in ) {
         case OP_MOD:   return lower_helper3( B, in, "Rt_ModOp",  1 );
         case OP_IDIV:  return lower_helper3( B, in, "Rt_IDivOp", 1 );
         case OP_POW:   return lower_helper3( B, in, "Rt_PowOp",  1 );
-        case OP_ADDI:  return ( g_lc_opt_level >= 1 )
+        case OP_ADDI:  /* PROVEN-float R[B]: bare addsd of the (possibly
+                          sub-negated) immediate as a double -- exactly lvm.c's
+                          ADDI float arm, luai_numadd(fa, cast_num(sC)). This is
+                          the `f + 1` / `f - 1` float-loop pattern (an int imm
+                          in sC range compiles to ADDI, not ADDK). */
+                       if ( g_lc_opt_level >= 1 && ( in->known & LC_KNOWN_B_FLT ) ) {
+                           double   kd = ( double )( int32_t )in->c;
+                           uint64_t kb; memcpy( &kb, &kd, 8 );
+                           return lower_arithk_flt_elide( B, in, 0x58, kb );
+                       }
+                       return ( g_lc_opt_level >= 1 )
                            ? lower_arith_imm_fast( B, in, LC_AR_ADD, in->c, arith_mm_word( f, in ) )
                            : lower_arith_ik( B, f, in );
         case OP_ADDK:  { int32_t kv; uint64_t kb;
@@ -1391,6 +1507,218 @@ static int lower_inst( LcBranchCtx *Br, LcFunc *f, LcInst *in ) {
     }
 }
 
+/* ------------------------------------------------------------------ */
+/* M1 register residency — region qualification.                       */
+/*                                                                      */
+/* A FORLOOP region [T,P] qualifies iff EVERY body instruction is       */
+/* frame-blind (its lowering provably emits no helper call): the fully- */
+/* elided arith/compare forms (conditions mirrored 1:1 from the         */
+/* lowerings above), MOVE/LOADI/constant loads, and branches contained  */
+/* in [T,P]. The FORLOOP itself must carry the integer-loop proof. A    */
+/* slot is a residency candidate only if every access to it in the      */
+/* region is integer-proven (any float/unknown access marks it dirty).  */
+/* Anything unrecognized rejects the region -- the boxed/elided memory  */
+/* path is emitted unchanged.                                           */
+/* ------------------------------------------------------------------ */
+#define RES_RD_INT( s ) do { int _s = ( s ); \
+    if ( _s >= 0 && _s < nslots ) cnt[ _s ]++; } while ( 0 )
+#define RES_RD_OTH( s ) do { int _s = ( s ); \
+    if ( _s >= 0 && _s < nslots ) dirty[ _s ] = 1; } while ( 0 )
+#define RES_WR_INT( s ) do { int _s = ( s ); \
+    if ( _s >= La && _s <= La + 2 ) goto reject;  /* loop internals */ \
+    if ( _s >= 0 && _s < nslots ) cnt[ _s ]++; } while ( 0 )
+#define RES_WR_OTH( s ) do { int _s = ( s ); \
+    if ( _s >= La && _s <= La + 2 ) goto reject; \
+    if ( _s >= 0 && _s < nslots ) dirty[ _s ] = 1; } while ( 0 )
+
+static int res_qualify( LcFunc *f, LcInst **map, int T, int P, LcResRegion *out ) {
+    int     nslots = ( f && f->source ) ? f->source->maxstacksize : 0;
+    int     La     = map[ P ]->a;
+    int    *cnt    = NULL;
+    uint8_t *dirty = NULL;
+    int     pc, i, k;
+
+    if ( nslots <= 0 || La + 3 >= nslots ) return 0;
+    if ( T < 1 || T > P ) return 0;
+    if ( !map[ T - 1 ] || map[ T - 1 ]->bc_op != OP_FORPREP ) return 0;
+    cnt   = ( int * )calloc( ( size_t )nslots, sizeof( int ) );
+    dirty = ( uint8_t * )calloc( ( size_t )nslots, 1 );
+    if ( !cnt || !dirty ) goto reject;
+
+    for ( pc = T; pc < P; pc++ ) {
+        LcInst *in = map[ pc ];
+        int32_t kv; uint64_t kb;
+        if ( !in ) goto reject;
+        switch ( in->bc_op ) {
+        /* elided arith reg-reg (mirror lower_arith_fast) */
+        case OP_ADD: case OP_SUB: case OP_MUL:
+            if ( ( in->known & LC_KNOWN_B_INT ) && ( in->known & LC_KNOWN_C_INT ) ) {
+                RES_RD_INT( in->b ); RES_RD_INT( in->c ); RES_WR_INT( in->a );
+            } else if ( ( in->known & LC_KNOWN_B_FLT ) && ( in->known & LC_KNOWN_C_FLT ) ) {
+                RES_RD_OTH( in->b ); RES_RD_OTH( in->c ); RES_WR_OTH( in->a );
+            } else goto reject;                /* checked fastpath: helper arm */
+            break;
+        case OP_BAND: case OP_BOR: case OP_BXOR:
+            if ( ( in->known & LC_KNOWN_B_INT ) && ( in->known & LC_KNOWN_C_INT ) ) {
+                RES_RD_INT( in->b ); RES_RD_INT( in->c ); RES_WR_INT( in->a );
+            } else goto reject;
+            break;
+        case OP_DIV:                            /* FLT/FLT divsd elide only */
+            if ( ( in->known & LC_KNOWN_B_FLT ) && ( in->known & LC_KNOWN_C_FLT ) ) {
+                RES_RD_OTH( in->b ); RES_RD_OTH( in->c ); RES_WR_OTH( in->a );
+            } else goto reject;
+            break;
+        /* elided imm/K arith (mirror the dispatch + lower_arith_imm_fast) */
+        case OP_ADDI:
+            if ( in->known & LC_KNOWN_B_FLT ) {
+                RES_RD_OTH( in->b ); RES_WR_OTH( in->a );
+            } else if ( in->known & LC_KNOWN_B_INT ) {
+                RES_RD_INT( in->b ); RES_WR_INT( in->a );
+            } else goto reject;
+            break;
+        case OP_ADDK: case OP_SUBK: case OP_MULK:
+            if ( ( in->known & LC_KNOWN_B_FLT ) && k_flt_bits( f, in->c, &kb ) ) {
+                RES_RD_OTH( in->b ); RES_WR_OTH( in->a );
+            } else if ( ( in->known & LC_KNOWN_B_INT ) && k_int32( f, in->c, &kv ) ) {
+                RES_RD_INT( in->b ); RES_WR_INT( in->a );
+            } else goto reject;
+            break;
+        case OP_DIVK:
+            if ( ( in->known & LC_KNOWN_B_FLT ) && k_flt_bits( f, in->c, &kb ) ) {
+                RES_RD_OTH( in->b ); RES_WR_OTH( in->a );
+            } else goto reject;
+            break;
+        case OP_BANDK: case OP_BORK: case OP_BXORK:
+            if ( ( in->known & LC_KNOWN_B_INT ) && k_int32( f, in->c, &kv ) ) {
+                RES_RD_INT( in->b ); RES_WR_INT( in->a );
+            } else goto reject;
+            break;
+        /* elided comparisons (mirror lower_cmp); their branch must stay in */
+        case OP_EQ: case OP_LT: case OP_LE:
+            if ( pc + 2 > P ) goto reject;
+            if ( ( in->known & LC_KNOWN_B_INT ) && ( in->known & LC_KNOWN_C_INT ) ) {
+                RES_RD_INT( in->a ); RES_RD_INT( in->b );
+            } else if ( ( in->known & LC_KNOWN_B_FLT ) && ( in->known & LC_KNOWN_C_FLT ) ) {
+                RES_RD_OTH( in->a ); RES_RD_OTH( in->b );
+            } else goto reject;
+            break;
+        case OP_LTI: case OP_LEI: case OP_GTI: case OP_GEI:
+            if ( pc + 2 > P ) goto reject;
+            if ( in->known & LC_KNOWN_B_INT )      { RES_RD_INT( in->a ); }
+            else if ( in->known & LC_KNOWN_B_FLT ) { RES_RD_OTH( in->a ); }
+            else goto reject;
+            break;
+        case OP_EQI:
+            if ( pc + 2 > P ) goto reject;
+            if ( in->known & LC_KNOWN_B_INT ) { RES_RD_INT( in->a ); }
+            else goto reject;                   /* float EQI keeps the helper */
+            break;
+        /* frame-blind data movement */
+        case OP_MOVE:
+            if ( in->known & LC_KNOWN_B_INT ) {
+                RES_RD_INT( in->b ); RES_WR_INT( in->a );
+            } else {
+                RES_RD_OTH( in->b ); RES_WR_OTH( in->a );
+            }
+            break;
+        case OP_LOADI:
+            RES_WR_INT( in->a ); break;
+        case OP_LOADF: case OP_LOADK: case OP_LOADTRUE: case OP_LOADFALSE:
+        case OP_LFALSESKIP:
+            RES_WR_OTH( in->a ); break;
+        case OP_LOADNIL:
+            for ( i = in->a; i <= in->a + in->b; i++ ) RES_WR_OTH( i );
+            break;
+        /* contained control flow */
+        case OP_JMP:
+            if ( in->c < T || in->c > P ) goto reject;
+            break;
+        case OP_TEST:
+            if ( pc + 2 > P ) goto reject;
+            RES_RD_OTH( in->a ); break;
+        case OP_TESTSET:
+            if ( pc + 2 > P ) goto reject;
+            RES_RD_OTH( in->b ); RES_WR_OTH( in->a ); break;
+        default:
+            goto reject;                        /* anything helper-shaped */
+        }
+    }
+
+    if ( dirty[ La ] || dirty[ La + 1 ] || dirty[ La + 2 ] ) goto reject;
+    /* the FORLOOP touches index/count/step/ctrl every iteration */
+    cnt[ La ] += 1000; cnt[ La + 1 ] += 1000; cnt[ La + 2 ] += 500;
+    if ( !dirty[ La + 3 ] ) cnt[ La + 3 ] += 1000;
+
+    out->start = T;
+    out->end   = P;
+    for ( k = 0; k < LC_RES_NREGS; k++ ) {
+        int best = -1, besti = -1;
+        for ( i = 0; i < nslots; i++ )
+            if ( !dirty[ i ] && cnt[ i ] > 0 && cnt[ i ] > best ) { best = cnt[ i ]; besti = i; }
+        out->slot[ k ] = ( int8_t )besti;
+        if ( besti >= 0 ) cnt[ besti ] = 0;     /* consumed */
+    }
+    free( cnt ); free( dirty );
+    return out->slot[ 0 ] >= 0;                 /* at least one resident */
+reject:
+    free( cnt ); free( dirty );
+    return 0;
+}
+
+/* Find every qualified region in `f` (sets g_res_regions/g_res_n). */
+static void res_analyze( LcFunc *f ) {
+    int       sizecode = ( f && f->source ) ? f->source->sizecode : 0;
+    LcInst  **map;
+    uint32_t  bi;
+    LcInst   *in;
+    int       pc;
+    g_res_regions = NULL; g_res_n = 0; g_res_cur = -1;
+    if ( g_lc_opt_level < 1 || sizecode <= 0 ) return;
+    map = ( LcInst ** )calloc( ( size_t )sizecode, sizeof( LcInst * ) );
+    if ( !map ) return;
+    for ( bi = 0; bi < f->nblocks; bi++ )
+        for ( in = f->blocks[ bi ]->first; in; in = in->next )
+            if ( in->bc_pc >= 0 && in->bc_pc < sizecode && !map[ in->bc_pc ] )
+                map[ in->bc_pc ] = in;
+    for ( pc = 0; pc < sizecode; pc++ ) {
+        LcInst *fl = map[ pc ];
+        if ( !fl || fl->bc_op != OP_FORLOOP ) continue;
+        if ( !( fl->known & LC_KNOWN_B_INT ) ) continue;
+        if ( fl->c < 0 || fl->c > pc ) continue;
+        {
+            LcResRegion r;
+            if ( res_qualify( f, map, fl->c, pc, &r ) ) {
+                LcResRegion *grown = ( LcResRegion * )realloc(
+                    g_res_regions, ( size_t )( g_res_n + 1 ) * sizeof( LcResRegion ) );
+                if ( !grown ) break;
+                g_res_regions = grown;
+                g_res_regions[ g_res_n++ ] = r;
+            }
+        }
+    }
+    free( map );
+}
+
+static int res_emit_fills( LcCodeBuf *B, int ri ) {
+    int i;
+    for ( i = 0; i < LC_RES_NREGS; i++ ) {
+        int s = g_res_regions[ ri ].slot[ i ];
+        if ( s >= 0 && !X64Emit_MovMemToReg( B, k_res_gpr[ i ], X64_RDI, s * 16 ) )
+            return 0;
+    }
+    return 1;
+}
+static int res_emit_spills( LcCodeBuf *B ) {
+    int i;
+    for ( i = 0; i < LC_RES_NREGS; i++ ) {
+        int s = g_res_regions[ g_res_cur ].slot[ i ];
+        if ( s < 0 ) continue;
+        if ( !X64Emit_MovRegToMem( B, X64_RDI, s * 16, k_res_gpr[ i ] ) ) return 0;
+        if ( !X64Emit_MovImm32ToMem( B, X64_RDI, s * 16 + 8, LUA_VNUMINT ) ) return 0;
+    }
+    return 1;
+}
+
 LcCodeModule *lc_codegen(LcModule *m) {
   if (!m) return NULL;
   g_lc_opt_level = m->opt_level;   /* -O1+ enables the M1 arith fastpaths */
@@ -1434,16 +1762,41 @@ LcCodeModule *lc_codegen(LcModule *m) {
       LcCodeBuf_Free(&buf); lc_codemodule_free(cm); return NULL;
     }
 
+    /* M1 register residency: qualify FORLOOP regions for this function. */
+    res_analyze(f);
+
     for (uint32_t bi = 0; ok && f && bi < f->nblocks; bi++) {
       LcInst *in;
       for (in = f->blocks[bi]->first; in; in = in->next) {
         if (in->op == LC_OP_RETURN) saw_return = 1;
+        /* Region entry: fill the cache registers BEFORE the back-edge label
+           is recorded, so the fills run once on the FORPREP fall-in and the
+           FORLOOP back-edge skips them. */
+        if (g_res_cur < 0) {
+          for (int ri = 0; ri < g_res_n; ri++) {
+            if (g_res_regions[ri].start == in->bc_pc) {
+              if (!res_emit_fills(&buf, ri)) { ok = 0; }
+              g_res_cur = ri;
+              break;
+            }
+          }
+          if (!ok) break;
+        }
         /* Record this bytecode pc -> current code offset BEFORE lowering, so
            backward branches and the pc->offset resolution see the right base. */
         LcBr_RecordPc(&Br, in->bc_pc, buf.used);
         if (!lower_inst(&Br, f, in)) { ok = 0; break; }
+        /* Region exit: the FORLOOP's fall-through (count==0) lands here --
+           spill values + INT tags before the next pc's label is recorded.
+           The zero-trip FORPREP branch targets that next pc, skipping both
+           fill and spill (the frame was never stale on that path). */
+        if (g_res_cur >= 0 && in->bc_pc == g_res_regions[g_res_cur].end) {
+          if (!res_emit_spills(&buf)) { ok = 0; break; }
+          g_res_cur = -1;
+        }
       }
     }
+    free(g_res_regions); g_res_regions = NULL; g_res_n = 0; g_res_cur = -1;
 
     /* If the function fell through without an explicit RETURN (shouldn't
        happen for epsilon, but keep codegen total), emit a default 0-result

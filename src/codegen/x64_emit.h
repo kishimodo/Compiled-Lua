@@ -274,6 +274,14 @@ int X64Emit_UcomisdXmm0Xmm1( LcCodeBuf *Buf );
 
 /*!
  * @brief
+ *  64-bit ALU op RAX, rN (register-direct). Op: 0x03 ADD, 0x2B SUB,
+ *  0x23 AND, 0x0B OR, 0x33 XOR, 0x3B CMP, 0xAF IMUL (emitted as 0F AF).
+ *  Used by the loop-region register-residency lowering.
+ */
+int X64Emit_ArithRaxReg( LcCodeBuf *Buf, unsigned char Op, X64_GPR_T Src );
+
+/*!
+ * @brief
  *  CALL rel32 to an external symbol. Emits E8 <disp32=0> and records an
  *  LC_RELOC_REL32 against `Sym` at the disp32 offset. The linker resolves it.
  */
