@@ -342,3 +342,35 @@ The new coverage surfaced a batch of real bugs.
 - **table.move "must bypass metamethods"** (audit claim): false — Lua 5.4
   `table.move` uses `lua_geti`/`lua_seti`, so it correctly honors `__index`/
   `__newindex`. LuaVM matches the spec.
+
+## Update 2026-06-10 — LuaC AOT adversarial attack findings (rounds 1–6)
+
+The multi-lens differential attack harness (aotc -O1 vs `luavm -i`) found and we
+fixed five silent wrong-answer bugs — including three in the **shared baseline
+runtime/JIT**, which corrects the earlier "no silent metamethod miscompiles"
+note above:
+
+- **FIXED `2910a30`/`13489d3`** — two -O1 type-inference elision unsoundnesses
+  (metamethod result types; closure-captured loop var) + pre-existing
+  SHRI/SHLI `__shl` dispatch.
+- **FIXED `66f4b66`** — three baseline (-O0, also v1-JIT) fidelity bugs:
+  (1) `Rt_ForPrep` skipped every integer loop with an out-of-int64 float limit
+  (`for i = 1, math.huge` ran zero iterations) instead of truncating like
+  lvm.c `forlimit()`; (2) imm/K arith helpers dispatched the wrong metamethod
+  event/order (`x - 1` called `__add(x, -1)` instead of `__sub(x, 1)`; flipped
+  `1 + x` lost operand order) — now `Rt_ArithIK` reads the trailing
+  MMBINI/MMBINK; (3) LTI/LEI/GTI/GEI handed `__lt`/`__le` an integer immediate
+  where lvm.c passes a float (`t < 2.0`) — now `Rt_OrderISlow` honors the isf
+  flag. Regression tests: `tests/differential/aot_forlimit.lua`,
+  `tests/differential/aot_mm_dispatch.lua` (run under both engines).
+
+### Known bounded divergence (not a bug to fix per-test; use pcall in tests)
+
+- **AOT-ERRBANNER-001** — an UNCAUGHT runtime error prints
+  `luac: runtime error: <msg>` (no traceback) from a compiled exe, vs
+  `luavm: <msg>` + `stack traceback: …` under `luavm -i`. The `<msg>` itself
+  (including `source:line:` and operand annotations) matches. Differential
+  tests must assert error behavior through `pcall` (messages compare exactly);
+  byte-equality of the top-level banner is inherently impossible (different
+  program names). A traceback-printing msghandler in the AOT entry would
+  narrow (not close) this; tracked as a polish item.
