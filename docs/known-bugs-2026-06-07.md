@@ -374,3 +374,34 @@ note above:
   byte-equality of the top-level banner is inherently impossible (different
   program names). A traceback-printing msghandler in the AOT entry would
   narrow (not close) this; tracked as a polish item.
+
+### Round 6 (2026-06-10, post-`66f4b66`) — three more, FIXED in `80ec826`
+
+- **Stale `L->top.p` in arith slow helpers** — every arith/bitwise/unary/len
+  helper ran `luaO_arith`/`luaV_objlen` on whatever top was current and only
+  restored the ceiling afterwards, so metamethod/error pushes clobbered live
+  operand slots: `nil + 1` in a pcall'd closure reported "arithmetic on a
+  **string** value"; `"hi" + 1` handed the string `__add` a **function**
+  operand (value corruption). All 31 sites now raise top BEFORE dispatch
+  (the pattern the order-compare helpers already used). Affected both engines.
+- **`Rt_ArithIK` raw-op conflation** — `x - 0` (ADDI x,0 + MMBINI TM_SUB) must
+  compute the ADDITION `x + (-0)` like lvm.c's ADDI arm (observable at
+  `x = -0.0`); now split into `luaO_rawarith` (original opcode semantics) +
+  `luaT_trybinTM` (MMBIN event, metamethods only).
+- **`debug.setlocal` vs -O1 type proofs** — reflection can rewrite any live
+  local, falsifying static INT/FLT proofs (a proven-int local set to 9.5
+  printed garbage). Mitigation: any module carrying the string constant
+  `"debug"` compiles with the typeinfer pass disabled (checked fastpaths,
+  which re-verify tags at runtime, stay on).
+
+Regression test: `tests/differential/aot_errpath_fidelity.lua` (both engines).
+
+### Known bounded divergence (in addition to AOT-ERRBANNER-001)
+
+- **AOT-DEBUGREFLECT-001** — a debug table fetched WITHOUT the literal string
+  `"debug"` anywhere in the chunk (e.g. `_G["de".."bug"]`, `pairs(_G)`
+  harvesting) evades the constant-scan guard, so `debug.setlocal` under such
+  a chunk can still falsify -O1 type proofs. This is the standard optimizing-
+  compiler reflection caveat (LuaJIT behaves analogously); a fully sound guard
+  would require killing proofs on any dynamic `_ENV`/`_G` indexing. Documented,
+  accepted at -O1; `-O0` is always reflection-exact.
