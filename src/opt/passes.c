@@ -340,8 +340,23 @@ void lc_pass_local_typeinfer(LcFunc *f) {
            drop the step tag-check AND the float helper arm (bare inline
            loop), and the loop slots become register-residency candidates. */
         if (ti_reg(sin, in->a,     nregs) == TI_INT &&
-            ti_reg(sin, in->a + 2, nregs) == TI_INT)
+            ti_reg(sin, in->a + 2, nregs) == TI_INT) {
           in->known |= LC_KNOWN_B_INT;
+          /* Export the entry-state INT mask for register residency: the
+             dataflow IN-state at the loop body's first instruction (this
+             FORLOOP's branch target). Residency must require entry-INT for
+             any candidate it fills/spills, because a slot whose only
+             in-region writes are conditional reaches the exit spill still
+             holding its loop-entry value (attack round 8: 1.5/"s"/nil/true
+             were retagged as integers by the unconditional INT-tag spill). */
+          in->res_entry_int = 0;
+          if (in->c >= 0 && in->c <= maxpc && idxof[in->c] >= 0) {
+            const int8_t *entry = &st[(size_t)idxof[in->c] * nregs];
+            int s, lim = nregs < 64 ? nregs : 64;
+            for (s = 0; s < lim; s++)
+              if (entry[s] == TI_INT) in->res_entry_int |= ((uint64_t)1 << s);
+          }
+        }
         continue;
       default: continue;
     }

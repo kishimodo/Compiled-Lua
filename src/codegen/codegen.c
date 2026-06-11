@@ -1645,6 +1645,22 @@ static int res_qualify( LcFunc *f, LcInst **map, int T, int P, LcResRegion *out 
     }
 
     if ( dirty[ La ] || dirty[ La + 1 ] || dirty[ La + 2 ] ) goto reject;
+
+    /* ENTRY-TYPE GATE (attack round 8): a candidate must be PROVEN integer in
+       the dataflow state at region entry (the FORLOOP's res_entry_int mask).
+       In-region access proofs alone are NOT enough -- a slot whose only
+       writes sit behind a branch can reach the exit spill still holding its
+       loop-entry float/string/nil/boolean, which the spill's unconditional
+       INT retag would silently corrupt (1.5 -> 4609434218613702656). The
+       loop internals La..La+2 are exempt: FORPREP rewrote them as integers
+       on the only edge that enters the region, and the body provably never
+       writes them (checked above). Slots >= 64 simply never qualify. */
+    for ( i = 0; i < nslots; i++ ) {
+        if ( i >= La && i <= La + 2 ) continue;
+        if ( i >= 64 || !( ( map[ P ]->res_entry_int >> i ) & 1 ) )
+            dirty[ i ] = 1;
+    }
+
     /* the FORLOOP touches index/count/step/ctrl every iteration */
     cnt[ La ] += 1000; cnt[ La + 1 ] += 1000; cnt[ La + 2 ] += 500;
     if ( !dirty[ La + 3 ] ) cnt[ La + 3 ] += 1000;

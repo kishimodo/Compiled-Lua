@@ -106,4 +106,32 @@ local fa = 0.5
 for i = 1, 10 do fa = fa + 1 end
 print(fa)                                  -- 10.5
 print(fa - 1, fa + 0, -(0.0) - 0)          -- 9.5 10.5 0.0 (ADDI float arm, sign-of-zero)
+
+-- CONDITIONAL-WRITE-ONLY slots (attack round 8): every in-region access is an
+-- int-proven write behind a branch that never fires, but the slot enters the
+-- loop holding a float/string/nil/boolean. Residency must NOT claim it (the
+-- entry-INT gate) -- the exit spill would retag the raw payload as integer.
+local cf = 1.5
+for i = 1, 5 do if i == 99 then cf = i end end
+print(cf, math.type(cf))                   -- 1.5 float
+local cs = "hello"
+for i = 1, 5 do if i == 99 then cs = i end end
+print(cs, type(cs), cs == "hello")         -- hello string true
+local cn = nil
+for i = 1, 5 do if i == 99 then cn = i end end
+print(cn, type(cn))                        -- nil nil
+local cb = true
+for i = 1, 4 do if i == 99 then cb = i end end
+print(cb, type(cb))                        -- true boolean
+local best, threshold = 0.0, 1000
+for i = 1, 10 do if i > threshold then best = i end end
+print(best, math.type(best), best + 0.5)   -- 0.0 float 0.5
+-- and the taken-branch variant must still update exactly
+local hit = 2.5
+for i = 1, 5 do if i == 3 then hit = i end end
+print(hit, math.type(hit))                 -- 3 integer
+-- conditional write with int entry: eligible for residency, must stay exact
+local ci = 7
+for i = 1, 5 do if i == 4 then ci = ci + i end end
+print(ci)                                  -- 11
 print("done")

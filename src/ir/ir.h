@@ -192,6 +192,15 @@ struct LcInst {
                       /* operand registers hold a known numeric type ON     */
                       /* ENTRY, letting codegen elide the runtime tag-check. */
                       /* Bitmask of LC_KNOWN_* below. 0 = unknown (boxed).   */
+  uint64_t res_entry_int; /* OP_FORLOOP only: bitmask of Lua slots (0..63)   */
+                      /* PROVEN integer in the dataflow state at the loop    */
+                      /* body's first pc (this FORLOOP's branch target). A   */
+                      /* slot may be register-resident across the loop only  */
+                      /* if its bit is set: a slot whose sole in-region      */
+                      /* writes are CONDITIONAL can reach the exit spill     */
+                      /* still holding its loop-entry value, so that value   */
+                      /* itself must be a proven int or the spill's INT      */
+                      /* retag corrupts it (found by attack round 8).        */
   LcInst  *next, *prev;
 };
 
