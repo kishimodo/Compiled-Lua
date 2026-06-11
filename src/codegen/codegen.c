@@ -587,6 +587,58 @@ static int lower_cmp( LcBranchCtx *Br, LcInst *in, const char *Helper, int harg2
            immediate (the *I forms, statically integer). */
         int op1_int = ( in->known & LC_KNOWN_B_INT ) != 0;
         int op2_int = is_regreg ? ( ( in->known & LC_KNOWN_C_INT ) != 0 ) : 1;
+        int op1_flt = ( in->known & LC_KNOWN_B_FLT ) != 0;
+        int op2_flt = is_regreg ? ( ( in->known & LC_KNOWN_C_FLT ) != 0 ) : 1;
+
+        /* M1 FLT elision: operand(s) PROVEN float -> bare ucomisd, no
+           tag-check, no helper. Lua NaN semantics come free: ucomisd's
+           unordered result sets ZF=PF=CF=1, so the CF-based seta/setae are
+           false-on-NaN; equality additionally requires PF=0. The compare is
+           operand-swapped so `<`/`<=` map onto above/above-equal:
+             a <  b : ucomisd(b, a) seta    a <= b : ucomisd(b, a) setae
+             a >  K : ucomisd(a, K) seta    a >= K : ucomisd(a, K) setae
+             a <  K : ucomisd(K, a) seta    a <= K : ucomisd(K, a) setae
+           An *I immediate is statically int (never NaN); converting it to
+           double at compile time is the same cast lvm.c's op_orderI applies.
+           EQI keeps the helper (number-vs-number only; rare for floats). */
+        if ( op1_flt && op2_flt && in->bc_op != OP_EQI ) {
+            if ( is_regreg ) {
+                if ( in->bc_op == OP_EQ ) {
+                    if ( !X64Emit_MovsdMemToXmm0( B, X64_RDI, A * 16 ) ) return 0;
+                    if ( !X64Emit_UcomisdXmm0Mem( B, X64_RDI, Bop * 16 ) ) return 0;
+                    if ( !emit_setcc_movzx_r11( B, 0x4 ) ) return 0;   /* r11d = ZF */
+                    { unsigned char S[ 6 ] = { 0x0F, 0x9B, 0xC0,       /* setnp al  */
+                                               0x41, 0x20, 0xC3 };     /* and r11b, al */
+                      if ( !LcCodeBuf_Append( B, S, 6 ) ) return 0; }
+                } else {            /* LT / LE: compare swapped, then seta/setae */
+                    if ( !X64Emit_MovsdMemToXmm0( B, X64_RDI, Bop * 16 ) ) return 0;
+                    if ( !X64Emit_UcomisdXmm0Mem( B, X64_RDI, A * 16 ) ) return 0;
+                    if ( !emit_setcc_movzx_r11( B,
+                            in->bc_op == OP_LT ? 0x7 : 0x3 ) ) return 0;
+                }
+            } else {
+                double   kd = ( double )( int32_t )Bop;
+                uint64_t kbits; memcpy( &kbits, &kd, 8 );
+                int gt = ( in->bc_op == OP_GTI || in->bc_op == OP_GEI );
+                if ( gt ) {         /* a > K / a >= K: xmm0 = a, xmm1 = K */
+                    if ( !X64Emit_MovsdMemToXmm0( B, X64_RDI, A * 16 ) ) return 0;
+                    if ( !X64Emit_MovImm64ToReg( B, X64_RAX, kbits ) ) return 0;
+                    if ( !X64Emit_MovqReg64ToXmmN( B, 1, X64_RAX ) ) return 0;
+                } else {            /* a < K / a <= K: xmm0 = K, xmm1 = a */
+                    if ( !X64Emit_MovImm64ToReg( B, X64_RAX, kbits ) ) return 0;
+                    if ( !X64Emit_MovqReg64ToXmm0( B, X64_RAX ) ) return 0;
+                    if ( !X64Emit_MovsdMemToXmmN( B, 1, X64_RDI, A * 16 ) ) return 0;
+                }
+                if ( !X64Emit_UcomisdXmm0Xmm1( B ) ) return 0;
+                if ( !emit_setcc_movzx_r11( B,
+                        ( in->bc_op == OP_LTI || in->bc_op == OP_GTI )
+                            ? 0x7 : 0x3 ) ) return 0;
+            }
+            { unsigned char C[ 4 ] = { 0x41, 0x83, 0xFB, ( unsigned char )( int8_t )K };
+              if ( !LcCodeBuf_Append( B, C, 4 ) ) return 0; }   /* cmp r11d, K */
+            return LcBr_EmitBranch( Br, 0x5 /* JNE */, in->bc_pc + 2, in->bc_pc );
+        }
+
         if ( op1_int && op2_int ) {
             if ( !X64Emit_MovMemToReg( B, X64_RAX, X64_RDI, A * 16 ) ) return 0;
             if ( is_regreg ) { if ( !emit_cmp_rax_mem( B, Bop * 16 ) ) return 0; }

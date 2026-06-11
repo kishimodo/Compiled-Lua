@@ -305,6 +305,42 @@ static int EmitSse2MemForm( LcCodeBuf *Buf, unsigned char Sse2Opcode,
     return 1;
 }
 
+/* Same mem-form encoder with the 66 prefix (ucomisd family). */
+static int EmitSse66MemForm( LcCodeBuf *Buf, unsigned char Opcode,
+                              X64_GPR_T Base, int32_t Disp ) {
+    unsigned char Prefix[ 3 ] = { 0x66, 0x0F, Opcode };
+    int      RbpLike, Mod;
+    unsigned ModRm8;
+    if ( !LcCodeBuf_Append( Buf, Prefix, 3 ) ) return 0;
+    RbpLike = ( Lo3( Base ) == 5 );
+    Mod     = ( Disp == 0 && !RbpLike ) ? 0 :
+              ( ( Disp >= -128 && Disp <= 127 ) ? 1 : 2 );
+    ModRm8  = ( unsigned )( ( Mod << 6 ) | ( 0 << 3 ) | Lo3( Base ) );
+    if ( !AppendByte( Buf, ( unsigned char )ModRm8 ) ) return 0;
+    if ( Lo3( Base ) == 4 ) {
+        unsigned char Sib = ( unsigned char )( ( 4u << 3 ) | Lo3( Base ) );
+        if ( !AppendByte( Buf, Sib ) ) return 0;
+    }
+    if ( Mod == 1 ) {
+        int8_t D8 = ( int8_t )Disp;
+        if ( !AppendBytes( Buf, &D8, 1 ) ) return 0;
+    } else if ( Mod == 2 ) {
+        if ( !AppendBytes( Buf, &Disp, 4 ) ) return 0;
+    }
+    return 1;
+}
+
+int X64Emit_UcomisdXmm0Mem( LcCodeBuf *Buf, X64_GPR_T Base, int32_t Disp ) {
+    /* 66 0F 2E /r -- UCOMISD xmm0, m64 (sets ZF/PF/CF; unordered = all 1). */
+    return EmitSse66MemForm( Buf, 0x2E, Base, Disp );
+}
+
+int X64Emit_UcomisdXmm0Xmm1( LcCodeBuf *Buf ) {
+    /* 66 0F 2E C1 -- UCOMISD xmm0, xmm1. */
+    unsigned char Tmp[ 4 ] = { 0x66, 0x0F, 0x2E, 0xC1 };
+    return LcCodeBuf_Append( Buf, Tmp, 4 );
+}
+
 int X64Emit_MovsdMemToXmm0( LcCodeBuf *Buf, X64_GPR_T Base, int32_t Disp ) {
     return EmitSse2MemForm( Buf, 0x10, Base, Disp );
 }

@@ -265,6 +265,15 @@ int X64Emit_ArithSdXmm0Xmm1( LcCodeBuf *Buf, unsigned char Op );
 
 /*!
  * @brief
+ *  UCOMISD xmm0, m64 / xmm0, xmm1 (66 0F 2E /r). Sets ZF/PF/CF;
+ *  an unordered (NaN) compare sets all three -- so CF-based conditions
+ *  (seta/setae) yield false-on-NaN, matching Lua comparison semantics.
+ */
+int X64Emit_UcomisdXmm0Mem( LcCodeBuf *Buf, X64_GPR_T Base, int32_t Disp );
+int X64Emit_UcomisdXmm0Xmm1( LcCodeBuf *Buf );
+
+/*!
+ * @brief
  *  CALL rel32 to an external symbol. Emits E8 <disp32=0> and records an
  *  LC_RELOC_REL32 against `Sym` at the disp32 offset. The linker resolves it.
  */
