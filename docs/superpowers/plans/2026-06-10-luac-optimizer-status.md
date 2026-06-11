@@ -90,16 +90,25 @@ called the per-opcode helper that hardcodes the wrong TM, so a metatable'd `a<<K
   branchy int kernel **7.1×**. This achieved the unboxing win on the memory-form
   IR — no SSA needed for the loop-region scope.
 
+- **XMM float residency** (`6bdd250`, 2026-06-11): proven-float slots live in
+  xmm6–xmm10 across qualified regions (prologue/epilogue save the 128-bit
+  callee-saved registers only in functions that use float residents; entry-FLT
+  gate symmetric with the round-8 INT gate; in-place accumulate peephole).
+  **Honest result: float accumulator loop 6.2× vs -O0 — only ~25% beyond
+  tag-elision alone.** Float loops are bound by addsd LATENCY (the serial FP
+  dependency chain), not the memory traffic that residency removes; the int
+  case (9.3×) had no such floor. Recorded so nobody re-derives this the hard
+  way.
+
 ## Remaining — designed, sound-conservative, not built (honest valuations)
 
-### Residency follow-ups (build only if a real workload demands them)
+### Residency follow-up (build only if a real workload demands it)
 - **Spill-around observation points**: allow helper-calling ops inside residency
   regions by spilling residents before / refilling after each one. Extends
   residency to loops with table writes or calls; costs spill traffic exactly
-  where the loop is already paying a helper call, so the marginal win is small.
-- **XMM residency for floats**: xmm6+ are callee-saved on Win64 but the prologue
-  doesn't save them — needs prologue + unwind-info work before float
-  accumulators can live in registers.
+  where the loop is already paying a helper call, so the marginal win is small —
+  and the float-residency result above suggests measuring a real workload
+  before building it.
 
 ### `lc_pass_raw_table`, `lc_pass_devirt_local`, `lc_pass_inline_small`
 Table get/set already match v1 (the fast path lives inside `Rt_GetI`/
