@@ -143,24 +143,24 @@ int lc_drive( const LcDriverOptions *opt ) {
         Resolve_FreeResult( &res );
         return 1;
     }
-    /* Builtin-package bundling (the in-tree json/hash/... packages) is a v1
-    ** compiler.exe feature the AOT pipeline does not support yet (M4): the
-    ** require would compile clean and the exe would then fail at runtime.
-    ** Fail LOUDLY at compile time instead. (rover-installed packages resolve
-    ** as ordinary file modules and bundle fine.) */
-    if ( res.BuiltinPackageCount > 0 ) {
-        size_t bi;
-        fprintf( stderr,
-                 "aotc: error: this program requires builtin package%s not yet "
-                 "supported in compiled exes:",
-                 res.BuiltinPackageCount == 1 ? "" : "s" );
-        for ( bi = 0; bi < res.BuiltinPackageCount; bi++ ) {
-            fprintf( stderr, " '%s'", res.BuiltinPackages[ bi ] );
-        }
-        fprintf( stderr, "\n  (builtin-package bundling for AOT programs is "
-                         "planned; rover-installed packages work today)\n" );
+    /* Builtin packages bundle like any other module: compile each one's
+    ** source (located via the toolchain's packages directory) and append it
+    ** to the module set, so it is AOT-compiled + preload-registered. imgui
+    ** needs a native archive the AOT link does not carry — keep that loud. */
+    if ( res.RequiresImgui ) {
+        fprintf( stderr, "aotc: error: 'imgui' requires a native archive not "
+                         "yet supported in compiled exes\n" );
         Resolve_FreeResult( &res );
         return 1;
+    }
+    if ( res.BuiltinPackageCount > 0 ) {
+        char berr[ 512 ] = { 0 };
+        if ( !Resolve_AppendBuiltinModules( &res, &ropts, berr, sizeof( berr ) ) ) {
+            fprintf( stderr, "aotc: error: %s\n",
+                     berr[0] ? berr : "builtin package bundling failed" );
+            Resolve_FreeResult( &res );
+            return 1;
+        }
     }
 
     /* ---- 2. undump each module + closed-world scan; collect reachable set ----
@@ -315,9 +315,11 @@ int lc_drive( const LcDriverOptions *opt ) {
 
         /* Programs that never mention "debug" can't activate debug hooks, so
         ** their exes drop the bytecode interpreter (same conservative scan
-        ** that gates the -O1 type proofs). */
+        ** that gates the -O1 type proofs). Programs referencing ffi/bit get
+        ** the FFI initialization anchor linked in. */
         if ( !LuacLink_LinkProgram( obj_path, opt->output,
                                     !lc_module_uses_debug( m ),
+                                    res.RequiresFfi || lc_module_uses_ffi( m ),
                                     err, sizeof( err ) ) ) {
             fprintf( stderr, "aotc: error: link failed: %s\n",
                      err[0] ? err : "(unknown)" );

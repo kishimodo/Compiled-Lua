@@ -177,16 +177,29 @@ do
      table.concat(litter, ", "))
 end
 
--- ---- 6b. builtin-package requires fail LOUDLY at compile time (the AOT
--- pipeline does not bundle the in-tree builtin packages yet; a silent
--- compile + runtime failure would be a broken-exe trap) ----
+-- ---- 6b. builtin packages bundle into compiled exes (their sources are
+-- compiled as ordinary modules + preload-registered) ----
 do
   local src = TEMP .. "\\clua_t_builtin.lua"
   writefile(src, 'local json = require "json"\nprint(json.encode({1,2}))\n')
-  local code, out = run(("\"%s\" check \"%s\""):format(clua_abs, src))
-  ok(code ~= 0 and out:find("builtin package", 1, true) ~= nil,
-     "builtin-package require is a loud compile error", out)
+  local code, out = run(("\"%s\" run \"%s\""):format(clua_abs, src))
+  ok(code == 0 and out:find("[1,2]", 1, true) ~= nil,
+     "builtin package bundles and runs in a compiled exe", out)
   os.remove(src)
+end
+
+-- ---- 6e. clua init scaffolds a project (Go-style) ----
+do
+  local proj = TEMP .. "\\clua_t_init"
+  run(("rmdir /s /q \"%s\" 2>nul & mkdir \"%s\""):format(proj, proj))
+  local c1, o1 = run(("cd /d \"%s\" && \"%s\" init demo"):format(proj, clua_abs))
+  local has = exists(proj .. "\\main.lua") and exists(proj .. "\\rover.toml")
+              and exists(proj .. "\\.gitignore")
+  ok(c1 == 0 and has, "clua init writes main.lua + rover.toml + .gitignore", o1)
+  local c2, o2 = run(("cd /d \"%s\" && \"%s\" run main.lua"):format(proj, clua_abs))
+  ok(c2 == 0 and o2:find("Hello, world!", 1, true) ~= nil,
+     "clua init project runs out of the box", o2)
+  run(("rmdir /s /q \"%s\" 2>nul"):format(proj))
 end
 
 -- ---- 6c. the full toolchain loop: rover install -> clua build -> run.

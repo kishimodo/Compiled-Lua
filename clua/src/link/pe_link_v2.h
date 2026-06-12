@@ -27,8 +27,12 @@
 **               references "debug": the link substitutes lvm_nointerp.o for
 **               the Lua archive's lvm.o, dropping the unreachable bytecode
 **               interpreter loop (~15 KB) from the exe.
+**   require_ffi — nonzero when the program references the ffi/bit globals:
+**               the link force-pulls the Clua_OpenFfi anchor (ffi_anchor.o
+**               in runtime-aot.a) so aot_entry's weak call opens the FFI.
 */
 int LuacLink_LinkProgram( const char *userObj, const char *outExe,
-                          int no_interp, char *err, size_t errlen );
+                          int no_interp, int require_ffi,
+                          char *err, size_t errlen );
 
 #endif /* LUAC_LINK_PE_LINK_V2_H */

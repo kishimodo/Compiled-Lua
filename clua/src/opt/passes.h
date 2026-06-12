@@ -33,6 +33,10 @@ bool lc_optimize(LcModule *m, const LcPassConfig *cfg);
 ** lvm_nointerp.o instead — see pe_link_v2.c). */
 bool lc_module_uses_debug(LcModule *m);
 
+/* TRUE iff any function mentions the string "ffi"/"bit" (conservative): the
+** driver links the FFI anchor so the runtime globals exist in the exe. */
+bool lc_module_uses_ffi(LcModule *m);
+
 /* ---- Analyses (no IR mutation; populate side tables) ---- */
 void lc_analyze_dominators(LcFunc *f);
 void lc_analyze_liveness(LcFunc *f);

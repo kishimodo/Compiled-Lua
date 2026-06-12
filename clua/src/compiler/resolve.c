@@ -115,6 +115,7 @@ static void ScanProto( Proto *P, PSTR_LIST_T Out, size_t *Warned, PRESOLVE_RESUL
                so static-scan false positives like pcall(require, "ffi")
                don't fail the build. */
             if ( IsRuntimeOnlyName( Name ) ) {
+                if ( Res != NULL ) Res->RequiresFfi = 1;
                 continue;
             }
             /* runtime-provided packages live in runtime.a, not on disk. Some
@@ -226,20 +227,22 @@ static void PushResolved( PRESOLVE_RESULT_T R,
    warning) because winmd-gen sub-packages and ad-hoc names may not
    live where the simple rule guesses. */
 static int BuiltinNameToSourcePath( const char *Name, char *OutBuf, size_t OutBufSize ) {
+    char Root[ 512 ];
     if ( Name == NULL || OutBuf == NULL ) return 0;
+    if ( !Paths_BuiltinPackagesRoot( Root, sizeof( Root ) ) ) return 0;
     const char *Dot = strchr( Name, '.' );
     int Written = 0;
     if ( Dot == NULL ) {
         Written = snprintf( OutBuf, OutBufSize,
-                            "clua/src/runtime/packages/%s/init.lua", Name );
+                            "%s/%s/init.lua", Root, Name );
     } else {
         size_t HeadLen = ( size_t )( Dot - Name );
         Written = snprintf( OutBuf, OutBufSize,
-                            "clua/src/runtime/packages/%.*s/%s.lua",
+                            "%s/%.*s/%s.lua", Root,
                             ( int )HeadLen, Name, Dot + 1 );
         /* replace any remaining `.` in the suffix with `/` for deeper
            sub-packages (e.g. windows.foo.bar -> windows/foo/bar.lua) */
-        for ( size_t I = strlen( "clua/src/runtime/packages/" ) + HeadLen + 1;
+        for ( size_t I = strlen( Root ) + 1 + HeadLen + 1;
               I < ( size_t )Written && OutBuf[ I ] != '\0'; I++ ) {
             if ( OutBuf[ I ] == '.' && I + 4 < ( size_t )Written ) {
                 OutBuf[ I ] = '/';
@@ -259,7 +262,10 @@ static int BuiltinNameToSourcePath( const char *Name, char *OutBuf, size_t OutBu
    Queue. Mirrors the classification in ScanProto. */
 static void ForceLinkName( PRESOLVE_RESULT_T Out, STR_LIST_T *Queue, const char *Name ) {
     if ( Name == NULL || Name[ 0 ] == '\0' ) return;
-    if ( IsRuntimeOnlyName( Name ) ) return;          /* ffi / bit: runtime globals */
+    if ( IsRuntimeOnlyName( Name ) ) {                /* ffi / bit: runtime globals */
+        if ( Out != NULL ) Out->RequiresFfi = 1;
+        return;
+    }
     if ( IsBuiltinPackage( Name ) ) {
         if ( strcmp( Name, "imgui" ) == 0 || strcmp( Name, "imgui_helpers" ) == 0 ) {
             Out->RequiresImgui = 1;
@@ -428,6 +434,44 @@ int Resolve_Walk( const char *EntryPath, PRESOLVE_OPTS_T Opts, PRESOLVE_RESULT_T
     StrList_Free( &Queue );
     StrList_Free( &Visited );
     Out->WarnCount = Warned;
+    return 1;
+}
+
+int Resolve_AppendBuiltinModules( PRESOLVE_RESULT_T Out, PRESOLVE_OPTS_T Opts,
+                                  char *Err, size_t ErrLen ) {
+    ( void )Opts;
+    if ( Err && ErrLen ) Err[ 0 ] = '\0';
+    if ( Out == NULL ) return 0;
+    for ( size_t I = 0; I < Out->BuiltinPackageCount; I++ ) {
+        const char *Pkg = Out->BuiltinPackages[ I ];
+        char        SrcPath[ 512 ] = { 0 };
+        LUA_COMPILE_RESULT_T C = { 0 };
+        int Already = 0;
+        for ( size_t K = 0; K < Out->Count; K++ ) {
+            if ( strcmp( Out->Modules[ K ].Name, Pkg ) == 0 ) { Already = 1; break; }
+        }
+        if ( Already ) continue;       /* a rover-installed copy already won */
+        if ( !BuiltinNameToSourcePath( Pkg, SrcPath, sizeof( SrcPath ) ) ) {
+            if ( Err && ErrLen ) {
+                snprintf( Err, ErrLen,
+                          "builtin package '%s' has no source under the "
+                          "toolchain's packages directory (reinstall CLua, or "
+                          "set CLUA_HOME)", Pkg );
+            }
+            return 0;
+        }
+        if ( !LuaCompile_File( SrcPath, 0, &C ) ) {
+            if ( Err && ErrLen ) {
+                snprintf( Err, ErrLen, "compiling builtin package '%s' (%s): %s",
+                          Pkg, SrcPath, C.ErrMsg ? C.ErrMsg : "(unknown)" );
+            }
+            LuaCompile_FreeResult( &C );
+            return 0;
+        }
+        PushResolved( Out, Pkg, SrcPath, C.Bytes, C.BytesLen );
+        C.Bytes = NULL;                /* ownership transferred */
+        LuaCompile_FreeResult( &C );
+    }
     return 1;
 }
 

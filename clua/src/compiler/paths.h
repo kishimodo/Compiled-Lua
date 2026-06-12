@@ -27,4 +27,8 @@ int Paths_IsStorePath( const char *Path );
    user intent, and installed packages bundle into AOT exes today). */
 int Paths_InstalledInStore( const char *ModuleName );
 
+/* Locate the builtin package sources (repo checkout or dist lib\packages).
+   Returns 1 + path in Out, 0 if no root exists. Out may be NULL to probe. */
+int Paths_BuiltinPackagesRoot( char *Out, size_t OutSize );
+
 #endif /* LUAVM_COMPILER_PATHS_H */

@@ -160,7 +160,8 @@ static const char *GccCommand( void ) {
 }
 
 int LuacLink_LinkProgram( const char *userObj, const char *outExe,
-                          int no_interp, char *err, size_t errlen ) {
+                          int no_interp, int require_ffi,
+                          char *err, size_t errlen ) {
     char        cmd[ 4096 ];
     char        entry_obj[ LC_PATH_MAX ];
     char        lvm_obj[ LC_PATH_MAX + 4 ];
@@ -229,10 +230,11 @@ int LuacLink_LinkProgram( const char *userObj, const char *outExe,
     ** registration tables live in .rdata and keep every reachable lib
     ** function alive). */
     snprintf( cmd, sizeof( cmd ),
-              "%s -o \"%s\" \"%s\" \"%s\" %s\"%s\" \"%s\" "
+              "%s -o \"%s\" \"%s\" \"%s\" %s%s\"%s\" \"%s\" "
               "-Wl,--subsystem,console -Wl,--gc-sections -s "
               "-lm -lkernel32 -ladvapi32",
               GccCommand( ), outExe, userObj, entry_obj, lvm_obj,
+              require_ffi ? "-Wl,--undefined=Clua_OpenFfi " : "",
               tc.runtime_a, tc.lualib_a );
     rc = run_cmd( cmd );
     if ( rc != 0 ) {

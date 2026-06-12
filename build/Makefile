@@ -178,6 +178,7 @@ RUNTIME_SRCS := \
     $(SRC_DIR)/runtime/coro.c             \
     $(SRC_DIR)/runtime/native_loader.c    \
     $(SRC_DIR)/runtime/protoinit_rt.c     \
+    $(SRC_DIR)/runtime/ffi_anchor.c       \
     $(SRC_DIR)/jit/exec_mem.c             \
     $(SRC_DIR)/jit/emit_x64.c             \
     $(SRC_DIR)/jit/runtime.c              \

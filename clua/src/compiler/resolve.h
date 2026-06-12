@@ -30,6 +30,10 @@ typedef struct _RESOLVE_RESULT {
        program actually requires (binary tree-shaking -- see
        docs/packages.md). */
     int                RequiresImgui;
+    /* The program references the runtime-provided `ffi`/`bit` globals: the
+       AOT driver links the FFI initialization anchor so compiled exes open
+       the library at startup (v1 hosts always open it). */
+    int                RequiresFfi;
     /* Required builtin packages: dotted-name strings, malloc'd.
        Populated by Resolve_Walk in the order they were first seen. */
     char             **BuiltinPackages;
@@ -50,6 +54,14 @@ typedef struct _RESOLVE_OPTS {
 } RESOLVE_OPTS_T, *PRESOLVE_OPTS_T;
 
 int Resolve_Walk( const char *EntryPath, PRESOLVE_OPTS_T Opts, PRESOLVE_RESULT_T Out );
+
+/* AOT driver only: compile every BuiltinPackages[] source (located under
+   Paths_BuiltinPackagesRoot) and append each as an ordinary module so the
+   backend AOT-compiles + preload-registers it like any user module. v1
+   compiler.exe keeps its archive-based path and never calls this. Returns 0
+   with a message in Err when a package source cannot be found/compiled. */
+int Resolve_AppendBuiltinModules( PRESOLVE_RESULT_T Out, PRESOLVE_OPTS_T Opts,
+                                  char *Err, size_t ErrLen );
 
 void Resolve_FreeResult( PRESOLVE_RESULT_T R );
 

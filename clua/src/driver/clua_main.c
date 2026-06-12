@@ -27,6 +27,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <process.h>   /* _getpid, _spawnv */
+#include <direct.h>    /* _getcwd (clua init project name) */
 
 #define CLUA_VERSION "0.1.0"
 
@@ -39,6 +40,8 @@ static void usage( FILE *to ) {
         "  clua run   <main.lua> [options] [-- <args...>]\n"
         "                                    compile and run\n"
         "  clua check <main.lua>             front-end + closed-world check only\n"
+        "  clua init [name]                  scaffold a project here (main.lua,\n"
+        "                                    rover.toml, .gitignore)\n"
         "  clua version                      print version\n"
         "  clua help                         this help\n"
         "\n"
@@ -140,6 +143,69 @@ static int cmd_build( int argc, char **argv, int from ) {
     return rc;
 }
 
+/* `clua init [name]` — scaffold a project in the CWD, Go-style: a runnable
+ * main.lua, a rover.toml manifest (rover's own format), and a .gitignore.
+ * Existing files are never overwritten. */
+static int write_new_file( const char *path, const char *content ) {
+    FILE *probe = fopen( path, "rb" );
+    if ( probe != NULL ) { fclose( probe ); return 0; }   /* exists: skip */
+    FILE *f = fopen( path, "wb" );
+    if ( f == NULL ) return -1;
+    fputs( content, f );
+    fclose( f );
+    return 1;
+}
+
+static int cmd_init( int argc, char **argv, int from ) {
+    const char *name = ( from < argc && argv[ from ][ 0 ] != '-' )
+                         ? argv[ from ] : NULL;
+    char cwd[ 512 ] = { 0 };
+    char toml[ 1024 ];
+    int  rc;
+
+    if ( name == NULL ) {
+        /* default project name = current folder name */
+        if ( _getcwd( cwd, sizeof( cwd ) ) != NULL ) {
+            char *slash = strrchr( cwd, '\\' );
+            name = ( slash != NULL && slash[ 1 ] != '\0' ) ? slash + 1 : "my-project";
+        } else {
+            name = "my-project";
+        }
+    }
+
+    rc = write_new_file( "main.lua",
+        "local function greet(who)\n"
+        "    return (\"Hello, %s!\"):format(who)\n"
+        "end\n"
+        "\n"
+        "print(greet(arg[1] or \"world\"))\n" );
+    if ( rc > 0 )  printf( "[+] wrote main.lua\n" );
+    if ( rc == 0 ) printf( "[=] main.lua already exists, kept\n" );
+
+    snprintf( toml, sizeof( toml ),
+        "# rover.toml -- rover (the CLua package manager) project manifest\n"
+        "[project]\n"
+        "name = \"%s\"\n"
+        "version = \"0.1.0\"\n"
+        "\n"
+        "# Declare dependencies here, then `rover install` (no args) installs them\n"
+        "# all and writes rover.lock with resolved versions + sha256 hashes.\n"
+        "# `rover add <name>` installs + records a dependency for you.\n"
+        "[dependencies]\n"
+        "# greet = \"^1.0.0\"\n"
+        "\n", name );
+    rc = write_new_file( "rover.toml", toml );
+    if ( rc > 0 )  printf( "[+] wrote rover.toml\n" );
+    if ( rc == 0 ) printf( "[=] rover.toml already exists, kept\n" );
+
+    rc = write_new_file( ".gitignore", "*.exe\nrover.lock\n" );
+    if ( rc > 0 )  printf( "[+] wrote .gitignore\n" );
+
+    printf( "[+] project '%s' ready: `clua run main.lua`, `rover add <pkg>`, "
+            "`clua build main.lua`\n", name );
+    return 0;
+}
+
 static int cmd_check( int argc, char **argv, int from ) {
     CluaArgs a;
     if ( !parse_build_args( &a, argc, argv, from, 0 ) ) return 2;
@@ -210,6 +276,7 @@ int main( int argc, char **argv ) {
     if ( strcmp( cmd, "build" ) == 0 )   return cmd_build( argc, argv, 2 );
     if ( strcmp( cmd, "run" ) == 0 )     return cmd_run( argc, argv, 2 );
     if ( strcmp( cmd, "check" ) == 0 )   return cmd_check( argc, argv, 2 );
+    if ( strcmp( cmd, "init" ) == 0 )    return cmd_init( argc, argv, 2 );
     if ( strcmp( cmd, "version" ) == 0 || strcmp( cmd, "--version" ) == 0 ||
          strcmp( cmd, "-v" ) == 0 ) {
         printf( "clua " CLUA_VERSION " (Lua 5.4, x86-64 Windows)\n" );

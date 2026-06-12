@@ -36,6 +36,24 @@ bool lc_module_uses_debug(LcModule *m) {
   return false;
 }
 
+/* TRUE iff any function carries the string constant "ffi" or "bit": the
+   driver links the FFI initialization anchor so the runtime-provided globals
+   exist (the v1 idiom is `local ffi = _G.ffi`, which the require scan cannot
+   see). Conservative: any string mention links the ~25 KB FFI. */
+bool lc_module_uses_ffi(LcModule *m) {
+  for (uint32_t i = 0; i < m->nfuncs; i++) {
+    Proto *p = m->funcs[i] ? m->funcs[i]->source : NULL;
+    if (!p) continue;
+    for (int k = 0; k < p->sizek; k++) {
+      const TValue *kv = &p->k[k];
+      if (ttisstring(kv) &&
+          (strcmp(getstr(tsvalue(kv)), "ffi") == 0 ||
+           strcmp(getstr(tsvalue(kv)), "bit") == 0)) return true;
+    }
+  }
+  return false;
+}
+
 
 bool lc_optimize(LcModule *m, const LcPassConfig *cfg) {
   if (!m || !cfg) return false;

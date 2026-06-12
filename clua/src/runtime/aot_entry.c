@@ -70,6 +70,29 @@ static void *AotLookupHook( lua_State *L, void *proto ) {
     return ( void * )Jit_LookupCached( ( Proto * )proto );
 }
 
+/* FFI bring-up, linked only when the program references ffi/bit (the driver
+ * adds -Wl,--undefined=Clua_OpenFfi then; see ffi_anchor.c). Weak: NULL when
+ * the anchor isn't in the link. */
+extern void Clua_OpenFfi( lua_State *L ) __attribute__(( weak ));
+
+/* Message handler installed under the entry call: appends a stack traceback
+ * to the error object while the call chain is still live, so an uncaught
+ * runtime error reports like the reference interpreter does
+ * (AOT-ERRBANNER-001 narrowed; the banner prefix still differs). */
+static int AotMsgHandler( lua_State *L ) {
+    const char *msg = lua_tostring( L, 1 );
+    if ( msg == NULL ) {
+        if ( luaL_callmeta( L, 1, "__tostring" ) &&
+             lua_type( L, -1 ) == LUA_TSTRING ) {
+            return 1;
+        }
+        msg = lua_pushfstring( L, "(error object is a %s value)",
+                               luaL_typename( L, 1 ) );
+    }
+    luaL_traceback( L, L, msg, 1 );
+    return 1;
+}
+
 /* ------------------------------------------------------------------ */
 /* Closed-world stubs (AOT-CLOSEDWORLD-002).                           */
 /*                                                                     */
@@ -144,6 +167,9 @@ int main( int argc, char **argv ) {
                                                  fiber-based lib (native code can
                                                  yield across call frames), as v1's
                                                  RuntimeMain does (runtime_init.c) */
+    if ( &Clua_OpenFfi != NULL ) {            /* ffi/bit referenced: anchor linked */
+        Clua_OpenFfi( L );
+    }
     clua_dispatch_hook = AotLookupHook;   /* AOT dispatch (lookup-only)   */
 
     /* Build every Proto + register each luac_fn_* body; returns the entry.
@@ -181,9 +207,12 @@ int main( int argc, char **argv ) {
                                      via the closure on the stack, required
                                      modules via package.preload */
 
-    /* Invoke it like a normal call; luaV_execute's hook dispatches to the
-     * entry's registered AOT body (luac_fn_<entry>). */
-    int status = lua_pcall( L, 0, 0, 0 );
+    /* Install the traceback handler UNDER the entry closure, then invoke it
+     * like a normal call; luaV_execute's hook dispatches to the entry's
+     * registered AOT body (luac_fn_<entry>). */
+    lua_pushcfunction( L, AotMsgHandler );
+    lua_insert( L, -2 );                      /* [handler, closure] */
+    int status = lua_pcall( L, 0, 0, -2 );
     if ( status != LUA_OK ) {
         const char *msg = lua_tostring( L, -1 );
         fprintf( stderr, "clua: runtime error: %s\n",

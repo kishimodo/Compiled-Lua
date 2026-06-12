@@ -5,10 +5,82 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#include <windows.h>   /* GetModuleFileNameA: exe-relative discovery */
+#endif
+
 static int FileExists( const char *Path ) {
     FILE *F = fopen( Path, "rb" );
     if ( F == NULL ) { return 0; }
     fclose( F );
+    return 1;
+}
+
+/* Root directory holding the builtin package sources. Discovery order
+   mirrors the linker's toolchain discovery so dist installs work from any
+   directory:
+     1. CWD repo checkout      clua/src/runtime/packages
+     2. exe-relative repo      <exedir>/../../clua/src/runtime/packages
+     3. exe-relative dist      <exedir>/lib/packages
+     4. %CLUA_HOME%            <home>/lib/packages, <home>/clua/src/runtime/packages
+   Probes for the marker file <root>/json/init.lua. Cached after first call.
+   Returns 0 when no root exists (builtin requires then fail loudly). */
+int Paths_BuiltinPackagesRoot( char *Out, size_t OutSize ) {
+    static char Cached[ 512 ];
+    static int  State = 0;            /* 0 = unprobed, 1 = found, -1 = absent */
+    char Probe[ 600 ];
+
+    if ( State == 0 ) {
+        const char *Home = getenv( "CLUA_HOME" );
+        State = -1;
+        if ( snprintf( Probe, sizeof( Probe ),
+                       "clua/src/runtime/packages/json/init.lua" )
+                 < ( int )sizeof( Probe ) && FileExists( Probe ) ) {
+            snprintf( Cached, sizeof( Cached ), "clua/src/runtime/packages" );
+            State = 1;
+        }
+#ifdef _WIN32
+        if ( State < 0 ) {
+            char Exe[ 512 ] = { 0 };
+            if ( GetModuleFileNameA( NULL, Exe, sizeof( Exe ) ) > 0 ) {
+                char *Slash = strrchr( Exe, '\\' );
+                if ( Slash != NULL ) {
+                    *Slash = '\0';
+                    static const char *Rel[ 2 ] = {
+                        "..\\..\\clua\\src\\runtime\\packages",
+                        "lib\\packages",
+                    };
+                    for ( int I = 0; I < 2 && State < 0; I++ ) {
+                        if ( snprintf( Probe, sizeof( Probe ),
+                                       "%s\\%s\\json\\init.lua", Exe, Rel[ I ] )
+                                 < ( int )sizeof( Probe ) &&
+                             FileExists( Probe ) ) {
+                            snprintf( Cached, sizeof( Cached ), "%s\\%s",
+                                      Exe, Rel[ I ] );
+                            State = 1;
+                        }
+                    }
+                }
+            }
+        }
+#endif
+        if ( State < 0 && Home != NULL && Home[ 0 ] != '\0' ) {
+            static const char *Rel[ 2 ] = {
+                "lib\\packages",
+                "clua\\src\\runtime\\packages",
+            };
+            for ( int I = 0; I < 2 && State < 0; I++ ) {
+                if ( snprintf( Probe, sizeof( Probe ),
+                               "%s\\%s\\json\\init.lua", Home, Rel[ I ] )
+                         < ( int )sizeof( Probe ) && FileExists( Probe ) ) {
+                    snprintf( Cached, sizeof( Cached ), "%s\\%s", Home, Rel[ I ] );
+                    State = 1;
+                }
+            }
+        }
+    }
+    if ( State < 0 || Out == NULL ) { return State > 0; }
+    if ( snprintf( Out, OutSize, "%s", Cached ) >= ( int )OutSize ) { return 0; }
     return 1;
 }
 
