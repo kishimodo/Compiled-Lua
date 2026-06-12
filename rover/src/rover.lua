@@ -425,9 +425,13 @@ local function manifest_path(name) return META .. "\\" .. name .. ".lua" end
 
 local function write_manifest(name, m)
   sh('if not exist "' .. META .. '" mkdir "' .. META .. '" >nul 2>&1')
+  -- `source` is only present for FOREIGN packages (installed straight from a
+  -- GitHub repo, not from a registry); its presence is what marks them.
+  local source = (m.source and m.source ~= "")
+                 and string.format("  source = %q,\n", m.source) or ""
   return write_file(manifest_path(name), string.format(
-    "return {\n  name = %q,\n  version = %q,\n  description = %q,\n  hash = %q,\n  tree = %q,\n}\n",
-    name, m.version, m.description, m.hash, m.tree or ""))
+    "return {\n  name = %q,\n  version = %q,\n  description = %q,\n  hash = %q,\n  tree = %q,\n%s}\n",
+    name, m.version, m.description, m.hash, m.tree or "", source))
 end
 
 local function read_manifest(name)
@@ -503,6 +507,8 @@ local function write_lock(locked)
     local e = locked[n]
     local parts = { string.format("version = %q, hash = %q", e.version, e.hash) }
     if e.tree and e.tree ~= "" then parts[#parts + 1] = string.format("tree = %q", e.tree) end
+    -- FOREIGN entries record where they came from (github.com/<owner>/<repo>)
+    if e.source and e.source ~= "" then parts[#parts + 1] = string.format("source = %q", e.source) end
     -- emit the package's direct deps (sorted) so the graph is recorded + stable
     if type(e.deps) == "table" then
       local dn = {}
@@ -753,21 +759,24 @@ local function require_safe_registry(reg)
 end
 
 local REPO_REGISTRY = "rover\\registry"
+-- The OFFICIAL public registry (Go/cargo-style DX): a static file tree served
+-- from the CLua-Packages GitHub repository -- index.json + per-package files,
+-- exactly the remote-registry shape rover already speaks via curl. To get a
+-- package listed here, open a Pull Request at
+-- https://github.com/kishimodo/CLua-Packages (reviewed, accepted or denied).
+local OFFICIAL_REGISTRY = "https://raw.githubusercontent.com/kishimodo/CLua-Packages/main/packages"
 local repo_registry_present = nil          -- lazily probed once per process
+-- Precedence: --registry flag (handled by reg_arg) > $ROVER_REGISTRY >
+-- rover\registry (a source checkout -- the test suites rely on it) > the
+-- OFFICIAL remote registry.
 local function default_registry()
   local r = os.getenv("ROVER_REGISTRY")
   if r and r ~= "" then return require_safe_registry(r) end
-  -- Repo-relative default when run from a source checkout (the test suites
-  -- rely on it). When that directory does not exist -- rover run standalone
-  -- from an arbitrary cwd -- fall back to %CLUA_HOME%\registry if set, else
-  -- %LOCALAPPDATA%\clua\registry.
   if repo_registry_present == nil then
     repo_registry_present = exists(REPO_REGISTRY)
   end
   if repo_registry_present then return REPO_REGISTRY end
-  local home = os.getenv("CLUA_HOME")
-  if home and home ~= "" then return home .. "\\registry" end
-  return (os.getenv("LOCALAPPDATA") or ".") .. "\\clua\\registry"
+  return OFFICIAL_REGISTRY
 end
 
 local function is_url(s) return type(s) == "string" and s:match("^%a[%w+.-]*://") ~= nil end
@@ -986,6 +995,179 @@ local function install_from_version_dir(name, version, srcdir)
   return m
 end
 
+----------------------------------------------------------------------
+-- FOREIGN packages (Go-style): install straight from a GitHub repository.
+--
+--   rover install https://github.com/<owner>/<repo>[.git][/]
+--   rover install github.com/<owner>/<repo>
+--
+-- The repo is fetched as a codeload tarball (branch main, falling back to
+-- master) with the same external tools rover already uses (curl, plus the
+-- tar.exe that ships with Windows 10+), staged under %TEMP%, and installed
+-- FLAT into the store (<store>\<name>\...) under the repo name lower-cased.
+-- The fetched tree must carry an init.lua at its root (or a package.lua
+-- declaring `entry = "<relative file>"`). There is NO trusted index for a
+-- foreign install, so there is no registry integrity hash to verify the
+-- download against; the manifest records the install-time hashes (so LATER
+-- tampering is still caught by `verify`) plus `source = "github.com/<o>/<r>"`,
+-- which marks the package FOREIGN -- install/verify/list all warn loudly.
+----------------------------------------------------------------------
+-- Does `s` even look like a GitHub source? (Used to route install/add; a
+-- malformed-but-github-shaped argument then gets a github-specific error
+-- instead of the generic invalid-package-name one.)
+local function is_github_source(s)
+  return type(s) == "string"
+         and (s:match("^https?://github%.com/") or s:match("^github%.com/")) ~= nil
+end
+
+-- Parse a GitHub source into (owner, repo). Accepts the https URL form with
+-- an optional .git suffix and/or trailing slash, and the Go-style shorthand
+-- github.com/<owner>/<repo>. Both segments must pass the package-name
+-- allowlist (they become shell-command/URL/path segments). Returns
+-- owner, repo on success; nil when `s` is not a GitHub source at all; and
+-- nil, errmsg when it is github-shaped but malformed.
+local function parse_github_source(s)
+  if not is_github_source(s) then return nil end
+  local rest = s:match("^https?://github%.com/(.*)$") or s:match("^github%.com/(.*)$")
+  rest = rest:gsub("/+$", "")
+  local owner, repo = rest:match("^([^/]+)/([^/]+)$")
+  if not owner then
+    return nil, "expected github.com/<owner>/<repo>, got '" .. s .. "'"
+  end
+  repo = repo:gsub("%.git$", "")
+  if not (name_ok(owner) and name_ok(repo)) then
+    return nil, "owner/repo in '" .. s ..
+                "' contains characters outside the package-name allowlist"
+  end
+  return owner, repo
+end
+
+-- Derive the store name for a GitHub source: the repo name lower-cased,
+-- re-checked against the allowlist. Returns name, or nil + message.
+local function github_pkg_name(s)
+  local owner, repo = parse_github_source(s)
+  if not owner then return nil, repo end       -- repo holds the error message
+  local name = repo:lower()
+  if not name_ok(name) then
+    return nil, "derived package name '" .. name .. "' fails the package-name allowlist"
+  end
+  return name
+end
+
+-- The foreign-package warning. MUST print on install and again on
+-- `verify`/`list` for any package whose manifest records a `source`.
+local function foreign_warning(name, source)
+  print(string.format(
+    "[!] WARNING: '%s' is a FOREIGN package from %s - it is NOT a verified "
+    .. "package from the official CLua-Packages registry (no registry "
+    .. "integrity hash). Review its code before trusting it. To get a package "
+    .. "verified, open a Pull Request at "
+    .. "https://github.com/kishimodo/CLua-Packages - submissions are reviewed "
+    .. "and accepted or denied.", name, source))
+end
+
+-- Fetch github.com/<owner>/<repo> into a %TEMP% staging dir and locate the
+-- package root (the directory holding init.lua, materializing it from a
+-- package.lua `entry` if needed). Test hook: when $ROVER_FOREIGN_TARBALL is
+-- set, that local tarball is used instead of curl (the test suite must not
+-- hit the network). Returns the staged root dir, or nil + message.
+local function fetch_github(owner, repo)
+  local work = (os.getenv("TEMP") or ".") .. "\\rover-foreign\\" .. owner .. "-" .. repo
+  sh('if exist "' .. work .. '" rmdir /S /Q "' .. work .. '" >nul 2>&1')
+  sh('mkdir "' .. work .. '" >nul 2>&1')
+  local tgz = work .. "\\pkg.tgz"
+  local hook = os.getenv("ROVER_FOREIGN_TARBALL")
+  if hook and hook ~= "" then
+    if not registry_ok(hook) then               -- it is interpolated into a shell command
+      return nil, "ROVER_FOREIGN_TARBALL contains shell metacharacters"
+    end
+    if not sh('copy /Y "' .. hook .. '" "' .. tgz .. '" >nul 2>&1') or not exists(tgz) then
+      return nil, "ROVER_FOREIGN_TARBALL is set but unreadable: " .. hook
+    end
+  else
+    local base = "https://codeload.github.com/" .. owner .. "/" .. repo .. "/tar.gz/refs/heads/"
+    if not http_file(base .. "main", tgz) and not http_file(base .. "master", tgz) then
+      return nil, "failed to download github.com/" .. owner .. "/" .. repo ..
+                  " (tried branches main and master via the codeload tarball)"
+    end
+  end
+  local ex = work .. "\\x"
+  sh('mkdir "' .. ex .. '" >nul 2>&1')
+  if not sh('tar -xzf "' .. tgz .. '" -C "' .. ex .. '" >nul 2>&1') then
+    return nil, "failed to extract the tarball (tar.exe, shipped with Windows 10+, is required)"
+  end
+  -- A codeload tarball wraps everything in <repo>-<branch>/; a hand-built one
+  -- may not. Package root = `ex` itself, else the first top-level dir (its
+  -- name allowlisted -- it becomes a path segment) holding init/package.lua.
+  local root
+  if exists(ex .. "\\init.lua") or exists(ex .. "\\package.lua") then
+    root = ex
+  else
+    local p = io.popen('dir /b /ad "' .. ex .. '" 2>nul')
+    if p then
+      for line in p:lines() do
+        if not root and safe_name(line)
+           and (exists(ex .. "\\" .. line .. "\\init.lua")
+                or exists(ex .. "\\" .. line .. "\\package.lua")) then
+          root = ex .. "\\" .. line
+        end
+      end
+      p:close()
+    end
+  end
+  if not root then
+    return nil, "github.com/" .. owner .. "/" .. repo ..
+                " does not look like a CLua package: no init.lua (or package.lua) at the repo root"
+  end
+  -- Entry point: init.lua at the root, or a package.lua declaring `entry`
+  -- (a safe relative path) which we copy to init.lua so the store layout --
+  -- and compiler/interpreter resolution -- stays uniform.
+  if not exists(root .. "\\init.lua") then
+    local t = parse_return_table(read_file(root .. "\\package.lua") or "")
+    local entry = (type(t) == "table" and type(t.entry) == "string") and t.entry or nil
+    local okrel = entry and entry ~= "" and not entry:match("^[/\\]")
+                  and not entry:find(":") and not entry:find("%.%.")
+    if okrel then
+      for seg in entry:gmatch("[^/\\]+") do
+        if not seg:match("^[%w_%.%-]+$") then okrel = false end
+      end
+    end
+    local src = okrel and (root .. "\\" .. entry:gsub("/", "\\")) or nil
+    if not (src and exists(src)
+            and sh('copy /Y "' .. src .. '" "' .. root .. '\\init.lua" >nul 2>&1')) then
+      return nil, "github.com/" .. owner .. "/" .. repo ..
+                  " does not look like a CLua package: no init.lua at the repo root" ..
+                  " (and no package.lua declaring a usable `entry`)"
+    end
+  end
+  return root
+end
+
+-- Install a foreign GitHub package into the store (FLAT layout -- a foreign
+-- install is an unversioned snapshot of a branch head, so it gets no
+-- <store>/<name>/<version> dir). Returns manifest, name -- or nil + message.
+local function install_foreign(owner, repo)
+  local name = repo:lower()
+  if not name_ok(name) then
+    return nil, "derived package name '" .. name .. "' fails the package-name allowlist"
+  end
+  local src, err = fetch_github(owner, repo)
+  if not src then return nil, err end
+  sh('if not exist "' .. STORE .. '" mkdir "' .. STORE .. '" >nul 2>&1')
+  local flat = STORE .. "\\" .. name
+  sh('if exist "' .. flat .. '" rmdir /S /Q "' .. flat .. '" >nul 2>&1')
+  sh('xcopy /E /I /Y /Q "' .. src .. '" "' .. flat .. '" >nul 2>&1')
+  if not exists(flat .. "\\init.lua") then
+    return nil, "install of foreign '" .. name .. "' failed (could not copy into the store)"
+  end
+  local m = read_meta(flat)
+  m.hash   = pkg_hash(flat) or "?"
+  m.tree   = tree_hash(flat) or m.hash
+  m.source = "github.com/" .. owner .. "/" .. repo
+  write_manifest(name, m)
+  return m, name
+end
+
 -- Install <name> at a version satisfying `constraint` (default "*") from a local
 -- dir OR a URL registry. Returns its manifest or nil + message.
 local function do_install(name, registry, constraint)
@@ -1185,6 +1367,12 @@ if os.getenv("ROVER_PKG_TEST") then
     index_extra_files = index_extra_files,
     read_pkg_deps = read_pkg_deps,
     parse_return_table = parse_return_table,
+    -- foreign packages + registry defaulting (pure helpers)
+    is_github_source = is_github_source,
+    parse_github_source = parse_github_source,
+    github_pkg_name = github_pkg_name,
+    default_registry = default_registry,
+    OFFICIAL_REGISTRY = OFFICIAL_REGISTRY, REPO_REGISTRY = REPO_REGISTRY,
   }
   return
 end
@@ -1199,6 +1387,19 @@ if cmd == "where" then
 
 elseif cmd == "install" then
   local name = parg[2]
+  if name and is_github_source(name) then
+    -- FOREIGN install: rover install https://github.com/<o>/<r> | github.com/<o>/<r>
+    local owner, repo = parse_github_source(name)
+    if not owner then print("[-] " .. repo); os.exit(2) end    -- repo holds the error
+    local m, pkgname = install_foreign(owner, repo)
+    if not m then print("[-] " .. pkgname); os.exit(1) end     -- pkgname holds the error
+    print(string.format("[+] installed FOREIGN '%s' v%s -> %s\\%s", pkgname, m.version, STORE, pkgname))
+    print("    sha256(init.lua) = " .. m.hash)
+    print("    tree sha256       = " .. (m.tree or m.hash))
+    print("    source            = " .. m.source)
+    foreign_warning(pkgname, m.source)
+    os.exit(0)
+  end
   if name then
     require_valid_name(name, "install")
     -- single package: install <name> [registry] (transitive deps included)
@@ -1239,6 +1440,25 @@ elseif cmd == "install" then
       local e = lock[dep]
       if not name_ok(dep) or not version_ok(e.version) then
         fail = fail + 1; print("[-] invalid lock entry for '" .. tostring(dep) .. "'")
+      elseif e.source and e.source ~= "" then
+        -- FOREIGN: not in any registry -- verify the installed store content
+        -- against the locked hash instead of re-resolving.
+        local dir  = STORE .. "\\" .. dep
+        local want = (e.tree and e.tree ~= "") and e.tree or e.hash
+        local got  = exists(dir .. "\\init.lua")
+                     and ((e.tree and e.tree ~= "") and tree_hash(dir) or pkg_hash(dir)) or nil
+        if not got then
+          fail = fail + 1
+          print(string.format("[-] foreign '%s' is not installed; run `rover install %s` to fetch it",
+                dep, "https://" .. e.source))
+        elseif want and want ~= "" and got ~= want then
+          fail = fail + 1
+          print(string.format("[-] %s v%s INTEGRITY FAILURE: locked %s, installed %s",
+                dep, e.version, want:sub(1, 16), got:sub(1, 16)))
+        else
+          print(string.format("[+] %s v%s (foreign, locked)", dep, e.version))
+          foreign_warning(dep, e.source)
+        end
       else
         -- install the EXACT locked version (no constraint widening)
         local m, err = do_install(dep, registry, "=" .. e.version)
@@ -1295,7 +1515,23 @@ elseif cmd == "install" then
 
 elseif cmd == "add" then
   local name = parg[2]
-  if not name then print("usage: add <name> [registry] [constraint] [--registry url]"); os.exit(2) end
+  if not name then print("usage: add <name|github.com/owner/repo> [registry] [constraint] [--registry url]"); os.exit(2) end
+  if is_github_source(name) then
+    -- FOREIGN add: install from GitHub + record in rover.toml ("*": foreign
+    -- snapshots have no registry versions to range over) + pin in rover.lock
+    -- with the install-time hashes and the source.
+    local owner, repo = parse_github_source(name)
+    if not owner then print("[-] " .. repo); os.exit(2) end    -- repo holds the error
+    local m, pkgname = install_foreign(owner, repo)
+    if not m then print("[-] " .. pkgname); os.exit(1) end     -- pkgname holds the error
+    add_toml_dep(pkgname, "*")
+    local lock = read_lock() or {}
+    lock[pkgname] = { version = m.version, hash = m.hash, tree = m.tree, source = m.source }
+    write_lock(lock)
+    print(string.format("[+] added FOREIGN '%s' v%s to %s and installed it", pkgname, m.version, TOML))
+    foreign_warning(pkgname, m.source)
+    os.exit(0)
+  end
   require_valid_name(name, "add")
   local registry = reg_arg(parg[3])
   local constraint = parg[4]
@@ -1371,6 +1607,9 @@ elseif cmd == "verify" then
     require_valid_name(name, "verify")
     local m = read_manifest(name)
     if not m then print("[-] '" .. name .. "' is not installed (no manifest)"); os.exit(1) end
+    -- FOREIGN packages warn on every verify (the hashes only pin the bytes
+    -- installed that day -- there is no registry integrity hash behind them).
+    if m.source and m.source ~= "" then foreign_warning(name, m.source) end
     os.exit(verify_one(name, nil, m.tree, m.hash, "'" .. name .. "' v" .. m.version) and 0 or 1)
   end
   -- project mode: verify all of rover.lock
@@ -1378,6 +1617,7 @@ elseif cmd == "verify" then
   if not lock then print("[-] no " .. LOCK .. " (run `install` to generate one)"); os.exit(1) end
   local bad = 0
   for n, e in pairs(lock) do
+    if e.source and e.source ~= "" then foreign_warning(n, e.source) end
     if not verify_one(n, e.version, e.tree, e.hash, n .. " v" .. e.version) then bad = bad + 1 end
   end
   if bad == 0 then print("[+] all locked packages verified") end
@@ -1394,6 +1634,7 @@ elseif cmd == "info" then
   print("description: " .. (m.description or ""))
   print("sha256:      " .. (m.hash or "?"))
   if m.tree and m.tree ~= "" then print("tree:        " .. m.tree) end
+  if m.source and m.source ~= "" then print("source:      " .. m.source .. "  (FOREIGN)") end
   print("location:    " .. STORE .. "\\" .. name)
 
 elseif cmd == "list" then
@@ -1403,7 +1644,10 @@ elseif cmd == "list" then
     for line in p:lines() do
       if line ~= "" and line ~= ".meta" and safe_name(line) then
         local m = read_manifest(line)
-        if m then print(string.format("  %-20s v%s  %s", line, m.version or "?", m.description or ""))
+        if m then
+          local foreign = (m.source and m.source ~= "") and "  [FOREIGN]" or ""
+          print(string.format("  %-20s v%s  %s%s", line, m.version or "?", m.description or "", foreign))
+          if foreign ~= "" then foreign_warning(line, m.source) end
         else print("  " .. line) end
         any = true
       end
@@ -1689,7 +1933,14 @@ else
   print("  install [<name>] [registry]   install one package + its deps, OR (no name)")
   print("                                install rover.toml deps. With a rover.lock,")
   print("                                installs the EXACT pinned versions (reproducible).")
+  print("  install <github-repo>         FOREIGN install: https://github.com/<owner>/<repo>")
+  print("                                (.git/trailing-slash ok) or github.com/<owner>/<repo>.")
+  print("                                Fetches the repo (branch main, then master) and")
+  print("                                installs it under the lower-cased repo name. NOT")
+  print("                                from the official registry -- no registry integrity")
+  print("                                hash; a loud warning is printed.")
   print("  add     <name> [registry] [constraint]  install + record in rover.toml + lock")
+  print("                                (also accepts the github.com forms above)")
   print("  update  [<name>] [registry]   re-resolve constraints + install/relock newer")
   print("  outdated [registry]           show deps with newer versions available")
   print("  remove  <name>                uninstall + drop from manifest, rover.toml, lock")
@@ -1706,11 +1957,16 @@ else
   print("  --registry <url|dir>          set the registry for the command (overrides")
   print("                                the positional registry arg and $ROVER_REGISTRY)")
   print("")
-  print("registry: a local directory (default), or a URL (http(s):// or file://)")
+  print("registry: a local directory, or a URL (http(s):// or file://)")
   print("          with <url>/index.json + <url>/<name>/<version>/init.lua.")
   print("          index.json may carry per-version sha256 (\"hashes\") that downloads")
   print("          are verified against, and a detached index.json.sig (HMAC-SHA256")
   print("          over the index, keyed by $ROVER_REGISTRY_KEY) is enforced when set.")
-  print("          Override the default with $ROVER_REGISTRY.")
+  print("          Default: --registry beats $ROVER_REGISTRY beats rover\\registry (a")
+  print("          source checkout) beats the OFFICIAL CLua package registry:")
+  print("          " .. OFFICIAL_REGISTRY)
+  print("package authors: to get a package verified + listed in the official registry,")
+  print("          open a Pull Request at https://github.com/kishimodo/CLua-Packages")
+  print("          (submissions are reviewed and accepted or denied).")
   print("store: " .. STORE)
 end

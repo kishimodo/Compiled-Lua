@@ -16,6 +16,16 @@ clua check app.lua            front-end + closed-world check only
 **`rover.exe`** is the package manager (init / add / install / publish, with
 lockfiles, Merkle integrity and signed registries) — and it is itself a
 CLua-compiled closed-world program, the largest fidelity fixture in the tree.
+Outside a source checkout (and with no `--registry`/`$ROVER_REGISTRY`), rover
+resolves packages from the **official registry**,
+<https://raw.githubusercontent.com/kishimodo/CLua-Packages/main/packages>. It can also
+install **foreign packages** straight from GitHub, Go-style —
+`rover install github.com/<owner>/<repo>` (or the full https URL) — which are
+NOT verified and carry no registry integrity hash, so rover warns loudly on
+install/verify/list. To get a package verified and listed in the official
+registry, open a Pull Request at
+<https://github.com/kishimodo/CLua-Packages> (submissions are reviewed and
+accepted or denied).
 
 The pipeline is in-memory, rustc-style: front-end, optimizer, codegen and the
 COFF object (including the serialized ProtoInit blob — no generated C) all

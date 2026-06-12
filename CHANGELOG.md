@@ -1,5 +1,42 @@
 # CLua changelog
 
+## Unreleased
+
+### rover
+
+- **Official registry default** (Go/cargo-style DX): with no `--registry`
+  flag, no `$ROVER_REGISTRY`, and no repo-relative dev registry
+  (`rover\registry`, i.e. not run from a source checkout), rover now
+  defaults to the official remote registry,
+  `https://raw.githubusercontent.com/kishimodo/CLua-Packages/main`, over the
+  existing curl-based remote path. Precedence: `--registry` >
+  `$ROVER_REGISTRY` > `rover\registry` (source checkout) > official URL.
+  (Previously the standalone fallback was `%CLUA_HOME%\registry` /
+  `%LOCALAPPDATA%\clua\registry` — directories nothing populated.)
+- **Foreign packages (Go-style)**: `rover install` and `rover add` accept
+  `https://github.com/<owner>/<repo>` (optional `.git` / trailing slash) and
+  the shorthand `github.com/<owner>/<repo>`. The repo is fetched as a
+  codeload tarball (branch `main`, falling back to `master`) with the same
+  external tools rover already uses (curl + the tar.exe shipped with
+  Windows 10+), must carry an `init.lua` at its root (or a `package.lua`
+  declaring `entry = "<relative file>"`), and installs flat into the store
+  under the lower-cased repo name (allowlist-validated). The `.meta`
+  manifest — and `rover.lock` via `add` — records
+  `source = "github.com/<owner>/<repo>"`, marking the package FOREIGN:
+  install, `verify`, and `list` all print a loud warning (foreign installs
+  have **no registry integrity hash**; the install-time hashes still let
+  `verify` catch later tampering). `rover install` in a project with a
+  foreign lock pin verifies the installed content against the pin instead
+  of re-resolving.
+- Help text documents the official-registry default, the foreign install
+  forms, and PR-based package verification
+  (https://github.com/kishimodo/CLua-Packages).
+- New suite `tools/test-pkgmgr-foreign.lua`: GitHub URL parsing + name
+  derivation (via the `ROVER_PKG_TEST` hook), registry precedence incl. the
+  official-URL fallback, and an offline foreign-install end-to-end through
+  the `ROVER_FOREIGN_TARBALL` test hook (install/list/verify/add warnings,
+  `entry` form, tamper detection, missing-init failure). No network access.
+
 ## v0.1.0 — 2026-06-12
 
 The first release of **CLua**, an ahead-of-time compiler for the Lua 5.4
