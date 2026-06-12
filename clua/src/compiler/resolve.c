@@ -119,8 +119,12 @@ static void ScanProto( Proto *P, PSTR_LIST_T Out, size_t *Warned, PRESOLVE_RESUL
             }
             /* runtime-provided packages live in runtime.a, not on disk. Some
                of them (e.g. "imgui") still need to influence the link line
-               so the compiler pulls in the matching native archive. */
-            if ( IsBuiltinPackage( Name ) ) {
+               so the compiler pulls in the matching native archive.
+               A rover-INSTALLED package of the same name shadows the builtin
+               (fall through to ordinary file resolution): the install is
+               explicit user intent, and installed packages bundle into AOT
+               exes where builtins do not yet. */
+            if ( IsBuiltinPackage( Name ) && !Paths_InstalledInStore( Name ) ) {
                 /* require("imgui_helpers") also needs the imgui native
                    archive, since the helpers call cimgui directly. */
                 if ( Res != NULL &&

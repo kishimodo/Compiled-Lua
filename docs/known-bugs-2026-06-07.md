@@ -329,7 +329,33 @@ The new coverage surfaced a batch of real bugs.
   on the `ULONG[1]` path (the `DWORD[1]` path was fixed by R5-003); routing-table
   shape. XFAIL.
 
-## Not bugs (investigated, ruled out)
+## OPEN — AOT-MULTIMOD-001 (2026-06-12): multi-module miscompile at scale
+
+Compiling a program that bundles LARGER multi-module sets (e.g. the registry
+`json` ~64 functions + `semver`) produces a corrupted exe; the oracle runs
+the identical sources correctly, and the v0.1.0 single/two-module corpus
+(greet, rover's 71-fn single module) is unaffected. Manifestations shift
+with link layout (memory corruption, so the same .text fails differently):
+
+- 3-module `require "json" + require "semver"` at -O1, lvm_nointerp link:
+  exit 0xC0000374 (heap corruption) before any output.
+- Same with the full lvm.o linked (add a `"debug"` string constant):
+  `json/init.lua:25: attempt to call a nil value (local '_null')` — a CALL
+  took its callee from a wrong register/slot.
+- Single-module stripped-json at -O0: `:-25: attempt to call a nil value
+  (field '?')` — NEGATIVE line + garbage name (corrupt debug-info reads);
+  the byte-identical source runs clean under `luavm -i`, and the
+  UNSTRIPPED json works at -O0 — the failure is input-shape-sensitive
+  (line-table/layout dependent), not a source-semantics issue.
+
+Repro: `tools\build-registry.lua <stage>` + `rover publish <stage>` +
+`rover install json --registry <stage>` (isolated CLUA_HOME), then
+`clua build` a program requiring json+semver. Suspect surface: blob/COFF
+emission or codegen at larger function counts/sizes (fn table, reloc,
+branch-patch, or lineinfo paths). NEEDS a minimization pass + an XFAIL
+differential fixture; until fixed, large multi-module bundles are
+unreliable — the published registry packages themselves are
+oracle-verified correct.
 
 - `hash` is correct: `sha256("abc")` = `ba7816bf…20015ad` matches the NIST vector.
 - `math.type("x")` returning `nil` is correct Lua 5.4.

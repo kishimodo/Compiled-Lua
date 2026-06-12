@@ -106,6 +106,38 @@ static int Paths_StoreBase( char *Out, size_t OutSize ) {
     return 1;
 }
 
+/* 1 if ModuleName resolves to a rover-installed package in the global store
+   (flat layout: <store>/<name>/init.lua or <store>/<dotted->path>.lua). Used
+   by the resolve walker to let an explicitly installed package SHADOW a
+   same-named in-tree builtin: an install is direct user intent, and (unlike
+   builtins) installed packages bundle into AOT exes today. */
+int Paths_InstalledInStore( const char *ModuleName ) {
+    char   Store[ 400 ];
+    char   Slashed[ 256 ];
+    char   Path[ 700 ];
+    size_t I, NameLen;
+    if ( ModuleName == NULL || ModuleName[ 0 ] == '\0' ) { return 0; }
+    if ( !Paths_StoreBase( Store, sizeof( Store ) ) ) { return 0; }
+    NameLen = strlen( ModuleName );
+    if ( NameLen + 1 > sizeof( Slashed ) ) { return 0; }
+    for ( I = 0; I < NameLen; I++ ) {
+        char C = ModuleName[ I ];
+        Slashed[ I ] = ( C == '.' ) ? '/' : C;
+    }
+    Slashed[ NameLen ] = '\0';
+    /* <store>/<name>/init.lua  ("windows" -> windows/init.lua) */
+    if ( snprintf( Path, sizeof( Path ), "%s/%s/init.lua", Store,
+                   Slashed ) < ( int )sizeof( Path ) && FileExists( Path ) ) {
+        return 1;
+    }
+    /* <store>/<dotted->path>.lua  ("windows.bcrypt" -> windows/bcrypt.lua) */
+    if ( snprintf( Path, sizeof( Path ), "%s/%s.lua", Store,
+                   Slashed ) < ( int )sizeof( Path ) && FileExists( Path ) ) {
+        return 1;
+    }
+    return 0;
+}
+
 /* 1 if Path lies under the global package store (the rover install root).
    Lets the diagnostics pass skip linting third-party installed packages -- the
    user can't act on warnings in code they didn't write -- while still linting

@@ -211,6 +211,35 @@ do
   run(("rmdir /s /q \"%s\" 2>nul & rmdir /s /q \"%s\" 2>nul"):format(home, proj))
 end
 
+-- ---- 6d. a rover-INSTALLED package shadows a same-named builtin: the
+-- install is explicit user intent, so `require "json"` must resolve to the
+-- installed copy (and compile) instead of hitting the builtin gate ----
+do
+  local home = TEMP .. "\\clua_t_home2"
+  local reg  = TEMP .. "\\clua_t_reg2"
+  local proj = TEMP .. "\\clua_t_proj2"
+  run(("rmdir /s /q \"%s\" 2>nul & rmdir /s /q \"%s\" 2>nul & rmdir /s /q \"%s\" 2>nul")
+      :format(home, reg, proj))
+  run(("mkdir \"%s\\json\" & mkdir \"%s\""):format(reg, proj))
+  writefile(reg .. "\\json\\init.lua",
+            'local M = {}\nfunction M.marker() return "installed-json" end\nreturn M\n')
+  writefile(reg .. "\\json\\package.lua",
+            'return { name = "json", version = "1.0.0", description = "shadow test" }\n')
+  writefile(proj .. "\\app.lua", 'local j = require "json"\nprint(j.marker())\n')
+  local rover_abs2 = ROOT .. "\\build\\bin\\rover.exe"
+  local c1, o1 = run(("set \"CLUA_HOME=%s\" && \"%s\" install json --registry \"%s\"")
+                     :format(home, rover_abs2, reg))
+  ok(c1 == 0, "rover installs a builtin-named package", o1:sub(1, 160))
+  local c2, o2 = run(("set \"CLUA_HOME=%s\" && cd /d \"%s\" && \"%s\" build app.lua")
+                     :format(home, proj, clua_abs))
+  local c3, o3 = run(("\"%s\\app.exe\""):format(proj))
+  ok(c2 == 0 and c3 == 0 and o3:find("installed-json", 1, true) ~= nil,
+     "installed package shadows the builtin in clua build",
+     ("build=%s run=%s"):format(o2:sub(1, 120), o3:sub(1, 60)))
+  run(("rmdir /s /q \"%s\" 2>nul & rmdir /s /q \"%s\" 2>nul & rmdir /s /q \"%s\" 2>nul")
+      :format(home, reg, proj))
+end
+
 -- ---- 7. rover.exe: banner + differential vs the script under -i ----
 if not exists(ROVER) then
   print("[~] SKIP rover checks (build\\bin\\rover.exe not built)")
