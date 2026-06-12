@@ -112,8 +112,8 @@ static int ResolveToolchain( LcToolchain *tc, char *err, size_t errlen ) {
     if ( home && home[0] ) {
         if ( TryRoot( tc, home, "lib", "include", "include", NULL ) ) return 1;
         /* a CLUA_HOME pointed at a repo checkout also works: */
-        if ( TryRoot( tc, home, "build\\bin", "src", "lua-5.4\\src",
-                      "src\\runtime\\aot_entry.c" ) ) return 1;
+        if ( TryRoot( tc, home, "build\\bin", "clua\\src", "lua-5.4\\src",
+                      "clua\\src\\runtime\\aot_entry.c" ) ) return 1;
         set_errv( err, errlen,
                   "CLUA_HOME is set ('%s') but no toolchain found under it "
                   "(expected lib\\runtime-aot.a + lib\\liblua54-embedded.a)",
@@ -129,8 +129,8 @@ static int ResolveToolchain( LcToolchain *tc, char *err, size_t errlen ) {
             if ( TryRoot( tc, exedir, "lib", "include", "include", NULL ) ) return 1;
             /* repo: the archives sit next to the exe in build\bin; the repo
             ** root is two levels up. */
-            if ( TryRoot( tc, exedir, "", "..\\..\\src", "..\\..\\lua-5.4\\src",
-                          "..\\..\\src\\runtime\\aot_entry.c" ) ) return 1;
+            if ( TryRoot( tc, exedir, "", "..\\..\\clua\\src", "..\\..\\lua-5.4\\src",
+                          "..\\..\\clua\\src\\runtime\\aot_entry.c" ) ) return 1;
             /* dist: bin\clua.exe + ..\lib\... */
             snprintf( parent, sizeof( parent ), "%s\\..", exedir );
             if ( TryRoot( tc, parent, "lib", "include", "include", NULL ) ) return 1;
@@ -138,8 +138,8 @@ static int ResolveToolchain( LcToolchain *tc, char *err, size_t errlen ) {
     }
 
     /* CWD repo layout (running from a repo root with copied binaries) */
-    if ( TryRoot( tc, ".", "build\\bin", "src", "lua-5.4\\src",
-                  "src\\runtime\\aot_entry.c" ) ) return 1;
+    if ( TryRoot( tc, ".", "build\\bin", "clua\\src", "lua-5.4\\src",
+                  "clua\\src\\runtime\\aot_entry.c" ) ) return 1;
 
     set_errv( err, errlen,
               "cannot locate the CLua runtime libraries (runtime-aot.a + "

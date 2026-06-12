@@ -7,8 +7,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Path to the lint package source that ships with LuaVM. */
-#define LINT_SRC_PATH "src/runtime/packages/lint/init.lua"
+/* Path to the lint package source that ships with CLua. */
+#define LINT_SRC_PATH "clua/src/runtime/packages/lint/init.lua"
 
 /* Scratch directory for temporary test files. */
 #define TMP_DIR "build/bin/tests"

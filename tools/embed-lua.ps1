@@ -1,7 +1,7 @@
 # tools/embed-lua.ps1 -- embed a .lua file as a const C string literal.
 # Usage:
 #   powershell -NoProfile -ExecutionPolicy Bypass -File tools/embed-lua.ps1 `
-#       -InputPath src/runtime/preload/windows.lua `
+#       -InputPath clua/src/runtime/preload/windows.lua `
 #       -OutputPath build/gen/runtime/preload/windows_embed_gen.c `
 #       -SymbolName g_EmbeddedWindowsLua
 

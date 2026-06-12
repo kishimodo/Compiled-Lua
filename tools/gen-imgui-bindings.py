@@ -3,7 +3,7 @@
 Generate the LuaVM ImGui Lua bindings from cimgui's JSON metadata.
 
 Input  : third_party/cimgui-gen-output/{definitions,structs_and_enums}.json
-Output : src/runtime/preload/imgui_bindings.lua
+Output : clua/src/runtime/preload/imgui_bindings.lua
 
 The generated file contains:
   1. A single ffi.cdef string covering primitive typedefs, all enum typedefs

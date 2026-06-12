@@ -1,6 +1,6 @@
 -- tools/build-package-catalog.lua
 --
--- Walks src/runtime/packages/, extracts the public surface from each
+-- Walks clua/src/runtime/packages/, extracts the public surface from each
 -- package's init.lua + package.lua manifest, and writes a browsable
 -- Markdown catalog to docs/packages-catalog.md.
 --
@@ -17,12 +17,12 @@
 local PROJECT_ROOT = (function()
     -- Prefer cwd if it already looks like the project root.
     local function has_packages(root)
-        local f = io.open(root .. "/src/runtime/packages/json/package.lua", "rb")
+        local f = io.open(root .. "/clua/clua/src/runtime/packages/json/package.lua", "rb")
         if f then f:close(); return true end
         return false
     end
     if has_packages(".") then return "." end
-    -- Otherwise locate src/runtime/packages relative to this script.
+    -- Otherwise locate clua/src/runtime/packages relative to this script.
     -- arg[0] is the script path if invoked via `lua tools/...`.
     local self = arg and arg[0] or "tools/build-package-catalog.lua"
     -- Strip the trailing filename, then any trailing /tools or \tools.
@@ -30,7 +30,7 @@ local PROJECT_ROOT = (function()
     d = (d:gsub("[\\/]?tools$", ""))
     if d == "" then d = "." end
     if has_packages(d) then return d end
-    -- Last resort: walk up from cwd looking for src/runtime/packages.
+    -- Last resort: walk up from cwd looking for clua/src/runtime/packages.
     local p = "."
     for _ = 1, 6 do
         if has_packages(p) then return p end
@@ -44,7 +44,7 @@ local function path_join(...)
     return table.concat(parts, "/")
 end
 
-local PACKAGES_DIR = path_join(PROJECT_ROOT, "src", "runtime", "packages")
+local PACKAGES_DIR = path_join(PROJECT_ROOT, "clua", "src", "runtime", "packages")
 local OUTPUT_FILE  = path_join(PROJECT_ROOT, "docs", "packages-catalog.md")
 
 -- ===== Category map =====================================================

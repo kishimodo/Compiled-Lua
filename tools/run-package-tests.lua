@@ -1,7 +1,7 @@
 -- run-package-tests.lua -- per-package behavioral test harness (R3.1).
 --
 -- Run by luavm.exe (so it is shell-agnostic: the same on bash and cmd). The
--- Makefile `test-packages` target passes every src/runtime/packages/<name>/
+-- Makefile `test-packages` target passes every clua/src/runtime/packages/<name>/
 -- test.lua path as an argument. For each, this harness compiles it to a
 -- standalone exe with compiler.exe (which statically bundles the package the
 -- test `require`s) and runs it. A test.lua signals failure by calling

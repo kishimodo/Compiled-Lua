@@ -12,7 +12,7 @@
 # Usage:
 #   powershell tools/gen-windows-package.ps1 `
 #       -Namespace "Windows.Win32.System.Threading" `
-#       -OutFile   "src/runtime/packages/windows/threading.lua"
+#       -OutFile   "clua/src/runtime/packages/windows/threading.lua"
 #
 # List-only mode (no .lua emitted, just print the function count):
 #   powershell tools/gen-windows-package.ps1 `

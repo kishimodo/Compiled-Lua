@@ -13,18 +13,18 @@
 # error-prone: the historic msgpack r_f64 bug corrupted EVERY binary64 value
 # because the 52-bit mantissa was reassembled with the wrong byte grouping.
 #
-# This linter does NOT auto-fix. It lists every src/runtime/packages/*/init.lua
+# This linter does NOT auto-fix. It lists every clua/src/runtime/packages/*/init.lua
 # that still contains hand-rolled float-codec signals, with the matched lines,
 # so new packages adopting the same anti-pattern get caught in review.
 #
 # Usage:
 #   powershell -NoProfile -ExecutionPolicy Bypass -File tools/lint-float-codecs.ps1
-#   powershell -NoProfile -ExecutionPolicy Bypass -File tools/lint-float-codecs.ps1 -PackagesDir src/runtime/packages
+#   powershell -NoProfile -ExecutionPolicy Bypass -File tools/lint-float-codecs.ps1 -PackagesDir clua/src/runtime/packages
 #
 # Exit code: 0 always (advisory). Use -Strict to exit 1 when any hits are found.
 
 param(
-    [string]$PackagesDir = "src/runtime/packages",
+    [string]$PackagesDir = "clua/src/runtime/packages",
     [switch]$Strict
 )
 

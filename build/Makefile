@@ -16,7 +16,7 @@ LD          := x86_64-w64-mingw32-ld
 
 ROOT        := .
 BUILD_DIR   := $(ROOT)/build/bin
-SRC_DIR     := $(ROOT)/src
+SRC_DIR     := $(ROOT)/clua/src
 LUA_DIR     := $(ROOT)/lua-5.4/src
 
 CFLAGS      := -std=c99 -Wall -Wextra -Wno-unused-parameter -O2 -g

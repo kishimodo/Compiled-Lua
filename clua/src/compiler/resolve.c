@@ -213,11 +213,11 @@ static void PushResolved( PRESOLVE_RESULT_T R,
 }
 
 /* Map a builtin package name to its on-disk source file under
-   src/runtime/packages/. Returns 1 if the file exists and was
+   clua/src/runtime/packages/. Returns 1 if the file exists and was
    written into OutBuf, 0 otherwise.
-     "aes"            -> src/runtime/packages/aes/init.lua
-     "windows"        -> src/runtime/packages/windows/init.lua
-     "windows.bcrypt" -> src/runtime/packages/windows/bcrypt.lua
+     "aes"            -> clua/src/runtime/packages/aes/init.lua
+     "windows"        -> clua/src/runtime/packages/windows/init.lua
+     "windows.bcrypt" -> clua/src/runtime/packages/windows/bcrypt.lua
    The transitive scan tolerates an absent file (returns 0 without
    warning) because winmd-gen sub-packages and ad-hoc names may not
    live where the simple rule guesses. */
@@ -227,15 +227,15 @@ static int BuiltinNameToSourcePath( const char *Name, char *OutBuf, size_t OutBu
     int Written = 0;
     if ( Dot == NULL ) {
         Written = snprintf( OutBuf, OutBufSize,
-                            "src/runtime/packages/%s/init.lua", Name );
+                            "clua/src/runtime/packages/%s/init.lua", Name );
     } else {
         size_t HeadLen = ( size_t )( Dot - Name );
         Written = snprintf( OutBuf, OutBufSize,
-                            "src/runtime/packages/%.*s/%s.lua",
+                            "clua/src/runtime/packages/%.*s/%s.lua",
                             ( int )HeadLen, Name, Dot + 1 );
         /* replace any remaining `.` in the suffix with `/` for deeper
            sub-packages (e.g. windows.foo.bar -> windows/foo/bar.lua) */
-        for ( size_t I = strlen( "src/runtime/packages/" ) + HeadLen + 1;
+        for ( size_t I = strlen( "clua/src/runtime/packages/" ) + HeadLen + 1;
               I < ( size_t )Written && OutBuf[ I ] != '\0'; I++ ) {
             if ( OutBuf[ I ] == '.' && I + 4 < ( size_t )Written ) {
                 OutBuf[ I ] = '/';

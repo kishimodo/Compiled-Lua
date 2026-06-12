@@ -19,8 +19,8 @@
 > CLua compiles Lua 5.4 to **native x64 machine code at compile time** and
 > emits an ordinary PE (standard sections, no bytecode blob, no in-binary VM,
 > no JIT). The pipeline is in-memory: ProtoInit data rides as a serialized
-> blob (`.rdata$L`; format in `src/runtime/protoblob_format.h`, rebuilt at
-> startup by `src/runtime/protoinit_rt.c`) inside the single COFF object, so
+> blob (`.rdata$L`; format in `clua/src/runtime/protoblob_format.h`, rebuilt at
+> startup by `clua/src/runtime/protoinit_rt.c`) inside the single COFF object, so
 > the only external step is ONE native link against `runtime-aot.a` (the
 > AOT runtime variant: dispatch cache but **no JIT compiler**) + the Lua
 > core (**no front-end** — `aot_entry.c` stubs `luaY_parser`/`luaU_undump`/
@@ -30,7 +30,7 @@
 > native-dispatch entry is `clua_dispatch_hook` in the patched lvm.c).
 > The runtime
 > (GC/tables/strings/metatables/coroutines/FFI) is a statically-linked
-> *library*, like libc. The backend lives in `src/{ir,opt,codegen,link,driver}`.
+> *library*, like libc. The backend lives in `clua/src/{ir,opt,codegen,link,driver}`.
 > **Closed world:** `load`/`loadstring`/`dofile`/`string.dump`/dynamic
 > `require` are compile errors. **Fidelity:** the compiled program must match
 > the embedded reference interpreter (`luavm.exe -i`) exactly — the
@@ -39,8 +39,8 @@
 > **The v1 interpreter + JIT inside this repo are TEST ORACLE infrastructure,
 > not the product.** `luavm.exe -i` is the frozen fidelity reference — never
 > edit interpreter semantics to make a diff pass. The v1 JIT (also inside
-> `src/jit/`) is slated for removal once the behavioral test layers run
-> against compiled exes; the `Rt_*` helpers in `src/jit/runtime.c` are NOT
+> `clua/src/jit/`) is slated for removal once the behavioral test layers run
+> against compiled exes; the `Rt_*` helpers in `clua/src/jit/runtime.c` are NOT
 > JIT code — they are the shared runtime library the AOT codegen links.
 
 ---
@@ -66,12 +66,12 @@ gotcha prints harmless `'x86' is not recognized` noise). The user-facing
 layout: `make -f build/Makefile.luac dist` → `dist\` (clua.exe + rover.exe +
 lib\ + README).
 
-**Gotcha:** changes to `src/ir/ir.h` (or any backend header, e.g.
-`src/codegen/codegen.h`) require wiping the backend objects first
+**Gotcha:** changes to `clua/src/ir/ir.h` (or any backend header, e.g.
+`clua/src/codegen/codegen.h`) require wiping the backend objects first
 (`build/bin/obj/{ir,opt,codegen,link,driver}`) — the Makefile does not track
 header dependencies, and stale `lift.o` produces silent empty-output binaries.
 
-**Gotcha:** `src/runtime/aot_entry.c` is precompiled to `build/bin/aot_entry.o`
+**Gotcha:** `clua/src/runtime/aot_entry.c` is precompiled to `build/bin/aot_entry.o`
 by Makefile.luac (target `aot-entry`); the linker prefers that object and only
 falls back to compiling the source in a cold tree. After editing aot_entry.c,
 rebuild via `build-luac.bat` (the Makefile dep handles it) — a stale .o links

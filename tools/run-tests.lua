@@ -24,7 +24,7 @@ local TESTBIN  = BIN .. "\\tests"
 local CC       = "x86_64-w64-mingw32-gcc"
 local AR       = "ar"
 local CFLAGS   = "-std=c99 -Wall -Wextra -Wno-unused-parameter -O2 -g "
-              .. "-I./src -I./lua-5.4/src -I./build/gen -DCLUA_TARGET_WINDOWS_X64=1 -Itests/unit"
+              .. "-I./clua/src -I./lua-5.4/src -I./build/gen -DCLUA_TARGET_WINDOWS_X64=1 -Itests/unit"
 -- Broad but standard import libs; gcc ignores any a given test doesn't reference.
 local LDLIBS   = "-lm -lkernel32 -lbcrypt -lws2_32 -lntdll -ladvapi32 -luser32 -lole32 -lstdc++"
 
@@ -222,7 +222,7 @@ end
 
 -- Source-path LUA_PATH so the script runner can `require` builtin packages
 -- straight from src/ -- the compiled exe embeds them, but luavm.exe does not.
-local PKG_LUA_PATH = "src\\runtime\\packages\\?\\init.lua;src\\runtime\\packages\\?.lua"
+local PKG_LUA_PATH = "clua\\src\\runtime\\packages\\?\\init.lua;clua\\src\\runtime\\packages\\?.lua"
 
 -- Strip per-run noise (JIT compile traces land on stderr already, but be
 -- robust if a future change moves them) before diffing two captures.
