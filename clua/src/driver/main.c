@@ -143,6 +143,25 @@ int lc_drive( const LcDriverOptions *opt ) {
         Resolve_FreeResult( &res );
         return 1;
     }
+    /* Builtin-package bundling (the in-tree json/hash/... packages) is a v1
+    ** compiler.exe feature the AOT pipeline does not support yet (M4): the
+    ** require would compile clean and the exe would then fail at runtime.
+    ** Fail LOUDLY at compile time instead. (rover-installed packages resolve
+    ** as ordinary file modules and bundle fine.) */
+    if ( res.BuiltinPackageCount > 0 ) {
+        size_t bi;
+        fprintf( stderr,
+                 "aotc: error: this program requires builtin package%s not yet "
+                 "supported in compiled exes:",
+                 res.BuiltinPackageCount == 1 ? "" : "s" );
+        for ( bi = 0; bi < res.BuiltinPackageCount; bi++ ) {
+            fprintf( stderr, " '%s'", res.BuiltinPackages[ bi ] );
+        }
+        fprintf( stderr, "\n  (builtin-package bundling for AOT programs is "
+                         "planned; rover-installed packages work today)\n" );
+        Resolve_FreeResult( &res );
+        return 1;
+    }
 
     /* ---- 2. undump each module + closed-world scan; collect reachable set ----
     ** Keep the loader lua_State open until AFTER codegen: the Protos live on

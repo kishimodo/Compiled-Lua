@@ -177,6 +177,40 @@ do
      table.concat(litter, ", "))
 end
 
+-- ---- 6b. builtin-package requires fail LOUDLY at compile time (the AOT
+-- pipeline does not bundle the in-tree builtin packages yet; a silent
+-- compile + runtime failure would be a broken-exe trap) ----
+do
+  local src = TEMP .. "\\clua_t_builtin.lua"
+  writefile(src, 'local json = require "json"\nprint(json.encode({1,2}))\n')
+  local code, out = run(("\"%s\" check \"%s\""):format(clua_abs, src))
+  ok(code ~= 0 and out:find("builtin package", 1, true) ~= nil,
+     "builtin-package require is a loud compile error", out)
+  os.remove(src)
+end
+
+-- ---- 6c. the full toolchain loop: rover install -> clua build -> run.
+-- CLUA_HOME points at an isolated temp store (toolchain discovery falls
+-- through to exe-relative when CLUA_HOME has no lib\) ----
+do
+  local home = TEMP .. "\\clua_t_home"
+  local proj = TEMP .. "\\clua_t_proj"
+  run(("rmdir /s /q \"%s\" 2>nul & rmdir /s /q \"%s\" 2>nul"):format(home, proj))
+  run(("mkdir \"%s\" & mkdir \"%s\""):format(home, proj))
+  writefile(proj .. "\\app.lua", 'local g = require "greet"\nprint(g.hello("toolchain"))\n')
+  local rover_abs2 = ROOT .. "\\build\\bin\\rover.exe"
+  local c1, o1 = run(("set \"CLUA_HOME=%s\" && \"%s\" install greet"):format(home, rover_abs2))
+  ok(c1 == 0 and o1:find("installed 'greet'", 1, true) ~= nil,
+     "rover installs into an isolated CLUA_HOME store", o1:sub(1, 160))
+  local c2, o2 = run(("set \"CLUA_HOME=%s\" && cd /d \"%s\" && \"%s\" build app.lua")
+                     :format(home, proj, clua_abs))
+  ok(c2 == 0, "clua build resolves the rover-installed package", o2)
+  local c3, o3 = run(("\"%s\\app.exe\""):format(proj))
+  ok(c3 == 0 and o3:find("Hello, toolchain!", 1, true) ~= nil,
+     "compiled exe runs the bundled package", o3)
+  run(("rmdir /s /q \"%s\" 2>nul & rmdir /s /q \"%s\" 2>nul"):format(home, proj))
+end
+
 -- ---- 7. rover.exe: banner + differential vs the script under -i ----
 if not exists(ROVER) then
   print("[~] SKIP rover checks (build\\bin\\rover.exe not built)")

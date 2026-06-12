@@ -9,3 +9,5 @@ dist/
 *.aot
 *.itp
 luac.out
+clua-v*.zip
+clua-v*.zip.sha256

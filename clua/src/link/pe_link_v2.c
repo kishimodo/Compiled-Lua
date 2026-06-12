@@ -114,11 +114,10 @@ static int ResolveToolchain( LcToolchain *tc, char *err, size_t errlen ) {
         /* a CLUA_HOME pointed at a repo checkout also works: */
         if ( TryRoot( tc, home, "build\\bin", "clua\\src", "lua-5.4\\src",
                       "clua\\src\\runtime\\aot_entry.c" ) ) return 1;
-        set_errv( err, errlen,
-                  "CLUA_HOME is set ('%s') but no toolchain found under it "
-                  "(expected lib\\runtime-aot.a + lib\\liblua54-embedded.a)",
-                  home );
-        return 0;
+        /* CLUA_HOME also names the package-store root (rover installs under
+        ** %CLUA_HOME%\packages), so a store-only CLUA_HOME with no toolchain
+        ** under it is legitimate — fall through to exe-relative discovery
+        ** rather than failing here. */
     }
 
     if ( GetModuleFileNameA( NULL, exedir, sizeof( exedir ) ) > 0 ) {
