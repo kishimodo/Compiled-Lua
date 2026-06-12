@@ -22,7 +22,10 @@
  *      5. invoke it with a normal lua_pcall -- luaV_execute's hook then
  *         dispatches to the entry body.
  *
- *  TODO(M0+): VEH, coroutine fiber init, FFI open -- added by their slices.
+ *  Coroutines: fiber-based lib installed below (Coro_OpenLib). VEH and the
+ *  FFI are deliberately NOT initialized in AOT programs today — no FFI means
+ *  no foreign threads/faulting stubs (and ~25 KB less per exe); FFI-in-exes
+ *  is an M4 item alongside builtin-package bundling.
  */
 
 #include "lua.h"
@@ -143,7 +146,13 @@ int main( int argc, char **argv ) {
                                                  RuntimeMain does (runtime_init.c) */
     clua_dispatch_hook = AotLookupHook;   /* AOT dispatch (lookup-only)   */
 
-    /* Build every Proto + register each luac_fn_* body; returns the entry. */
+    /* Build every Proto + register each luac_fn_* body; returns the entry.
+     * GC MUST be stopped across the build (AOT-MULTIMOD-001): the Protos
+     * under construction are white and unanchored until the entry closure /
+     * package.preload closures root them, so a collection cycle completing
+     * mid-build (guaranteed once a program's blob allocation volume is large
+     * enough) sweeps them and the exe runs on freed memory. */
+    lua_gc( L, LUA_GCSTOP );
     Proto *entry = LuacProgram_BuildEntry( L );
     if ( entry == NULL ) {
         fprintf( stderr, "clua: build entry failed\n" );
@@ -168,6 +177,9 @@ int main( int argc, char **argv ) {
         setobj( L, cl->upvals[ 0 ]->v.p, gt );
         luaC_barrier( L, cl->upvals[ 0 ], gt );
     }
+    lua_gc( L, LUA_GCRESTART );   /* everything is rooted now: the entry tree
+                                     via the closure on the stack, required
+                                     modules via package.preload */
 
     /* Invoke it like a normal call; luaV_execute's hook dispatches to the
      * entry's registered AOT body (luac_fn_<entry>). */

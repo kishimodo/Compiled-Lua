@@ -329,7 +329,34 @@ The new coverage surfaced a batch of real bugs.
   on the `ULONG[1]` path (the `DWORD[1]` path was fixed by R5-003); routing-table
   shape. XFAIL.
 
-## OPEN — AOT-MULTIMOD-001 (2026-06-12): multi-module miscompile at scale
+## FIXED — AOT-MULTIMOD-001 (2026-06-12): GC swept Protos during startup build
+
+**Root cause (found via blob-roundtrip instrumentation + layout probes, NOT
+the original "miscompile" theory):** `LuacProgram_BuildEntry` reconstructs
+every Proto at startup as fresh WHITE, UNANCHORED GC objects; nothing roots
+them until the entry closure / package.preload registration at the end. Once
+a program's reconstruction allocates past the collector's step threshold
+(~17 KB+, i.e. any larger multi-module bundle), an incremental cycle
+completes mid-build and SWEEPS the live Protos — the exe then runs on freed
+memory. Manifestations varied with layout (heap corruption, access
+violations, wrong-register calls, negative line numbers) because the freed
+blocks were reused differently; -O1 exes often "worked" only because their
+elided code reads fewer Proto fields (code[]/k[]) at runtime than -O0's
+helper-heavy code. The bug was LATENT since the generated-ProtoInit-C era
+(same unanchored pattern); small programs never tripped a full cycle. The
+serializer/deserializer were verified byte-faithful
+(tests/unit/test_lc_protoblob_roundtrip.c) before the GC was implicated.
+
+**Fix:** stop the collector across the build and restart it once everything
+is rooted (clua/src/runtime/aot_entry.c) — the same idiom upstream Lua uses
+in `f_luaopen` for state bootstrap. Regression:
+tests/differential/aot_multimod.lua (+ multimod_payload.lua, 150 functions —
+red-green verified: heap-corruption crash without the fix, byte-identical to
+the oracle with it) at the diff and aotdiff[O0/O1] layers.
+
+## (historical record of the original OPEN entry follows)
+
+### AOT-MULTIMOD-001 original report: multi-module miscompile at scale
 
 Compiling a program that bundles LARGER multi-module sets (e.g. the registry
 `json` ~64 functions + `semver`) produces a corrupted exe; the oracle runs
