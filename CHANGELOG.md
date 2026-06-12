@@ -4,6 +4,36 @@
 
 ### clua
 
+- **The v1 JIT compiler is removed from the tree.** CLua is AOT: the only
+  execution engines are compiled native exes and the reference bytecode
+  interpreter (`luavm.exe`, the differential oracle — `-i` is now a no-op;
+  luavm always interprets). Deleted `clua/src/jit/{codegen,codegen_ffi,
+  emit_x64,regalloc}.{c,h}`; `jit/dispatch.c` is cache-only (register +
+  lookup), `jit/runtime.c` (the `Rt_*` AOT runtime helpers) is lookup-only,
+  and the `LUAC_AOT_RUNTIME` compile-side ifdefs are gone (the macro remains
+  only for coro.c's no-emutls TLS choice in `runtime-aot.a`). v1
+  `compiler.exe` blob exes now execute through the interpreter (no dispatch
+  hook). The test layers migrated with it: Lua behavioral tests run under
+  the interpreter AND as aotc-compiled exes; the differential and
+  conformance layers diff aotc-compiled PEs (at both `-O0` and `-O1`)
+  against `luavm.exe -i`; the fuzz smoke compiles each seed at `-O1`; the
+  package layer diffs the compiled exe's stdout against an `-i` source run.
+- **Fix: interpreter OP_EQK register corruption on `cdata == nil/constant`.**
+  The LuaJIT-compat exception in `clua_Interpret`'s OP_EQK (full userdata may
+  compare via `__eq`) called `luaV_equalobj` without `Protect`, so the
+  metamethod call wrote its frame at a stale `L->top.p` inside the live
+  register window — `cd ~= nil` as a call argument overwrote the callee
+  register ("attempt to call a boolean value"). Now runs under `Protect`
+  exactly like OP_EQ. Pre-existing (verified against the previous HEAD);
+  exposed the moment the migrated suite first ran `tests/lua` and the
+  package exes through the interpreter. Regression pinned by
+  `tests/lua/test_cdata_eq_register.lua`.
+- **Fix: FFI callbacks in compiled exes.** `Clua_OpenFfi` (the opt-in FFI
+  anchor) never registered the callback-dispatch `lua_State`, so a
+  `ffi.cast`'d Lua callback invoked from C silently returned 0 in every
+  AOT-compiled exe. It now calls `Ffi_SetDispatchL(L)` exactly like the v1
+  bring-up did (exposed by compiling `tests/lua/test_ffi_callback_args.lua`
+  in the migrated behavioral layer).
 - **Opt-in shared runtime: `clua build --shared-rt`** (also on `aotc`). Links
   the program against a new `clua-rt.dll` (the full AOT runtime + Lua core,
   built once, shipped in `lib\`) instead of the static archives, dropping a

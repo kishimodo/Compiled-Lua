@@ -21,9 +21,14 @@ the honest valuation from the optimizer status doc), and **stale markers**
    entry, and debug-free programs already link `lvm_nointerp.o`; direct
    native dispatch at the `luaD_call` boundary would remove the entry hop
    entirely (perf nicety, small).
-5. **v1 JIT removal from the tree** once the behavioral test layers run
-   against compiled exes (gated on item 1; the JIT-vs-interpreter
-   differential still guards the shared `Rt_*` helpers until then).
+5. ~~**v1 JIT removal from the tree** once the behavioral test layers run
+   against compiled exes.~~ **DONE 2026-06-12:** the v1 JIT compiler
+   (jit/codegen, codegen_ffi, emit_x64, regalloc) is gone; `jit/dispatch.c`
+   is cache-only and `jit/runtime.c` (the `Rt_*` AOT runtime helpers) is
+   lookup-only. luavm always interprets (`-i` is a no-op). The behavioral,
+   differential, conformance and fuzz layers all run aotc-compiled exes
+   against the interpreter oracle, which guards the shared `Rt_*` helpers
+   directly.
 6. **AOT-ERRBANNER-001 polish:** a traceback-printing message handler in
    `aot_entry.c` would narrow the uncaught-error divergence vs the oracle.
 7. ~~**Shared `clua-rt.dll` option** for ~20–30 KB per-program exes (runtime

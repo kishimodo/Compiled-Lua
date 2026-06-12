@@ -36,21 +36,25 @@
 > the embedded reference interpreter (`luavm.exe -i`) exactly — the
 > differential test is the arbiter.
 >
-> **The v1 interpreter + JIT inside this repo are TEST ORACLE infrastructure,
-> not the product.** `luavm.exe -i` is the frozen fidelity reference — never
-> edit interpreter semantics to make a diff pass. The v1 JIT (also inside
-> `clua/src/jit/`) is slated for removal once the behavioral test layers run
-> against compiled exes; the `Rt_*` helpers in `clua/src/jit/runtime.c` are NOT
-> JIT code — they are the shared runtime library the AOT codegen links.
+> **The reference interpreter inside this repo is TEST ORACLE infrastructure,
+> not the product.** `luavm.exe` always interprets (`-i` is accepted as a
+> no-op) and is the frozen fidelity reference — never edit interpreter
+> semantics to make a diff pass. The v1 JIT compiler was REMOVED from the
+> tree (June 2026): `clua/src/jit/` now carries only the dispatch cache
+> (`dispatch.c`), W^X exec memory for FFI thunks/callbacks (`exec_mem.c`),
+> and the `Rt_*` helpers in `clua/src/jit/runtime.c` — NOT JIT code; they
+> are the shared runtime library the AOT codegen links.
 
 ---
 
 ## Oracle / build-machinery notes (inherited from v1)
 
-`luavm.exe` runs a script (JIT by default, `-i` = the reference interpreter).
+`luavm.exe` runs a script through the reference bytecode interpreter — always
+(`-i` / `--interpret` is accepted as a no-op; there is no JIT in the tree).
 `compiler.exe` is v1's bytecode-embedding front-end (kept for the package
-test layer). The compiler statically scans `require "literal"` to bundle
-packages (or `-L <pkg>` to force-bundle).
+test layer; its emitted exes also run through the interpreter). The compiler
+statically scans `require "literal"` to bundle packages (or `-L <pkg>` to
+force-bundle).
 
 ## Build
 
@@ -95,10 +99,11 @@ test file. **Just drop a file in the right folder**; deleting one breaks nothing
 
 | Layer | Folder | What it is | How to add one |
 |---|---|---|---|
-| C unit | `tests/unit/test_*.c` | internals (FFI/JIT/compiler) | standalone C program using `tests/unit/test_harness.h` (`TEST_BEGIN`/`CHECK*`/`TEST_END`); links against the auto-built `libcluatest.a` |
-| Lua behavioral | `tests/lua/*.lua` | language/runtime behavior under the JIT | assert with a local helper; `print("[+] PASS <name>")` + `os.exit(0)`, or `os.exit(1)` on failure |
-| Package | `tests/packages/test_*.lua` | a builtin package round-trip | `require` the package + assert; the runner compiles it with `compiler.exe` then runs it. Absent external DLL → `print("[~] SKIP …") os.exit(0)` |
-| Differential | `tests/differential/*.lua` | JIT-vs-interpreter equivalence | a deterministic script that *prints*; the runner runs it under JIT and `-i` and diffs stdout (catches silent JIT miscompiles) |
+| C unit | `tests/unit/test_*.c` | internals (FFI/runtime/compiler) | standalone C program using `tests/unit/test_harness.h` (`TEST_BEGIN`/`CHECK*`/`TEST_END`); links against the auto-built `libcluatest.a` |
+| Lua behavioral | `tests/lua/*.lua` | language/runtime behavior — run under the interpreter AND as an aotc-compiled exe | assert with a local helper; `print("[+] PASS <name>")` + `os.exit(0)`, or `os.exit(1)` on failure. If it must use closed-world-banned constructs (`load`...), add it to `LUA_INTERP_ONLY` in `tools/run-tests.lua` |
+| Package | `tests/packages/test_*.lua` | a builtin package round-trip | `require` the package + assert; the runner compiles it with `compiler.exe` then runs it (plus an `-i` source-run stdout diff). Absent external DLL → `print("[~] SKIP …") os.exit(0)` |
+| Differential | `tests/differential/*.lua` | compiled-exe-vs-interpreter equivalence | a deterministic script that *prints*; the runner aotc-compiles it at `-O0` **and** `-O1`, runs each exe, and diffs stdout against `luavm.exe -i` (catches silent codegen/optimizer miscompiles) |
+| Conformance | `tests/conformance/*.lua` | broad Lua 5.4 corpus, same compiled-vs-`-i` diff at O0+O1 | deterministic printing script; mark a known divergence with a first-lines `-- DIFF-XFAIL: <reason>` |
 
 Templates to copy: `tests/unit/test_ctype.c`, `tests/lua/test_basics.lua`,
 `tests/packages/test_json.lua`, `tests/differential/closures.lua`.

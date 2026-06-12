@@ -31,9 +31,10 @@ The pipeline is in-memory, rustc-style: front-end, optimizer, codegen and the
 COFF object (including the serialized ProtoInit blob — no generated C) all
 happen inside `clua.exe`; the only external step is one native link. A
 hello-world builds in ~190 ms and weighs **~182 KB** stripped — the emitted
-exe links a dedicated `runtime-aot.a` carrying **no JIT compiler, no Lua
-front-end** (`load`-family symbols are closed-world stubs), **no FFI** (the
-AOT entry never opens it), **no winpthread** (no emulated TLS), and — for
+exe links a dedicated `runtime-aot.a` carrying **no JIT, no Lua
+front-end** (`load`-family symbols are closed-world stubs), **no FFI**
+unless the program references `ffi`/`bit` (opt-in link anchor), **no
+winpthread** (no emulated TLS), and — for
 programs that never mention `debug` — **no bytecode interpreter** (debug
 hooks are the only thing that can reach it; programs that use the debug
 library keep it and behave exactly like the oracle under `debug.sethook`).
@@ -41,11 +42,14 @@ library keep it and behave exactly like the oracle under `debug.sethook`).
 itself: the Lua core + full stdlib + GC + the AOT runtime helpers.
 
 This is a standalone project, separated from its origin (**LuaVM**, the
-JIT-based v1, which lives in its own repository). The v1 interpreter and JIT
-sources are still carried *inside this repo* — not as the product, but as the
+JIT-based v1, which lives in its own repository). The v1 JIT compiler has
+been **removed from this tree**; the only execution engines are compiled
+native exes and the reference bytecode interpreter. That interpreter is
+still carried *inside this repo* — not as the product, but as the
 **differential test oracle**: every compiled program must match
-`luavm.exe -i` (the reference interpreter) byte-for-byte, and the suite
-enforces that across the whole corpus at both `-O0` and `-O1`.
+`luavm.exe -i` (the reference interpreter; luavm always interprets and `-i`
+is accepted as a no-op) byte-for-byte, and the suite enforces that across
+the whole corpus at both `-O0` and `-O1`.
 
 ## Status
 
@@ -129,10 +133,11 @@ machine is a MinGW-w64 gcc on PATH (or `CLUA_GCC`) for the final link.
   interpreter strip is DONE for debug-free programs (`lvm_nointerp.o`,
   AOT-NODEBUG-001); `luaV_execute` itself is now a thin native-dispatch
   entry (`clua_dispatch_hook`), not an interpreter.
-- **Toolchain slimming**: emitted exes already exclude the JIT compiler
-  (`runtime-aot.a`) and the Lua front-end (closed-world stubs). The v1 JIT
-  inside this repo is oracle infrastructure only; once the behavioral test
-  layers run against compiled exes, it can be removed from the tree too
-  (the interpreter stays — it *is* the oracle).
+- **Toolchain slimming**: emitted exes exclude any JIT (none exists in the
+  tree anymore), and the Lua front-end (closed-world stubs). **DONE
+  2026-06-12:** the v1 JIT compiler was removed from the tree; the
+  behavioral, differential, conformance and fuzz layers all run against
+  aotc-compiled exes vs the interpreter (the interpreter stays — it *is*
+  the oracle).
 - **Workload-gated**: scalar replacement of non-escaping tables (see the
   status doc for the honest valuation).
