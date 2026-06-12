@@ -1,40 +1,52 @@
-# LuaC (LuaVM 2.0) — working notes
+# CLua (LuaC) — working notes
 
-> **This is LuaC, the AOT fork. Read [`PROMPT.md`](PROMPT.md) first** — it is the
-> build spec & implementation prompt (mission, locked decisions, IR, optimizer,
-> codegen, PE emission, FFI rules, testing, milestones). The grounded file-level
-> fork manifest is [`docs/fork-manifest.md`](docs/fork-manifest.md).
+> **This is CLua, the standalone AOT-compiled Lua 5.4 language** (separated
+> from LuaVM, the JIT-based v1, in June 2026 — v1 lives in its own repository
+> and is no longer related to this codebase except as history). Read
+> [`README.md`](README.md) for status and [`PROMPT.md`](PROMPT.md) for the
+> build spec (mission, locked decisions, IR, optimizer, codegen, PE emission,
+> FFI rules, testing, milestones). The file-level inheritance record is
+> [`docs/fork-manifest.md`](docs/fork-manifest.md).
 >
-> **What's different from v1:** LuaC compiles Lua 5.4 to **native x64 machine code
-> at compile time** and emits an ordinary PE (standard sections, no bytecode blob,
-> no in-binary VM). The runtime (GC/tables/strings/metatables/coroutines/FFI) is a
-> statically-linked *library*, like libc. The new backend lives in
-> `src/{ir,opt,codegen,link,driver}`; the front-end, runtime core, and FFI are
-> reused from v1 verbatim. **Closed world:** `load`/`loadstring`/`dofile`/
-> `string.dump`/dynamic `require` are compile errors. **Fidelity:** the compiled
-> program must match v1's `luavm.exe -i` interpreter output exactly — the
+> **The product is `aotc.exe`**: it compiles Lua 5.4 to **native x64 machine
+> code at compile time** and emits an ordinary PE (standard sections, no
+> bytecode blob, no in-binary VM, no JIT). The runtime
+> (GC/tables/strings/metatables/coroutines/FFI) is a statically-linked
+> *library*, like libc. The backend lives in `src/{ir,opt,codegen,link,driver}`.
+> **Closed world:** `load`/`loadstring`/`dofile`/`string.dump`/dynamic
+> `require` are compile errors. **Fidelity:** the compiled program must match
+> the embedded reference interpreter (`luavm.exe -i`) exactly — the
 > differential test is the arbiter.
 >
-> The notes below are inherited from v1 and still describe the reused build/test
-> machinery and discipline. The AOT driver is `aotc.exe` (see `src/driver/`); it
-> builds via `build/Makefile.luac` once the backend exists.
+> **The v1 interpreter + JIT inside this repo are TEST ORACLE infrastructure,
+> not the product.** `luavm.exe -i` is the frozen fidelity reference — never
+> edit interpreter semantics to make a diff pass. The v1 JIT (also inside
+> `src/jit/`) is slated for removal once the behavioral test layers run
+> against compiled exes; the `Rt_*` helpers in `src/jit/runtime.c` are NOT
+> JIT code — they are the shared runtime library the AOT codegen links.
 
 ---
 
-## v1 inherited notes
+## Oracle / build-machinery notes (inherited from v1)
 
-LuaVM compiles Lua 5.4 into a standalone Windows x64 PE (an x64 JIT + a custom
-Windows FFI). `compiler.exe` bakes a standalone exe; `luavm.exe` runs a script
-(JIT by default, `-i` = bytecode interpreter). The compiler statically scans
-`require "literal"` to bundle packages (or `-L <pkg>` to force-bundle).
+`luavm.exe` runs a script (JIT by default, `-i` = the reference interpreter).
+`compiler.exe` is v1's bytecode-embedding front-end (kept for the package
+test layer). The compiler statically scans `require "literal"` to bundle
+packages (or `-L <pkg>` to force-bundle).
 
 ## Build
 
-From PowerShell (authoritative): `cmd /c "build\build.bat <target>"`. Targets:
-`compiler`, `luavm`, `embedded`, `packages-embedded`, `lua`, `clean`. `build.bat`
-puts GnuWin32 `make` + the MinGW `bin` on PATH, then runs `make -f build/Makefile`.
+From PowerShell (authoritative): `cmd /c "build\build-luac.bat"` builds
+everything including `aotc.exe` (via `build/Makefile.luac`). The v1 targets
+remain available via `cmd /c "build\build.bat <target>"`: `compiler`,
+`luavm`, `embedded`, `packages-embedded`, `lua`, `clean`. `build.bat` puts
+GnuWin32 `make` + the MinGW `bin` on PATH, then runs `make -f build/Makefile`.
 Do **not** run `make` directly from bash (the package-discovery `$_` PowerShell
 gotcha prints harmless `'x86' is not recognized` noise).
+
+**Gotcha:** changes to `src/ir/ir.h` require wiping the backend objects first
+(`build/bin/obj/{ir,opt,codegen,link,driver}`) — the Makefile does not track
+header dependencies, and stale `lift.o` produces silent empty-output binaries.
 
 ## Testing discipline — READ THIS
 
