@@ -15,10 +15,6 @@
 
 #include <string.h>
 
-static void *TestJitHook(lua_State *L, void *Proto) {
-    return (void *)Jit_Compile(L, (struct Proto *)Proto);
-}
-
 static int RunLua(lua_State *L, const char *Src) {
     if (luaL_loadstring(L, Src) != LUA_OK) {
         fprintf(stderr, "  load error: %s\n", lua_tostring(L, -1));
@@ -36,7 +32,6 @@ static int RunLua(lua_State *L, const char *Src) {
 int main(void) {
     TEST_BEGIN("ffi_metatype");
 
-    clua_dispatch_hook = TestJitHook;
     lua_State *L = luaL_newstate();
     luaL_openlibs(L);
     Ctype_Init();

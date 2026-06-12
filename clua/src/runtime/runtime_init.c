@@ -6,8 +6,6 @@
 #include "common/version.h"
 #include "common/blob_format.h"
 #include "common/stream_cipher.h"
-#include "jit/dispatch.h"
-#include "jit/exec_mem.h"
 #include "ffi/ffi_lib.h"
 #include "ffi/ffi_load.h"
 #include "ffi/ffi_callback.h"
@@ -62,41 +60,6 @@ typedef struct _REGISTERED_PACKAGE {
    weak stub elsewhere; see luavm_main.c's own preload setup). */
 extern const REGISTERED_PACKAGE_T *Runtime_GetPackages( size_t *OutCount );
 
-/* luaD_rawrunprotected is in ldo.h which is LUA_CORE-only; declare its
-   prototype here so we can call the symbol from the runtime archive. */
-typedef void ( *LuaPFunc )( lua_State *L, void *Ud );
-extern int luaD_rawrunprotected( lua_State *L, LuaPFunc F, void *Ud );
-
-
-typedef struct _JIT_INVOKE_ARGS {
-    JIT_FUNC_T  Jitted;
-    int         NResults;
-} JIT_INVOKE_ARGS_T, *PJIT_INVOKE_ARGS_T;
-
-static void Runtime_JitInvokeProtected( lua_State *L, void *Ud ) {
-    PJIT_INVOKE_ARGS_T Args = ( PJIT_INVOKE_ARGS_T )Ud;
-    /* Route through Jit_TrampolineEntry so VEH-caught faults longjmp into a
-       setjmp frame here and surface as Lua errors (which luaD_rawrunprotected
-       catches). Direct-calling Args->Jitted would abort the process on any
-       fault since g_CurrentJitFrame would be NULL.
-
-       Bump L->nny ("non-yieldable count") so any pcall/xpcall in the top
-       chunk takes the conventional luaD_pcall path (with setjmp) instead
-       of the continuation-based path that lua_pcallk uses when k != NULL
-       and yields are allowed. The continuation path assumes the caller is
-       lua_resume + the interpreter loop to call the continuation function
-       on error -- which doesn't exist in our JIT-only runtime, so pcall
-       would silently lose the error catch otherwise.
-
-       Coroutines call Jitted directly via their fiber's Coro_FiberEntry
-       (NOT through here), so they don't get this nny bump -- yield from
-       inside a coroutine still works. */
-    /* nny is encoded in the high 16 bits of nCcalls in Lua 5.4. */
-    L->nCcalls += 0x10000;
-    Args->NResults = Jit_TrampolineEntry( L, Args->Jitted );
-    L->nCcalls -= 0x10000;
-}
-
 static int PushArgTable( lua_State *L, int Argc, char **Argv ) {
     int I = { 0 };
     lua_createtable( L, Argc - 1, 0 );
@@ -108,11 +71,10 @@ static int PushArgTable( lua_State *L, int Argc, char **Argv ) {
     return 0;
 }
 
-/* Lua-level message handler. Installed via L->errfunc before the top
-   JIT entry runs; called inside luaG_errormsg WHILE the stack is still
-   valid (i.e. before the longjmp unwinds), so luaL_traceback can walk
-   the live call chain. The string this returns becomes the error
-   object that surfaces to luaD_rawrunprotected. */
+/* Lua-level message handler. Installed beneath the entry chunk; called
+   inside luaG_errormsg WHILE the stack is still valid (i.e. before the
+   longjmp unwinds), so luaL_traceback can walk the live call chain. The
+   string this returns becomes the error object lua_pcall surfaces. */
 static int Runtime_Msghandler( lua_State *L ) {
     const char *Msg = lua_tostring( L, 1 );
     if ( Msg == NULL ) {
@@ -134,12 +96,6 @@ static void PrintLuaError( lua_State *L ) {
     const char *Msg = lua_tostring( L, -1 );
     fprintf( stderr, "[-] lua error :: %s\n", Msg ? Msg : "(no message)" );
     lua_pop( L, 1 );
-}
-
-/* Wrapper bridging clua_dispatch_hook's (L, void*proto) -> void*
- * signature to Jit_Compile which returns a JIT_FUNC_T pointer. */
-static void *Runtime_JitCompileHook( lua_State *L, void *Proto ) {
-    return ( void * )Jit_Compile( L, ( struct Proto * )Proto );
 }
 
 /* Package compression header magic. embed_luac.exe prefixes compressed
@@ -267,7 +223,7 @@ static void InstallEmbeddedPackages( lua_State *L ) {
  * @brief
  *  Locate the runtime .exe's .text section via PE headers and register it
  *  as a VEH code region. Faults inside our own runtime helpers (called
- *  from JIT) will then be caught.
+ *  from native FFI thunks/callbacks) will then be caught.
  */
 static void RegisterRuntimeTextRegion( void ) {
     HMODULE  Hm  = GetModuleHandleW( NULL );
@@ -298,10 +254,9 @@ int RuntimeMain( int Argc, char **Argv ) {
     int            Rc       = { 0 };
     const unsigned char *BlobBase = g_LuaBlob;
 
-    /* install the JIT hook so luaV_execute trampolines into JIT code
-     * for all re-entry paths (require, pcall, C→Lua callbacks) */
-    clua_dispatch_hook = Runtime_JitCompileHook;
-    clua_invoke_hook = ( clua_invoke_t )Jit_TrampolineEntry;
+    /* No dispatch hook: the JIT compiler is gone from the tree, so v1
+     * compiled exes (compiler.exe blob products) execute their bytecode
+     * through the reference interpreter (clua_dispatch_hook stays NULL). */
 
     if ( !Veh_Init( ) ) {
         fprintf( stderr, "[-] Veh_Init failed (GetLastError=%lu)\n",
@@ -541,70 +496,15 @@ int RuntimeMain( int Argc, char **Argv ) {
     }
 
     /* Install a message handler beneath the entry closure so any error
-       raised from the script (or from JIT-compiled code it calls into)
-       is intercepted while the Lua call chain is still live. The handler
-       appends debug.traceback(msg) and that combined string becomes the
-       error object surfaced to luaD_rawrunprotected / PrintLuaError. */
+       raised from the script is intercepted while the Lua call chain is
+       still live. The handler appends debug.traceback(msg) and that
+       combined string becomes the error object PrintLuaError reports. */
     lua_pushcfunction( L, Runtime_Msghandler );
     lua_insert( L, -2 );  /* stack: [..., msghandler, chunk] */
 
-    /* Try JIT-compiling the entry. If successful, set up its CallInfo and
-       direct-call the JIT entry. Otherwise fall back to lua_pcall. */
-    {
-        const LClosure *EntryClosure = clLvalue( s2v( L->top.p - 1 ) );
-        JIT_FUNC_T      Jitted       = Jit_Compile( L, EntryClosure->p );
-        StkId           Func         = { 0 };
-        Proto          *Pr           = { 0 };
-        CallInfo       *Ci           = { 0 };
-        if ( Jitted != NULL ) {
-            fprintf( stderr, "[*] runtime: invoking JIT entry %p\n", ( void * )Jitted );
-            Pr   = EntryClosure->p;
-            /* Reserve stack space before taking any stack pointers — the
-               reallocation would invalidate any pointer captured before it. */
-            lua_checkstack( L, Pr->maxstacksize + 5 );
-            /* Capture the closure + msghandler slots only after the stack
-               is stable. errfunc offset is for the msghandler at top-2. */
-            Func = L->top.p - 1;
-            ptrdiff_t ErrfuncOff = savestack( L, Func - 1 );
-            /* Manually do a small subset of luaD_precall for a Lua function. */
-            Ci = luaE_extendCI( L );
-            Ci->func.p          = Func;
-            Ci->top.p           = Func + 1 + Pr->maxstacksize;
-            Ci->u.l.savedpc     = Pr->code;
-            Ci->u.l.trap        = 0;
-            Ci->u.l.nextraargs  = 0;
-            Ci->callstatus      = 0;
-            Ci->nresults        = 0;
-            L->ci    = Ci;
-            /* For vararg entry: leave L->top.p at Func+1 (0 actual args)
-               so OP_VARARGPREP counts args correctly.
-               For non-vararg entry: set to Ci->top.p to cover all registers. */
-            if ( !Pr->is_vararg ) {
-                L->top.p = Ci->top.p;
-            }
-            JIT_INVOKE_ARGS_T InvokeArgs = { Jitted, 0 };
-            int OldNCcalls = ( int )L->nCcalls;
-            ptrdiff_t OldErrfunc = L->errfunc;
-            L->errfunc = ErrfuncOff;
-            int Status = luaD_rawrunprotected( L, Runtime_JitInvokeProtected, &InvokeArgs );
-            L->errfunc = OldErrfunc;
-            if ( Status != LUA_OK ) {
-                /* Lua error during JIT execution. Restore nCcalls + ci, print, fail. */
-                L->nCcalls = ( unsigned int )OldNCcalls;
-                L->ci = Ci->previous;
-                PrintLuaError( L );
-                lua_close( L );
-                return EXIT_FAILURE;
-            }
-            ( void )InvokeArgs.NResults;
-            L->ci = Ci->previous;
-            Rc = LUA_OK;
-        } else {
-            fprintf( stderr, "[*] runtime: entry not JIT-able, using interpreter\n" );
-            /* lua_pcall takes the errfunc index directly (1-based stack idx). */
-            Rc = lua_pcall( L, 0, 0, lua_gettop( L ) - 1 );
-        }
-    }
+    /* Run the entry chunk in the reference interpreter via a plain
+       protected call (the errfunc index is the msghandler beneath it). */
+    Rc = lua_pcall( L, 0, 0, lua_gettop( L ) - 1 );
     if ( Rc != LUA_OK ) {
         PrintLuaError( L );
         lua_close( L );

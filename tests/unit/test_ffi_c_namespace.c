@@ -15,10 +15,6 @@
 #include "jit/dispatch.h"
 #include "lvm.h"
 
-static void *TestJitHook(lua_State *L, void *Proto) {
-    return (void *)Jit_Compile(L, (struct Proto *)Proto);
-}
-
 static int RunLua(lua_State *L, const char *Src) {
     if (luaL_loadstring(L, Src) != LUA_OK) {
         return 0;
@@ -34,7 +30,6 @@ int main(void) {
 
     lua_State *L = luaL_newstate();
     luaL_openlibs(L);
-    clua_dispatch_hook = TestJitHook;
     Ctype_Init();
     Ffi_RegisterWindowsTypes();
     Ffi_OpenLib(L);

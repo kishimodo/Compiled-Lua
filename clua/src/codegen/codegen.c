@@ -2,8 +2,8 @@
 ** codegen.c — Optimized IR -> relocatable x64. See codegen.h and ../../PROMPT.md §11.
 ** STUB: implement for Milestone M0 (generic lowering: every op -> Rt_* / luaV_* call).
 **
-** REUSE src/codegen/x64_emit.* (adapted from src/jit/emit_x64.*) for encoding and
-**       src/codegen/regalloc.* (adapted from src/jit/regalloc.*) for allocation.
+** REUSE src/codegen/x64_emit.* (adapted from the removed v1 JIT encoder) for encoding and
+**       src/codegen/regalloc.* (adapted from the removed v1 JIT regalloc) for allocation.
 ** NEW vs the v1 JIT: LcReloc table instead of baked imm64, RIP-relative .rdata
 **       loads, .pdata/.xdata UNWIND_INFO per framed function, GC stack maps.
 **
@@ -24,7 +24,7 @@
 #include <stdio.h>
 #include <stdint.h>
 
-/* CI offsets — replicated from v1 src/jit/codegen.c (OFFSET_OF_CI / _FUNC).
+/* CI offsets — replicated from the removed v1 JIT codegen (OFFSET_OF_CI / _FUNC).
    .func is a StkIdRel union whose live pointer .p is at offset 0 of the union. */
 #define LC_OFF_CI       ( ( int32_t )offsetof( struct lua_State, ci ) )
 #define LC_OFF_CI_FUNC  ( ( int32_t )offsetof( CallInfo, func ) )
@@ -54,13 +54,13 @@
 static int g_lc_opt_level = 0;
 
 /* ------------------------------------------------------------------ */
-/* Frame scaffolding — faithful port of v1 EmitPrologue/EmitEpilogue/  */
-/* EmitRestoreL/EmitReloadRdiAndCache (src/jit/codegen.c), retargeted   */
-/* from EmitX64_*(Slot,...) onto X64Emit_*(B,...). The ONLY M0          */
-/* deviation: skip the cache-register preload/reload loop (M0 keeps     */
-/* every Lua register memory-resident at [RDI + N*16]; M1 enables       */
-/* RegAlloc). The PUSH/POP of all 7 callee-saved regs is preserved so   */
-/* the frame shape + future .pdata unwind match v1 exactly.             */
+/* Frame scaffolding — faithful port of the v1 JIT's prologue/epilogue  */
+/* emitters (that compiler has since been removed from the tree),       */
+/* retargeted onto X64Emit_*(B,...). The ONLY M0 deviation: skip the    */
+/* cache-register preload/reload loop (M0 keeps every Lua register      */
+/* memory-resident at [RDI + N*16]; M1 enables register residency).     */
+/* The PUSH/POP of all 7 callee-saved regs is preserved so the frame    */
+/* shape + future .pdata unwind match v1 exactly.                       */
 /* ------------------------------------------------------------------ */
 
 /*!
@@ -191,8 +191,8 @@ int LcCg_EmitHelperCall3( LcCodeBuf *B, const char *Sym,
 /* (parallel Seen[] flags whether it has been emitted yet). Branch ops  */
 /* emit a rel32 placeholder; backward targets (already emitted) patch   */
 /* immediately, forward targets defer onto Fwd[] and resolve after the  */
-/* instruction loop. This mirrors src/jit/codegen.c's BranchCtx exactly */
-/* (only the buffer plumbing differs: Slot->LcCodeBuf, EmitX64_->X64Emit_). */
+/* instruction loop. This mirrors the removed v1 JIT's BranchCtx exactly */
+/* (only the buffer plumbing differs: LcCodeBuf instead of an exec slot). */
 /* ------------------------------------------------------------------ */
 typedef struct LcFwdJump {
     size_t patch_site;   /* offset of the disp32 word inside buf.bytes */
@@ -269,7 +269,7 @@ static int LcBr_Resolve( LcBranchCtx *Br ) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Per-op lowering — faithful AOT port of v1 src/jit/Lower_* (the      */
+/* Per-op lowering — faithful AOT port of the removed v1 JIT's Lower_* (the      */
 /* memory-form path: M0 keeps every Lua register at [RDI + N*16], so   */
 /* we always use the memory path v1 emits when a register isn't        */
 /* cached). Operands come from inst->a/b/c (decoded by lift.c).        */
@@ -988,7 +988,7 @@ static int lower_forloop( LcBranchCtx *Br, LcInst *in ) {
 /* Plan 3 — closures, upvalues, vararg-consume, generic-for, tbc.      */
 /*                                                                      */
 /* Faithful AOT ports of v1 Lower_Closure/GetUpval/SetUpval/Vararg/     */
-/* TForPrep/TForCall/TForLoop/Tbc/Close (src/jit/codegen.c). Operands   */
+/* TForPrep/TForCall/TForLoop/Tbc/Close (the removed v1 JIT codegen). Operands   */
 /* come from in->a/b/c decoded by lift.c; the generic-for branch        */
 /* targets are pre-resolved into in->c.                                 */
 /* ------------------------------------------------------------------ */
@@ -1289,7 +1289,7 @@ static int lower_arith_ik( LcCodeBuf *B, LcFunc *f, LcInst *in ) {
  */
 /* True for opcodes that can raise a Lua error (directly or via a call/
    metamethod). They need ci->u.l.savedpc current so luaG_getfuncline reports
-   the right line. Mirrors v1 src/jit/codegen.c OpcodeNeedsSavedPc. */
+   the right line. Mirrors the removed v1 JIT codegen's OpcodeNeedsSavedPc. */
 static int op_needs_savedpc( int op ) {
     switch ( op ) {
         case OP_MOVE: case OP_LOADI: case OP_LOADF: case OP_LOADK:

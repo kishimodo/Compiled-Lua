@@ -180,12 +180,8 @@ RUNTIME_SRCS := \
     $(SRC_DIR)/runtime/protoinit_rt.c     \
     $(SRC_DIR)/runtime/ffi_anchor.c       \
     $(SRC_DIR)/jit/exec_mem.c             \
-    $(SRC_DIR)/jit/emit_x64.c             \
     $(SRC_DIR)/jit/runtime.c              \
-    $(SRC_DIR)/jit/codegen.c              \
     $(SRC_DIR)/jit/dispatch.c             \
-    $(SRC_DIR)/jit/regalloc.c             \
-    $(SRC_DIR)/jit/codegen_ffi.c          \
     $(SRC_DIR)/ffi/ctype.c                \
     $(SRC_DIR)/ffi/cdecl_lexer.c          \
     $(SRC_DIR)/ffi/cdecl_parser.c         \
@@ -234,19 +230,16 @@ $(BUILD_DIR)/obj-emb/%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)/obj-emb/runtime $(BUILD_
 $(BUILD_DIR)/runtime-embedded.a: $(RUNTIME_EMB_OBJS)
 	$(AR) rcs $@ $^
 
-# --- runtime -- AOT variant (closed-world, no JIT compiler) ----------------
-# The archive aotc/clua-emitted PEs link. Same embedded flags plus
-# -DLUAC_AOT_RUNTIME, and the JIT code-generator sources (codegen,
-# codegen_ffi, emit_x64, regalloc) are excluded entirely: dispatch.c
-# compiles cache-side only and jit/runtime.c's tail-call drive loop does a
-# lookup instead of compile-if-needed, so nothing references them and a
-# shipped exe carries no JIT compiler. luavm.exe and v1 compiler.exe PEs
-# keep the full JIT via runtime.a / runtime-embedded.a (unchanged).
-AOT_RT_SRCS := $(filter-out \
-    $(SRC_DIR)/jit/codegen.c \
-    $(SRC_DIR)/jit/codegen_ffi.c \
-    $(SRC_DIR)/jit/emit_x64.c \
-    $(SRC_DIR)/jit/regalloc.c,$(RUNTIME_SRCS))
+# --- runtime -- AOT variant (closed-world) ---------------------------------
+# The archive aotc/clua-emitted PEs link. Same source set as the embedded
+# runtime (the v1 JIT compiler is gone from the tree entirely; dispatch.c is
+# cache-only and jit/runtime.c's tail-call drive loop does a lookup).
+# The ONLY remaining difference is -DLUAC_AOT_RUNTIME, kept solely for
+# coro.c's TLS choice: a plain static (single-OS-thread AOT exes) instead of
+# __thread, which would drag libgcc emutls + ~23 KB of winpthread into every
+# compiled exe. runtime-embedded.a (luavm.exe / v1 compiler.exe PEs, which
+# may see foreign threads via FFI callbacks) keeps real TLS.
+AOT_RT_SRCS := $(RUNTIME_SRCS)
 AOT_RT_CFLAGS := $(EMBEDDED_RT_CFLAGS) -DLUAC_AOT_RUNTIME=1
 RUNTIME_AOT_OBJS := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/obj-aot/%.o,$(AOT_RT_SRCS))
 

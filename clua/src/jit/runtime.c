@@ -14,9 +14,6 @@
 #include "ltm.h"
 #include "lopcodes.h"  /* GETARG_sB/C/k — decode the trailing MMBINI in Rt_ShiftI */
 
-#include "ffi/cdata.h"
-#include "ffi/ffi_call.h"
-
 #include <stdio.h>
 
 int Rt_AddSlow( lua_State *L, int A, int B, int C ) {
@@ -77,16 +74,11 @@ int Rt_Call( lua_State *L, int A, int NArgs, int NResults ) {
        Lua functions). */
     if ( ttisLclosure( s2v( Func ) ) ) {
         LClosure   *Cl     = clLvalue( s2v( Func ) );
-        /* Only take the fast JIT->JIT entry when the callee is ALREADY compiled.
-           If it is not, fall through to luaD_call (the upstream path that pcall
-           uses): that compiles + runs it via luaV_execute and caches it, so the
-           NEXT call takes the fast path. Compiling INLINE here (the old
-           Jit_Compile call) ran the codegen WHILE the JIT'd caller's frame was
-           live; the first direct JIT->JIT call to a function that itself calls
-           a not-yet-compiled function (e.g. diff.unified -> diff.lines) had its
-           frame corrupted mid-execution and crashed with "attempt to index a
-           function value". Routing the cold call through luaD_call removes the
-           nested-compile-during-execution hazard entirely. */
+        /* Take the fast native-to-native entry only when the callee has a
+           registered AOT body (closed world: every reachable Proto is
+           registered at startup). Otherwise fall through to luaD_call, the
+           upstream path, which runs the callee via luaV_execute (interpreter
+           fallback). */
         JIT_FUNC_T  Jitted = Jit_LookupCached( Cl->p );
         /* hookmask != 0: a debug hook is active; take the slow luaD_call path so
            the callee runs in the hook-aware interpreter (the JIT honors no hooks). */
@@ -187,47 +179,10 @@ int Rt_Call( lua_State *L, int A, int NArgs, int NResults ) {
         }
     }
 
-    /* Fast path: callable cdata (typically an FFI CT_FUNC from ffi.C
-       lookup). Skip luaD_call → luaT_callTM → __call → Cdata_Call.
-       Call Ffi_GenericCall directly.
-       LUAC_AOT_RUNTIME: compiled out — aot_entry never opens the FFI, so no
-       cdata can exist and this branch is unreachable; keeping it would chain
-       the whole FFI (~25 KB) into every compiled exe via FfiGetCData/
-       Ffi_GenericCall. Userdata callees (e.g. a __call metamethod) take the
-       generic luaD_call path below, identical semantics. */
-#ifndef LUAC_AOT_RUNTIME
-    if ( ttisfulluserdata( s2v( Func ) ) ) {
-        /* the callee Func = L->ci->func.p + 1 + A, so its 1-based stack index
-           relative to the current call frame is A + 1. */
-        int      FuncStackIdx = A + 1;
-        PCData_T Check        = FfiGetCData( L, FuncStackIdx );
-        if ( Check != NULL && Check->Type->Kind == CT_FUNC && Check->Ptr != NULL ) {
-            /* args are at FuncStackIdx+1 .. FuncStackIdx+NArgs */
-            int   NRes = Ffi_GenericCall( L, Check, FuncStackIdx + 1 );
-            /* Ffi_GenericCall pushed NRes results at L->top - NRes.
-               Move them to Func..Func+NRes-1 to match OP_CALL's contract
-               (results replace the callee slot). */
-            StkId Src  = L->top.p - NRes;
-            int   I    = { 0 };
-            for ( I = 0; I < NRes; I++ ) {
-                setobjs2s( L, Func + I, Src + I );
-            }
-            L->top.p = Func + NRes;
-            /* Nil-pad up to NResults for the same reason as the Lua-callee
-               path above. */
-            if ( NResults >= 0 ) {
-                while ( NRes < NResults ) {
-                    setnilvalue( s2v( Func + NRes ) );
-                    NRes++;
-                }
-                L->top.p = Func + NResults;
-            }
-            /* Same invariant restore as the Lua-callee path above. */
-            if ( NResults >= 0 ) L->top.p = L->ci->top.p;
-            return 0;
-        }
-    }
-#endif /* !LUAC_AOT_RUNTIME */
+    /* Callable cdata (FFI CT_FUNC) and userdata callees take the generic
+       luaD_call path below (__call metamethod dispatch) — a dedicated cdata
+       fast path would chain the whole FFI (~25 KB) into every compiled exe
+       via FfiGetCData/Ffi_GenericCall, for identical semantics. */
 
     /* Fallback: upstream call machinery. */
     luaD_call( L, Func, NResults );
@@ -819,23 +774,13 @@ int Rt_TailCall( lua_State *L, int A, int NArgs ) {
                 break;
             }
             LClosure  *NewCl  = clLvalue( s2v( L->ci->func.p ) );
-            /* Compile-if-needed here (not LookupCached): the tail-caller's frame
-               is already gone -- the CI was reused -- so inline codegen is safe
-               (the Rt_Call inline-compile hazard only applies when the caller
-               frame is still live above). This is what the original tail path
-               did; routing an uncompiled callee through luaV_execute instead
-               loses its result count and breaks mutual/multi-value tail calls. */
-#ifdef LUAC_AOT_RUNTIME
             /* Closed world: every reachable Proto's native body was registered
                at startup, so lookup is sufficient; NULL falls back to
-               luaV_execute below exactly like a compile failure. */
+               luaV_execute below. */
             JIT_FUNC_T Jitted = Jit_LookupCached( NewCl->p );
-#else
-            JIT_FUNC_T Jitted = Jit_Compile( L, NewCl->p );
-#endif
             if ( Jitted == NULL ) {
-                /* Genuine compile failure (e.g. unsupported opcode): fall back to
-                   the upstream interpreter, which runs the callee to completion. */
+                /* No registered native body: fall back to the upstream
+                   interpreter, which runs the callee to completion. */
                 luaV_execute( L, L->ci );
                 NRes = 0;
                 break;

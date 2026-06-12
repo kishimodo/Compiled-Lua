@@ -59,9 +59,9 @@ extern Proto *LuacProgram_BuildEntry( lua_State *L );
  *  Lookup-only dispatch hook installed into clua_dispatch_hook.
  *
  *  luaV_execute (lvm.c:1199) calls this with the callee closure's Proto*; we
- *  return the pre-registered AOT body for that Proto (or NULL). We use
- *  Jit_LookupCached -- NEVER Jit_Compile -- because AOT bodies are registered
- *  up front by LuacProgram_BuildEntry and there is no JIT in an AOT program.
+ *  return the pre-registered AOT body for that Proto (or NULL). Lookup only:
+ *  AOT bodies are registered up front by LuacProgram_BuildEntry and no code
+ *  generation exists at run time.
  *
  *  Signature matches clua_dispatch_t == void *(*)(lua_State *, void *).
  */

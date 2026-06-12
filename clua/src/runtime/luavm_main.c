@@ -2,17 +2,20 @@
  * @brief
  *  Standalone luavm.exe entry: runs a Lua script file or drops into an
  *  interactive REPL. Links against the same runtime.a + Lua core, so it
- *  has the JIT, FFI, fiber-coroutines, and the embedded windows preload.
+ *  has the FFI, fiber-coroutines, and the embedded windows preload.
+ *  Always executes through the reference bytecode interpreter — luavm is
+ *  the frozen fidelity oracle the differential test layers diff compiled
+ *  CLua exes against. (`-i` is still accepted as a no-op for the many
+ *  suite invocations that pass it; the v1 JIT it used to disable has been
+ *  removed from the tree.)
  *
  *  Usage:
- *    luavm.exe                       -- REPL
- *    luavm.exe script.lua [args...]  -- run script with arg = {...}
- *    luavm.exe -e "code"             -- execute code string
- *    luavm.exe -                     -- run script from stdin
+ *    luavm.exe [-i]                       -- REPL
+ *    luavm.exe [-i] script.lua [args...]  -- run script with arg = {...}
+ *    luavm.exe [-i] -e "code"             -- execute code string
  */
 
 #include "runtime/coro.h"
-#include "jit/dispatch.h"
 #include "ffi/ffi_lib.h"
 #include "ffi/ffi_callback.h"
 #include "ffi/ctype.h"
@@ -23,7 +26,6 @@
 #include "lauxlib.h"
 #include "lualib.h"
 #include "lstate.h"
-#include "lvm.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -36,11 +38,6 @@ extern const char         g_PackageWindowsLua[ ];
 extern const unsigned int g_PackageWindowsLua_len;
 extern const char         g_PackageAsyncLua[ ];
 extern const unsigned int g_PackageAsyncLua_len;
-
-/* From dispatch.h's runtime trampoline. */
-static void *LuaVm_JitCompileHook( lua_State *L, void *Proto ) {
-    return ( void * )Jit_Compile( L, ( struct Proto * )Proto );
-}
 
 /* Same msghandler used by runtime_init.c -- appends a traceback so
    uncaught errors print with full call chain context. */
@@ -316,20 +313,15 @@ static void LuaVm_SetupModulePath( lua_State *L ) {
 }
 
 int main( int Argc, char **Argv ) {
-    /* A leading -i / --interpret runs Lua through the bytecode interpreter
-       instead of the JIT (Python-style "interpret, don't compile"). We select
-       the backend simply by NOT registering the JIT compile hook -- luaV_execute
-       then runs the revived interpreter loop. The default (no -i) is the JIT. */
-    int Interpret = 0;
-    int ArgBase   = 1;
+    /* luavm always interprets: no dispatch hook is ever installed, so
+       luaV_execute runs the bytecode interpreter loop (the frozen oracle).
+       A leading -i / --interpret is accepted as a NO-OP for compatibility —
+       it used to select the interpreter over the (since-removed) v1 JIT,
+       and every differential suite still invokes `luavm.exe -i ...`. */
+    int ArgBase = 1;
     if ( Argc > 1 && ( strcmp( Argv[ 1 ], "-i" ) == 0
                     || strcmp( Argv[ 1 ], "--interpret" ) == 0 ) ) {
-        Interpret = 1;
-        ArgBase   = 2;
-    }
-    if ( !Interpret ) {
-        clua_dispatch_hook = LuaVm_JitCompileHook;
-        clua_invoke_hook  = ( clua_invoke_t )Jit_TrampolineEntry;
+        ArgBase = 2;
     }
 
     if ( !Veh_Init( ) ) {
@@ -355,7 +347,7 @@ int main( int Argc, char **Argv ) {
 
     int Rc = 0;
     if ( Argc <= ArgBase ) {
-        Rc = LuaVm_Repl( L );   /* no script -> REPL (interpreter REPL under -i) */
+        Rc = LuaVm_Repl( L );   /* no script -> REPL */
     } else if ( strcmp( Argv[ ArgBase ], "-e" ) == 0 ) {
         if ( Argc < ArgBase + 2 ) {
             fprintf( stderr, "luavm: -e requires a code string\n" );

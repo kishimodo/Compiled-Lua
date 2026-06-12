@@ -1,14 +1,10 @@
 #include "jit/dispatch.h"
-#include "jit/exec_mem.h"   /* unconditional: JIT_CACHE_ENTRY_T embeds EXEC_MEM_SLOT_T */
-/* LUAC_AOT_RUNTIME compiles this file cache-side only (runtime-aot.a, linked
-** into AOT-compiled exes): the compile path (Jit_Compile and its codegen/
-** regalloc dependencies) is excluded so a shipped exe carries no JIT compiler.
-** The default build (runtime.a / runtime-embedded.a for luavm.exe + v1 PEs)
-** is unchanged. */
-#ifndef LUAC_AOT_RUNTIME
-#include "jit/codegen.h"
-#include "jit/regalloc.h"
-#endif
+#include "jit/exec_mem.h"   /* JIT_CACHE_ENTRY_T embeds EXEC_MEM_SLOT_T */
+/* Cache-only dispatch: this file maps Proto* -> pre-registered native entry
+** points (AOT bodies registered at startup by LuacProgram_BuildEntry via
+** Jit_RegisterCompiled). The v1 JIT compile path was removed when the JIT
+** compiler left the tree -- CLua is AOT; the only execution engines are
+** compiled native bodies and the reference bytecode interpreter. */
 
 #include "ffi/veh.h"
 #include "lauxlib.h"
@@ -22,13 +18,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* simple linear cache; v1 is process-wide and never evicted */
+/* simple linear cache; process-wide and never evicted */
 typedef struct _JIT_CACHE_ENTRY {
     Proto           *P;
     JIT_FUNC_T       Entry;
     EXEC_MEM_SLOT_T  Slot;
     size_t          *PcToOffset;   /* malloc'd: sizecode entries; NULL if not retained */
-    int              PcCount;      /* P->sizecode at compile time */
+    int              PcCount;      /* P->sizecode at registration time */
 } JIT_CACHE_ENTRY_T, *PJIT_CACHE_ENTRY_T;
 
 #define JIT_CACHE_MAX 1024
@@ -37,8 +33,8 @@ static size_t            g_CacheCount             = { 0 };
 
 /* Open-addressing Proto* -> cache-index map so CacheFind is O(1) instead of an
    O(g_CacheCount) linear scan. CacheFind runs on the per-call hot path (Rt_Call
-   does Jit_LookupCached on every JIT-to-JIT call, and the tail-call drive loop
-   calls Jit_Compile per iteration), so with N compiled protos the old scan made
+   does Jit_LookupCached on every native-to-native call, and the tail-call drive
+   loop looks up per iteration), so with N registered protos the old scan made
    call overhead grow with program size. Power-of-two size > 2*JIT_CACHE_MAX
    keeps the load factor <= 0.5; the cache is never evicted (no removal path
    anywhere in src/jit), so linear probing needs no tombstones. -1 = empty. */
@@ -65,111 +61,6 @@ static void CacheHashInsert( int32_t Index, Proto *P ) {
     }
 }
 
-#ifndef LUAC_AOT_RUNTIME
-int Jit_IsOpcodeSupported( int Opcode ) {
-    /* Set grows over sub-plans 2b–2f. 2a starts with: */
-    switch ( Opcode ) {
-        case OP_MOVE:
-        case OP_LOADK:
-        case OP_LOADFALSE:
-        case OP_LOADTRUE:
-        case OP_LOADNIL:
-        case OP_LOADI:
-        case OP_ADD:
-        case OP_SUB:
-        case OP_MUL:
-        case OP_CALL:
-        case OP_MMBIN:       /* metamethod fallback marker; emitted as no-op */
-        case OP_MMBINI:      /* metamethod marker for ADDI/etc; emitted as no-op */
-        case OP_MMBINK:      /* metamethod marker for ADDK/etc; emitted as no-op */
-        case OP_VARARGPREP:  /* no-op for non-vararg-consuming functions */
-        case OP_RETURN:
-        case OP_RETURN0:
-        case OP_RETURN1:
-        case OP_GETTABUP:
-        case OP_GETUPVAL:
-        case OP_SETUPVAL:
-        case OP_CLOSURE:
-        case OP_JMP:
-        case OP_EQ:
-        case OP_LT:
-        case OP_LE:
-        case OP_TEST:
-        case OP_TESTSET:
-        case OP_FORPREP:
-        case OP_FORLOOP:
-        case OP_NEWTABLE:
-        case OP_EXTRAARG:
-        case OP_GETI:
-        case OP_SETI:
-        case OP_GETFIELD:
-        case OP_SETFIELD:
-        case OP_GETTABLE:
-        case OP_SETTABLE:
-        case OP_SETTABUP:
-        case OP_LEN:
-        case OP_CONCAT:
-        case OP_SETLIST:
-        case OP_EQI:
-        case OP_LTI:
-        case OP_LEI:
-        case OP_GTI:
-        case OP_GEI:
-        case OP_EQK:
-        case OP_TAILCALL:
-        case OP_VARARG:
-        case OP_NOT:
-        case OP_UNM:
-        case OP_BNOT:
-        case OP_DIV:
-        case OP_MOD:
-        case OP_IDIV:
-        case OP_POW:
-        case OP_ADDI:
-        case OP_ADDK:
-        case OP_SUBK:
-        case OP_MULK:
-        case OP_DIVK:
-        case OP_MODK:
-        case OP_IDIVK:
-        case OP_POWK:
-        case OP_BAND:
-        case OP_BOR:
-        case OP_BXOR:
-        case OP_SHL:
-        case OP_SHR:
-        case OP_BANDK:
-        case OP_BORK:
-        case OP_BXORK:
-        case OP_SHRI:
-        case OP_SHLI:
-        case OP_LOADF:
-        case OP_LFALSESKIP:
-        case OP_LOADKX:
-        case OP_SELF:
-        case OP_TBC:
-        case OP_CLOSE:
-        case OP_TFORPREP:
-        case OP_TFORCALL:
-        case OP_TFORLOOP:
-            return 1;
-        default:
-            return 0;
-    }
-}
-
-static int AllOpcodesSupported( Proto *P ) {
-    int I = { 0 };
-    for ( I = 0; I < P->sizecode; I++ ) {
-        int Op = GET_OPCODE( P->code[ I ] );
-        if ( !Jit_IsOpcodeSupported( Op ) ) {
-            return 0;
-        }
-    }
-    return 1;
-}
-#endif /* !LUAC_AOT_RUNTIME */
-
 static PJIT_CACHE_ENTRY_T CacheFind( Proto *P ) {
     if ( !g_CacheHashReady ) { return NULL; }   /* nothing compiled yet */
     size_t Mask = JIT_HASH_SIZE - 1;
@@ -186,83 +77,6 @@ JIT_FUNC_T Jit_LookupCached( Proto *P ) {
     PJIT_CACHE_ENTRY_T E = CacheFind( P );
     return E != NULL ? E->Entry : NULL;
 }
-
-#ifndef LUAC_AOT_RUNTIME
-/* Anchor the currently-executing closure in the Lua registry under key P.
- * The JIT cache is keyed by Proto*, but Protos are GC'd objects. If a Proto
- * is collected and a new one is allocated at the same address, CacheFind
- * returns the OLD JIT'd code (compiled for a different bytecode). Pinning
- * the closure keeps its Proto alive, and transitively (via Proto::p[]) the
- * children -- so for the Rt_Call path where P is the *callee's* Proto, the
- * caller's closure still keeps it alive through the parent->child chain. */
-static void AnchorProto( lua_State *L, Proto *P ) {
-    if ( L == NULL || L->ci == NULL || L->ci->func.p == NULL ) return;
-    StkId top = L->top.p;
-    /* push the current ci's closure value onto the stack */
-    setobjs2s( L, top, L->ci->func.p );
-    L->top.p++;
-    /* registry[P] = closure (pops the value) */
-    lua_rawsetp( L, LUA_REGISTRYINDEX, P );
-}
-
-JIT_FUNC_T Jit_Compile( lua_State *L, Proto *P ) {
-    PJIT_CACHE_ENTRY_T E = CacheFind( P );
-    if ( E != NULL ) { return E->Entry; }
-
-    if ( !AllOpcodesSupported( P ) ) {
-        return NULL;
-    }
-    if ( g_CacheCount >= JIT_CACHE_MAX ) {
-        fprintf( stderr, "[-] jit: cache full\n" );
-        return NULL;
-    }
-
-    REGALLOC_T RegAlloc = { 0 };
-    if ( !RegAlloc_Analyse( &RegAlloc, P ) ) {
-        return NULL;
-    }
-
-    JIT_CACHE_ENTRY_T *Slot = &g_Cache[ g_CacheCount ];
-    memset( Slot, 0, sizeof( *Slot ) );
-    /* Estimate per-Proto code-buffer size. 256 bytes per opcode is a
-       conservative upper bound — worst-case lowerings (FFI-inlined CALL,
-       multi-arg CONCAT, big FORLOOP back-edges) all stay under that. 4096
-       base covers prologue/epilogue + branch-patch space. Rounded up to
-       page granularity so VirtualAlloc behaves cleanly. */
-    size_t EstimateBytes = ( size_t )P->sizecode * 256 + 4096;
-    EstimateBytes = ( EstimateBytes + 4095 ) & ~( ( size_t )4095 );
-    if ( !ExecMem_Reserve( EstimateBytes, &Slot->Slot ) ) {
-        return NULL;
-    }
-    size_t *PcMap = ( size_t * )calloc( ( size_t )P->sizecode, sizeof( size_t ) );
-    if ( PcMap == NULL ) {
-        ExecMem_Release( &Slot->Slot );
-        return NULL;
-    }
-    if ( !Codegen_EmitFunction( &Slot->Slot, P, &RegAlloc, PcMap ) ) {
-        free( PcMap );
-        ExecMem_Release( &Slot->Slot );
-        return NULL;
-    }
-    if ( !ExecMem_Commit( &Slot->Slot ) ) {
-        free( PcMap );
-        ExecMem_Release( &Slot->Slot );
-        return NULL;
-    }
-    Slot->P     = P;
-    Slot->Entry = ( JIT_FUNC_T )Slot->Slot.Code;
-    Slot->PcToOffset = PcMap;
-    Slot->PcCount    = P->sizecode;
-    CacheHashInsert( ( int32_t )g_CacheCount, P );   /* index it before bumping count */
-    g_CacheCount++;
-
-    AnchorProto( L, P );
-
-    fprintf( stderr, "[*] jit: compiled %p (%d opcodes, %zu bytes)\n",
-             ( void * )P, ( int )P->sizecode, Slot->Slot.Used );
-    return Slot->Entry;
-}
-#endif /* !LUAC_AOT_RUNTIME */
 
 int Jit_RegisterCompiled( Proto *P, JIT_FUNC_T Entry ) {
     if ( P == NULL || Entry == NULL ) { return 0; }

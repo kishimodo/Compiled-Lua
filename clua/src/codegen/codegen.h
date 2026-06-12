@@ -1,14 +1,14 @@
 /*
 ** codegen.h — Optimized IR -> relocatable x64 machine code.
 **
-** Unlike the v1 JIT (src/jit/codegen.c), which emits straight into RWX memory
+** Unlike the removed v1 JIT, which emits straight into RWX memory
 ** with runtime-helper addresses baked in as absolute immediates, LuaC codegen is
 ** AHEAD-OF-TIME: it emits position-independent machine code into a byte buffer
 ** plus a RELOCATION TABLE and UNWIND INFO, which the linker (../link/pe_write.c)
 ** places into .text/.pdata and binds against the runtime library.
 **
-** REUSE from v1 (do NOT rewrite these — copy/adapt src/jit/emit_x64.* and
-** src/jit/regalloc.*):
+** REUSE from v1 (do NOT rewrite these — copy/adapt the removed v1 JIT encoder and
+** the removed v1 JIT regalloc):
 **   - emit_x64: the raw instruction encoder (REX/ModRM/SIB, mov/add/cmp/jcc/call…).
 **   - regalloc: register allocation over the SSA values.
 ** NEW for AOT (v1 never needed these):
@@ -90,7 +90,7 @@ LcCodeModule *lc_codegen(LcModule *m);
 void          lc_codemodule_free(LcCodeModule *cm);
 
 /* ------------------------------------------------------------------ */
-/* Frame scaffolding (ported from v1 src/jit/codegen.c).               */
+/* Frame scaffolding (ported from the removed v1 JIT codegen).               */
 /*                                                                     */
 /* Frame ABI (validated by tests/unit/test_lc_callinfo_spike.c):       */
 /*   RBX = lua_State* L; RDI = ci->func.p + 16 (Lua register base);    */

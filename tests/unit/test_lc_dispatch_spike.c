@@ -40,11 +40,10 @@
  *
  * Therefore, for a REGISTERED entry to be invoked, ALL of these must hold:
  *   (A) clua_dispatch_hook must be set to a function that consults the
- *       cache for cl->p and returns its JIT_FUNC_T (e.g. Jit_LookupCached, or
- *       Jit_Compile which calls CacheFind first). If the hook is NULL, the
- *       call ALWAYS runs the bytecode interpreter -- the registered entry is
- *       never consulted. (The AOT runtime sets this hook at startup, exactly
- *       like the JIT runtime does in runtime_init.c / luavm_main.c.)
+ *       cache for cl->p and returns its JIT_FUNC_T (Jit_LookupCached). If
+ *       the hook is NULL, the call ALWAYS runs the bytecode interpreter --
+ *       the registered entry is never consulted. (The AOT runtime sets this
+ *       hook at startup in aot_entry.c.)
  *   (B) L->hookmask == 0 (no debug hook active). A debug hook forces the
  *       hook-aware bytecode interpreter; the AOT/JIT body honors no hooks.
  *   (C) The Proto* used as the cache key must be the SAME pointer stored in the
@@ -92,8 +91,8 @@ static int SpikeBody( lua_State *L ) {
 
 /* Dispatch hook the runtime installs at startup: consult the cache (NO codegen)
  * and return the registered entry, or NULL. This is the (A) condition above.
- * Using Jit_LookupCached (not Jit_Compile) guarantees no JIT compilation can
- * happen -- the whole point of the spike. */
+ * Lookup-only: no code generation of any kind can happen -- the whole point
+ * of the spike. */
 static void *LookupHook( lua_State *L, void *Proto ) {
     (void)L;
     return ( void * )Jit_LookupCached( ( struct Proto * )Proto );

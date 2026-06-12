@@ -23,7 +23,7 @@
  *                      the function slot). `ci->func` is a StkIdRel union here
  *                      (lstate.h:178); the live pointer is the `.p` member, so
  *                      base == ci->func.p + 1. In codegen terms the prologue
- *                      loads this into RDI (EmitPrologue, v1 src/jit/codegen.c:136
+ *                      loads this into RDI (EmitPrologue, v1 the removed v1 JIT codegen:136
  *                      computes RDI = ci->func.p + 16 bytes == ci->func.p + 1
  *                      TValue, since sizeof(StackValue)==sizeof(TValue)==16).
  *   - register N     : lives at base + N (a StkId/StackValue*). Use s2v(base+N)
@@ -80,9 +80,9 @@ static int Body( lua_State *L ) {
 }
 
 /* Dispatch hook the runtime installs at startup: consult the cache (NO codegen)
- * for cl->p and return the registered entry, or NULL. This is condition (A) from
- * the Task 1 dispatch spike. Using Jit_LookupCached (not Jit_Compile) guarantees
- * no JIT compilation can happen. */
+ * for cl->p and return the registered entry, or NULL.
+ * This is condition (A) from the Task 1 dispatch spike: lookup-only, no
+ * code generation of any kind. */
 static void *LookupHook( lua_State *L, void *Proto ) {
     (void)L;
     return ( void * )Jit_LookupCached( ( struct Proto * )Proto );

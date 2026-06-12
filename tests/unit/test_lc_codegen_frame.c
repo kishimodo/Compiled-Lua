@@ -3,7 +3,7 @@
  * Exercises the ported frame helpers (LcCg_EmitPrologue/EmitEpilogue/
  * EmitRestoreL/EmitReloadRdiAndCache + LcCg_EmitHelperCall3) against a real
  * LcCodeBuf, asserting the recognizable boundary bytes of the frame. The frame
- * shape is the v1 JIT frame (src/jit/codegen.c) minus the M0 cache loop:
+ * shape is the v1 JIT frame (the removed v1 JIT codegen) minus the M0 cache loop:
  *   prologue: PUSH RDI,RBX,R12,R13,R14,R15,RSI ; SUB RSP,0x20 ; RBX=L ;
  *             RAX=[RCX+ci]; RAX=[RAX+ci.func]; RDI=RAX ; ADD RDI,16
  *   epilogue: ADD RSP,0x20 ; POP RSI,R15,R14,R13,R12,RBX,RDI ; RET

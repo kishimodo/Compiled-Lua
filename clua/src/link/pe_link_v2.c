@@ -42,7 +42,7 @@ static void set_errv( char *err, size_t errlen, const char *fmt, ... ) {
 ** the base Makefile's archive objects where it matters: the include dirs +
 ** the Windows-x64 target define govern the Lua struct layouts. (NB: do NOT
 ** pass -DLUA_USE_WINDOWS — luaconf.h already defines it on a Windows target.) */
-#define LUAC_DEFINES "-DCLUA_TARGET_WINDOWS_X64=1 -DLUA_COMPAT_5_3 -DLUAC_AOT_RUNTIME=1"
+#define LUAC_DEFINES "-DCLUA_TARGET_WINDOWS_X64=1 -DLUA_COMPAT_5_3"
 
 #define LC_PATH_MAX 1024
 

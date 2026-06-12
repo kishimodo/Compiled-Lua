@@ -71,7 +71,7 @@ aotc: $(BUILD_DIR)/aotc.exe
 # the Lua struct layouts.
 $(BUILD_DIR)/aot_entry.o: $(SRC_DIR)/runtime/aot_entry.c
 	$(CC) -std=c99 -I$(SRC_DIR) -I$(LUA_DIR) \
-	    -DCLUA_TARGET_WINDOWS_X64=1 -DLUA_COMPAT_5_3 -DLUAC_AOT_RUNTIME=1 \
+	    -DCLUA_TARGET_WINDOWS_X64=1 -DLUA_COMPAT_5_3 \
 	    -c $< -o $@
 
 .PHONY: aot-entry

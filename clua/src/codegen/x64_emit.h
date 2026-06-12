@@ -1,11 +1,11 @@
 /*!
  * @brief
- *  Primitive x64 instruction encoder (retargeted from the v1 JIT encoder
- *  src/jit/emit_x64.{h,c}). Each emitter appends bytes to an LcCodeBuf's
- *  growable region. ModR/M / SIB / REX / displacement / opcode logic is
- *  byte-for-byte identical to v1 — only the buffer plumbing and the public
- *  name prefix (EmitX64_ -> X64Emit_) differ, plus two AOT-only reloc
- *  emitters (X64Emit_CallSym / X64Emit_LeaRipSym).
+ *  Primitive x64 instruction encoder (retargeted from the v1 JIT encoder,
+ *  which has since been removed from the tree). Each emitter appends bytes
+ *  to an LcCodeBuf's growable region. ModR/M / SIB / REX / displacement /
+ *  opcode logic is byte-for-byte identical to v1 — only the buffer plumbing
+ *  and the public name prefix differ, plus two AOT-only reloc emitters
+ *  (X64Emit_CallSym / X64Emit_LeaRipSym).
  */
 
 #ifndef LUAC_CODEGEN_X64_EMIT_H
