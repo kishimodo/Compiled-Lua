@@ -10,7 +10,10 @@
  *
  *   [0x00] IMAGE_FILE_HEADER (20 bytes)
  *   [0x14] section header(s) (40 bytes each): .text, optional .rdata
- *   .text raw  = concatenation of every funcs[i].code (tight, see TODO on align)
+ *   .text raw  = funcs[i].code chunks, each function start padded to a
+ *                16-byte boundary with 0xCC (int3); the section is
+ *                ALIGN_16BYTES so offset-aligned functions stay
+ *                image-aligned after the final link
  *   .rdata raw = cm->rodata (only if rodata_len > 0)
  *   .text relocations (10 bytes each)
  *   symbol table (18 bytes each)
@@ -138,6 +141,14 @@ int LcCoff_Write( const char *path, const LcCodeModule *cm, char *err, size_t er
     /* defined function symbols + concatenated .text */
     for ( i = 0; i < cm->nfuncs; i++ ) {
         const LcCompiledFunc *fn = &cm->funcs[i];
+        /* Pad each function's start to a 16-byte boundary with int3 (0xCC)
+        ** so entry points are cache/decoder friendly. Done BEFORE recording
+        ** text_off[i]: symbol Values and reloc VirtualAddresses derive from
+        ** it, so they stay correct automatically. The section header carries
+        ** ALIGN_16BYTES, so an offset-16-aligned function is image-aligned. */
+        while ( text.len & 15u ) {
+            if ( !put8( &text, 0xCC ) ) { fail( err, errlen, "oom" ); goto done; }
+        }
         text_off[i] = ( unsigned )text.len;
         if ( fn->code_len && !putn( &text, fn->code, fn->code_len ) ) { fail( err, errlen, "oom" ); goto done; }
 
