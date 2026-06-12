@@ -1,4 +1,7 @@
--- luavm-pkg -- LuaVM's local-first package manager (R6 + v1.x).
+-- rover -- the CLua package manager (local-first, R6 + v1.x).
+--
+-- (The file keeps its historical path/name `luavm-pkg.lua` for test-suite
+--  compatibility; the user-facing product name is rover.)
 --
 -- Run by luavm.exe:  luavm.exe -i package-manager/src/luavm-pkg.lua <cmd> ...
 --
@@ -177,6 +180,140 @@ local STORE = store_base()
 local META  = STORE .. "\\.meta"   -- manifests live here, OUTSIDE package dirs
 
 ----------------------------------------------------------------------
+-- Closed-world literal-table parser (no load()).
+--
+-- aotc.exe compiles this program closed-world: the global `load` is a compile
+-- error. Every file this program previously load()ed -- package.lua manifests,
+-- .meta/<name>.lua manifests, luavm.lock -- is a machine-written (or
+-- registry-provided) LITERAL `return { ... }` table serialized with
+-- string.format("%q"), so a tiny recursive-descent parser covers them exactly:
+--   return { [ ["key"] | ident = ] "str" | 'str' | number | true | false
+--             | { ...nested... } , ... }
+-- with Lua line comments (`--` to end of line), arbitrary whitespace, and
+-- trailing commas tolerated. %q escape forms are decoded: \" \' \\ \n \r \t
+-- \<literal newline> and decimal \ddd. Anything else (computed expressions,
+-- function calls, identifiers as values, unbalanced braces, trailing garbage)
+-- returns nil -- it never raises -- so each caller keeps its existing
+-- corrupt/fallback semantics.
+----------------------------------------------------------------------
+local function parse_return_table(text)
+  if type(text) ~= "string" then return nil end
+  local pos, n = 1, #text
+  local function skip_ws()                          -- whitespace + line comments
+    while pos <= n do
+      local c = text:sub(pos, pos)
+      if c == " " or c == "\t" or c == "\r" or c == "\n" then pos = pos + 1
+      elseif c == "-" and text:sub(pos + 1, pos + 1) == "-" then
+        local nl = text:find("\n", pos + 2, true)
+        pos = nl and (nl + 1) or (n + 1)
+      else return end
+    end
+  end
+  local ESC = { n = "\n", r = "\r", t = "\t", a = "\a", b = "\b", f = "\f",
+                v = "\v", ["\\"] = "\\", ['"'] = '"', ["'"] = "'", ["\n"] = "\n" }
+  local function parse_string()                     -- cursor on the open quote
+    local q = text:sub(pos, pos)
+    pos = pos + 1
+    local out = {}
+    while pos <= n do
+      local c = text:sub(pos, pos)
+      if c == q then pos = pos + 1; return table.concat(out) end
+      if c == "\n" then return nil end              -- unescaped newline
+      if c == "\\" then
+        local e = text:sub(pos + 1, pos + 1)
+        local digits = text:match("^%d%d?%d?", pos + 1)
+        if ESC[e] then out[#out + 1] = ESC[e]; pos = pos + 2
+        elseif digits then                          -- decimal \ddd (%q output)
+          local byte = tonumber(digits)
+          if byte > 255 then return nil end
+          out[#out + 1] = string.char(byte); pos = pos + 1 + #digits
+        else return nil end                         -- unknown escape
+      else out[#out + 1] = c; pos = pos + 1 end
+    end
+    return nil                                      -- unterminated string
+  end
+  local parse_table                                 -- forward (tables nest)
+  local function parse_value(depth)                 -- -> ok, value
+    skip_ws()
+    local c = text:sub(pos, pos)
+    if c == '"' or c == "'" then
+      local s = parse_string()
+      if s == nil then return false end
+      return true, s
+    end
+    if c == "{" then
+      local t = parse_table(depth + 1)
+      if t == nil then return false end
+      return true, t
+    end
+    local word = text:match("^[%a_][%w_]*", pos)
+    if word == "true"  then pos = pos + 4; return true, true  end
+    if word == "false" then pos = pos + 5; return true, false end
+    if word then return false end                   -- identifier = not a literal
+    local num = text:match("^%-?%d+%.?%d*", pos)
+    if num then
+      local exp = text:match("^[eE][%+%-]?%d+", pos + #num) or ""
+      local v = tonumber(num .. exp)
+      if v == nil then return false end
+      pos = pos + #num + #exp
+      return true, v
+    end
+    return false
+  end
+  parse_table = function(depth)                     -- cursor on '{'
+    if depth > 16 then return nil end               -- runaway nesting
+    pos = pos + 1
+    local t, arr = {}, 0
+    while true do
+      skip_ws()
+      local c = text:sub(pos, pos)
+      if c == "" then return nil end                -- EOF inside a table
+      if c == "}" then pos = pos + 1; return t end
+      local key
+      if c == "[" then                              -- ["string"] = value
+        pos = pos + 1; skip_ws()
+        local qc = text:sub(pos, pos)
+        if qc ~= '"' and qc ~= "'" then return nil end
+        key = parse_string()
+        if key == nil then return nil end
+        skip_ws(); if text:sub(pos, pos) ~= "]" then return nil end
+        pos = pos + 1
+        skip_ws(); if text:sub(pos, pos) ~= "=" then return nil end
+        pos = pos + 1
+      else
+        local ident = text:match("^[%a_][%w_]*", pos)
+        if ident and ident ~= "true" and ident ~= "false" and ident ~= "nil" then
+          local save = pos
+          pos = pos + #ident; skip_ws()
+          if text:sub(pos, pos) == "=" and text:sub(pos + 1, pos + 1) ~= "=" then
+            key = ident; pos = pos + 1               -- ident = value
+          else
+            pos = save        -- bare identifier value -> parse_value rejects it
+          end
+        end
+      end
+      local ok, v = parse_value(depth)
+      if not ok then return nil end
+      if key ~= nil then t[key] = v else arr = arr + 1; t[arr] = v end
+      skip_ws()
+      local sep = text:sub(pos, pos)
+      if sep == "," or sep == ";" then pos = pos + 1
+      elseif sep ~= "}" then return nil end
+    end
+  end
+  skip_ws()
+  if not (text:match("^return[^%w_]", pos) or text:match("^return$", pos)) then return nil end
+  pos = pos + 6
+  skip_ws()
+  if text:sub(pos, pos) ~= "{" then return nil end
+  local t = parse_table(1)
+  if t == nil then return nil end
+  skip_ws()
+  if pos <= n then return nil end                   -- trailing garbage
+  return t
+end
+
+----------------------------------------------------------------------
 -- Metadata: a package's content hash + declared version/description.
 ----------------------------------------------------------------------
 -- Hash the package's entry point (init.lua). Deterministic content integrity.
@@ -254,14 +391,11 @@ local function read_meta(dir)
   local meta = { version = "0.0.0", description = "" }
   local pkgmanifest = read_file(dir .. "\\package.lua")
   if pkgmanifest then
-    local chunk = load(pkgmanifest, "@package.lua", "t", {})
-    if chunk then
-      local ok, t = pcall(chunk)
-      if ok and type(t) == "table" then
-        if t.version then meta.version = tostring(t.version) end
-        if t.description then meta.description = tostring(t.description) end
-        return meta
-      end
+    local t = parse_return_table(pkgmanifest)
+    if type(t) == "table" then
+      if t.version then meta.version = tostring(t.version) end
+      if t.description then meta.description = tostring(t.description) end
+      return meta
     end
   end
   local init = read_file(dir .. "\\init.lua")
@@ -282,10 +416,8 @@ local function read_pkg_deps(dir)
   local out = {}
   local src = read_file(dir .. "\\package.lua")
   if not src then return out end
-  local chunk = load(src, "@package.lua", "t", {})
-  if not chunk then return out end
-  local ok, t = pcall(chunk)
-  if not (ok and type(t) == "table" and type(t.dependencies) == "table") then return out end
+  local t = parse_return_table(src)
+  if not (type(t) == "table" and type(t.dependencies) == "table") then return out end
   for k, v in pairs(t.dependencies) do
     if name_ok(k) and type(v) == "string" then out[k] = v end
   end
@@ -304,10 +436,8 @@ end
 local function read_manifest(name)
   local c = read_file(manifest_path(name))
   if not c then return nil end
-  local chunk = load(c, "@manifest", "t", {})
-  if not chunk then return nil end
-  local ok, t = pcall(chunk)
-  if ok and type(t) == "table" then return t end
+  local t = parse_return_table(c)
+  if type(t) == "table" then return t end
   return nil
 end
 
@@ -365,10 +495,10 @@ end
 -- Lockfile: resolved name -> { version, hash, tree, deps }. `hash` is the legacy
 -- init.lua hash (compat), `tree` is the whole-tree Merkle root (Feature 3), and
 -- `deps` is the package's direct dependency graph (Feature 4). Written as a Lua
--- return-table so the host can load it without a parser.
+-- literal return-table; read back with parse_return_table (closed-world: no load()).
 local function write_lock(locked)
   local lines = { "-- luavm.lock -- resolved dependency versions + content hashes.",
-                  "-- Generated by luavm-pkg; do not edit by hand.", "return {" }
+                  "-- Generated by rover; do not edit by hand.", "return {" }
   local names = {}
   for n in pairs(locked) do names[#names + 1] = n end
   table.sort(names)
@@ -401,10 +531,8 @@ end
 local function read_lock()
   local c = read_file(LOCK)
   if not c then return nil end                     -- absent
-  local chunk = load(c, "@lock", "t", {})
-  if not chunk then return nil, "corrupt" end      -- present but unparseable
-  local ok, t = pcall(chunk)
-  if not (ok and type(t) == "table") then return nil, "corrupt" end
+  local t = parse_return_table(c)
+  if type(t) ~= "table" then return nil, "corrupt" end  -- present but unparseable
   return t
 end
 
@@ -627,10 +755,22 @@ local function require_safe_registry(reg)
   return reg
 end
 
+local REPO_REGISTRY = "package-manager\\registry"
+local repo_registry_present = nil          -- lazily probed once per process
 local function default_registry()
   local r = os.getenv("LUAVM_REGISTRY")
   if r and r ~= "" then return require_safe_registry(r) end
-  return "package-manager\\registry"
+  -- Repo-relative default when run from a source checkout (the test suites
+  -- rely on it). When that directory does not exist -- rover run standalone
+  -- from an arbitrary cwd -- fall back to %LUAVM_HOME%\registry if set, else
+  -- %LOCALAPPDATA%\luavm\registry.
+  if repo_registry_present == nil then
+    repo_registry_present = exists(REPO_REGISTRY)
+  end
+  if repo_registry_present then return REPO_REGISTRY end
+  local home = os.getenv("LUAVM_HOME")
+  if home and home ~= "" then return home .. "\\registry" end
+  return (os.getenv("LOCALAPPDATA") or ".") .. "\\luavm\\registry"
 end
 
 local function is_url(s) return type(s) == "string" and s:match("^%a[%w+.-]*://") ~= nil end
@@ -1047,6 +1187,7 @@ if os.getenv("LUAVM_PKG_TEST") then
     index_versions = index_versions, index_hash = index_hash,
     index_extra_files = index_extra_files,
     read_pkg_deps = read_pkg_deps,
+    parse_return_table = parse_return_table,
   }
   return
 end
@@ -1531,14 +1672,14 @@ elseif cmd == "init" then
   local target = "luavm.toml"
   if exists(target) then print("[-] " .. target .. " already exists"); os.exit(1) end
   write_file(target, table.concat({
-    "# luavm project manifest (v1.x)",
+    "# luavm.toml -- rover (the CLua package manager) project manifest",
     "[project]",
     'name = "my-project"',
     'version = "0.1.0"',
     "",
-    "# Declare dependencies here, then `luavm-pkg install` (no args) installs them",
+    "# Declare dependencies here, then `rover install` (no args) installs them",
     "# all and writes luavm.lock with resolved versions + sha256 hashes.",
-    "# `luavm-pkg add <name>` installs + records a dependency for you.",
+    "# `rover add <name>` installs + records a dependency for you.",
     "[dependencies]",
     "# greet = \"^1.0.0\"",
     "",
@@ -1546,7 +1687,7 @@ elseif cmd == "init" then
   print("[+] wrote " .. target)
 
 else
-  print("luavm-pkg -- LuaVM package manager")
+  print("rover -- the CLua package manager")
   print("usage:")
   print("  install [<name>] [registry]   install one package + its deps, OR (no name)")
   print("                                install luavm.toml deps. With a luavm.lock,")
