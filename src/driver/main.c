@@ -17,7 +17,7 @@
 #include "../ir/ir.h"
 #include "../opt/passes.h"
 #include "../codegen/codegen.h"
-#include "../codegen/protoinit_emit.h"
+#include "../codegen/protoblob_emit.h"
 #include "../link/coff_write.h"
 #include "../link/pe_link_v2.h"
 
@@ -38,7 +38,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <process.h>   /* _getpid */
-#include <direct.h>    /* _mkdir   */
 
 /* ------------------------------------------------------------------ */
 /* Reachable-Proto collection.                                         */
@@ -99,7 +98,8 @@ static const char *DirOf( const char *Path, char *Buf, size_t BufSize ) {
 }
 
 int lc_drive( const LcDriverOptions *opt ) {
-    if ( opt == NULL || opt->input == NULL || opt->output == NULL ) return 2;
+    if ( opt == NULL || opt->input == NULL ) return 2;
+    if ( opt->output == NULL && !opt->check_only ) return 2;
 
     if ( opt->emit_dll ) {
         fprintf( stderr, "aotc: --dll is not supported in M0 (exe only)\n" );
@@ -203,6 +203,15 @@ int lc_drive( const LcDriverOptions *opt ) {
         goto cleanup;
     }
 
+    /* `check` mode: the front-end, closed-world and supported-ops gates all
+    ** passed — report and stop before lifting/codegen/link. */
+    if ( opt->check_only ) {
+        printf( "[+] %s: OK (%zu module%s, closed world)\n",
+                opt->input, res.Count, res.Count == 1 ? "" : "s" );
+        rc = 0;
+        goto cleanup;
+    }
+
     /* ---- 3. lift to IR ---- */
     m = lc_lift_program( entryProto, reach.items, reach.count );
     if ( m == NULL ) {
@@ -252,40 +261,47 @@ int lc_drive( const LcDriverOptions *opt ) {
         goto cleanup;
     }
 
-    /* ---- 6/7. emit COFF .o + generated ProtoInit .c, then native link ---- */
+    /* ---- 6/7. serialize the ProtoInit blob, emit ONE COFF .o, link ----
+    ** The blob (constants/upvalues/debug-info/code per Proto) rides in the
+    ** user object's .rdata$L next to the relocated luac_fn_table; the runtime
+    ** archive's protoinit_rt.o rebuilds the Protos at startup. Everything
+    ** from .lua to .o happens in-process — the only external step is the
+    ** single native link. */
     {
-        char obj_path[ 1024 ];
-        char proto_c[ 1024 ];
-        char err[ 512 ] = { 0 };
-        int  pid = ( int )_getpid( );
+        char           obj_path[ 1024 ];
+        char           err[ 512 ] = { 0 };
+        unsigned char *blob = NULL;
+        size_t         blob_len = 0;
+        int            pid = ( int )_getpid( );
+        const char    *tmpdir = getenv( "TEMP" );
 
-        _mkdir( "build" );
-        _mkdir( "build\\tmp" );
-
+        if ( tmpdir == NULL || tmpdir[0] == '\0' ) tmpdir = getenv( "TMP" );
+        if ( tmpdir == NULL || tmpdir[0] == '\0' ) tmpdir = ".";
         snprintf( obj_path, sizeof( obj_path ),
-                  "build\\tmp\\luac_user_%d.o", pid );
-        snprintf( proto_c, sizeof( proto_c ),
-                  "build\\tmp\\luac_protoinit_%d.c", pid );
+                  "%s\\clua_user_%d.o", tmpdir, pid );
+
+        if ( !LcBuildProtoBlob( m, &blob, &blob_len, err, sizeof( err ) ) ) {
+            fprintf( stderr, "aotc: error: ProtoInit blob failed: %s\n",
+                     err[0] ? err : "(unknown)" );
+            goto cleanup;
+        }
+        cm->protoblob     = blob;        /* owned by cm now */
+        cm->protoblob_len = blob_len;
 
         if ( !LcCoff_Write( obj_path, cm, err, sizeof( err ) ) ) {
             fprintf( stderr, "aotc: error: COFF write failed: %s\n",
                      err[0] ? err : "(unknown)" );
             goto cleanup;
         }
-        if ( !LcEmitProtoInitC( proto_c, m, err, sizeof( err ) ) ) {
-            fprintf( stderr, "aotc: error: ProtoInit emit failed: %s\n",
-                     err[0] ? err : "(unknown)" );
-            goto cleanup;
-        }
 
-        /* The Protos must stay alive through codegen + ProtoInit emit (both read
-        ** func->source). Both are done now; the link reads only the files. */
-        if ( !LuacLink_LinkProgram( obj_path, proto_c, opt->output,
+        if ( !LuacLink_LinkProgram( obj_path, opt->output,
                                     err, sizeof( err ) ) ) {
             fprintf( stderr, "aotc: error: link failed: %s\n",
                      err[0] ? err : "(unknown)" );
+            if ( !opt->keep_temps ) remove( obj_path );
             goto cleanup;
         }
+        if ( !opt->keep_temps ) remove( obj_path );
 
         printf( "[+] %s (%zu module%s, %u function%s) -> %s\n",
                 opt->input, res.Count, res.Count == 1 ? "" : "s",

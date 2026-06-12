@@ -2091,5 +2091,6 @@ void lc_codemodule_free(LcCodeModule *cm) {
     free(cm->funcs);
   }
   free(cm->rodata);
+  free(cm->protoblob);
   free(cm);
 }

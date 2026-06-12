@@ -8,9 +8,21 @@
 > FFI rules, testing, milestones). The file-level inheritance record is
 > [`docs/fork-manifest.md`](docs/fork-manifest.md).
 >
-> **The product is `aotc.exe`**: it compiles Lua 5.4 to **native x64 machine
-> code at compile time** and emits an ordinary PE (standard sections, no
-> bytecode blob, no in-binary VM, no JIT). The runtime
+> **The product is `clua.exe`** (subcommands `build`/`run`/`check`/`version`,
+> `-O1` default, output name derived from the input; relocatable — finds its
+> runtime libs next to the exe or via `CLUA_HOME`), plus **`rover.exe`**, the
+> package manager, itself a CLua-compiled closed-world program built from
+> `package-manager/src/luavm-pkg.lua`. `aotc.exe` is the low-level
+> flag-compatible driver the test layers use; both share `lc_drive()`.
+> CLua compiles Lua 5.4 to **native x64 machine code at compile time** and
+> emits an ordinary PE (standard sections, no bytecode blob, no in-binary VM,
+> no JIT). The pipeline is in-memory: ProtoInit data rides as a serialized
+> blob (`.rdata$L`; format in `src/runtime/protoblob_format.h`, rebuilt at
+> startup by `src/runtime/protoinit_rt.c`) inside the single COFF object, so
+> the only external step is ONE native link against `runtime-aot.a` (the
+> AOT runtime variant: dispatch cache but **no JIT compiler**) + the Lua
+> core (**no front-end** — `aot_entry.c` stubs `luaY_parser`/`luaU_undump`/
+> `luaU_dump`/`luaX_init`; see AOT-CLOSEDWORLD-002). The runtime
 > (GC/tables/strings/metatables/coroutines/FFI) is a statically-linked
 > *library*, like libc. The backend lives in `src/{ir,opt,codegen,link,driver}`.
 > **Closed world:** `load`/`loadstring`/`dofile`/`string.dump`/dynamic
@@ -37,16 +49,27 @@ packages (or `-L <pkg>` to force-bundle).
 ## Build
 
 From PowerShell (authoritative): `cmd /c "build\build-luac.bat"` builds
-everything including `aotc.exe` (via `build/Makefile.luac`). The v1 targets
-remain available via `cmd /c "build\build.bat <target>"`: `compiler`,
+everything: `clua.exe`, `aotc.exe`, `aot_entry.o`, `rover.exe` (via
+`build/Makefile.luac`) plus the base products and the three runtime archives
+(`runtime-embedded.a`, `runtime-aot.a`, `liblua54-embedded.a`). The v1
+targets remain available via `cmd /c "build\build.bat <target>"`: `compiler`,
 `luavm`, `embedded`, `packages-embedded`, `lua`, `clean`. `build.bat` puts
 GnuWin32 `make` + the MinGW `bin` on PATH, then runs `make -f build/Makefile`.
 Do **not** run `make` directly from bash (the package-discovery `$_` PowerShell
-gotcha prints harmless `'x86' is not recognized` noise).
+gotcha prints harmless `'x86' is not recognized` noise). The user-facing
+layout: `make -f build/Makefile.luac dist` → `dist\` (clua.exe + rover.exe +
+lib\ + README).
 
-**Gotcha:** changes to `src/ir/ir.h` require wiping the backend objects first
+**Gotcha:** changes to `src/ir/ir.h` (or any backend header, e.g.
+`src/codegen/codegen.h`) require wiping the backend objects first
 (`build/bin/obj/{ir,opt,codegen,link,driver}`) — the Makefile does not track
 header dependencies, and stale `lift.o` produces silent empty-output binaries.
+
+**Gotcha:** `src/runtime/aot_entry.c` is precompiled to `build/bin/aot_entry.o`
+by Makefile.luac (target `aot-entry`); the linker prefers that object and only
+falls back to compiling the source in a cold tree. After editing aot_entry.c,
+rebuild via `build-luac.bat` (the Makefile dep handles it) — a stale .o links
+old startup code into every emitted PE.
 
 ## Testing discipline — READ THIS
 

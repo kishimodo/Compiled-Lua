@@ -29,6 +29,7 @@
  */
 #include "link/coff_write.h"
 #include "codegen/lc_codebuf.h"
+#include "runtime/protoblob_format.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -97,21 +98,34 @@ int LcCoff_Write( const char *path, const LcCodeModule *cm, char *err, size_t er
     CoffSym *syms = NULL;
     unsigned nsyms = 0, capsyms = 0;
     unsigned *text_off = NULL;     /* text offset of each function */
-    Buf text, reloc, strtab, obj;
-    unsigned have_rdata, num_sections, rdata_section_no;
-    unsigned ptr_text, ptr_rdata, ptr_reloc, ptr_symtab;
+    Buf text, reloc, strtab, obj, lcpb_reloc;
+    unsigned have_rdata, have_lcpb, num_sections, rdata_section_no, lcpb_section_no;
+    unsigned ptr_text, ptr_rdata, ptr_lcpb, ptr_reloc, ptr_lcpb_reloc, ptr_symtab;
     unsigned num_relocs = 0;
+    unsigned lcpb_fn_table_len = 0, lcpb_raw_len = 0;
 
-    memset( &text,   0, sizeof text );
-    memset( &reloc,  0, sizeof reloc );
-    memset( &strtab, 0, sizeof strtab );
-    memset( &obj,    0, sizeof obj );
+    memset( &text,       0, sizeof text );
+    memset( &reloc,      0, sizeof reloc );
+    memset( &strtab,     0, sizeof strtab );
+    memset( &obj,        0, sizeof obj );
+    memset( &lcpb_reloc, 0, sizeof lcpb_reloc );
 
     if ( !cm ) return fail( err, errlen, "null code module" );
 
     have_rdata       = ( cm->rodata && cm->rodata_len > 0 ) ? 1u : 0u;
     rdata_section_no = have_rdata ? 2u : 0u;
-    num_sections     = 1u + have_rdata;
+    /* .rdata$L (the ProtoInit blob section): luac_fn_table — nfuncs ADDR64-
+    ** relocated native body pointers — followed by the luac_protoblob bytes.
+    ** Grouped into .rdata by the linker (PE COFF $-section semantics). */
+    have_lcpb        = ( cm->protoblob && cm->protoblob_len > 0 ) ? 1u : 0u;
+    lcpb_section_no  = have_lcpb ? 2u + have_rdata : 0u;
+    num_sections     = 1u + have_rdata + have_lcpb;
+    if ( have_lcpb ) {
+        if ( cm->nfuncs > 0xFFFFu )
+            return fail( err, errlen, "too many functions for the fn-table reloc count" );
+        lcpb_fn_table_len = cm->nfuncs * 8u;
+        lcpb_raw_len      = lcpb_fn_table_len + ( unsigned )cm->protoblob_len;
+    }
 
     /* ---------------------------------------------------------------- */
     /* Pass 1: build the symbol table + .text raw, and add a name->index */
@@ -155,6 +169,33 @@ int LcCoff_Write( const char *path, const LcCodeModule *cm, char *err, size_t er
         syms[nsyms].section = ( int )rdata_section_no;
         syms[nsyms].type    = 0;
         syms[nsyms].storage = LC_IMAGE_SYM_CLASS_STATIC;
+        syms[nsyms].str_off = 0;
+        nsyms++;
+    }
+
+    /* luac_fn_table + luac_protoblob: the runtime deserializer's two anchors
+    ** into the .rdata$L section (EXTERNAL — referenced by protoinit_rt.o in
+    ** the runtime archive). */
+    if ( have_lcpb ) {
+        if ( nsyms + 2 > capsyms ) {
+            unsigned nc = capsyms ? capsyms * 2 : 16;
+            while ( nc < nsyms + 2 ) nc *= 2;
+            CoffSym *ns = ( CoffSym * )realloc( syms, nc * sizeof( CoffSym ) );
+            if ( !ns ) { fail( err, errlen, "oom" ); goto done; }
+            syms = ns; capsyms = nc;
+        }
+        syms[nsyms].name    = LCPB_SYM_FNTABLE;
+        syms[nsyms].value   = 0;                       /* section offset 0   */
+        syms[nsyms].section = ( int )lcpb_section_no;
+        syms[nsyms].type    = 0;
+        syms[nsyms].storage = LC_IMAGE_SYM_CLASS_EXTERNAL;
+        syms[nsyms].str_off = 0;
+        nsyms++;
+        syms[nsyms].name    = LCPB_SYM_BLOB;
+        syms[nsyms].value   = lcpb_fn_table_len;       /* right after the table */
+        syms[nsyms].section = ( int )lcpb_section_no;
+        syms[nsyms].type    = 0;
+        syms[nsyms].storage = LC_IMAGE_SYM_CLASS_EXTERNAL;
         syms[nsyms].str_off = 0;
         nsyms++;
     }
@@ -223,6 +264,17 @@ int LcCoff_Write( const char *path, const LcCodeModule *cm, char *err, size_t er
     if ( num_relocs > 0xFFFFu )
         { fail( err, errlen, "too many relocations (>0xFFFF; overflow form unsupported in M0)" ); goto done; }
 
+    /* .rdata$L relocations: ADDR64 at table slot i*8 -> defined function
+    ** symbol i (function symbols occupy table indices [0, nfuncs)). */
+    if ( have_lcpb ) {
+        for ( i = 0; i < cm->nfuncs; i++ ) {
+            if ( !put32( &lcpb_reloc, i * 8u ) ||   /* VirtualAddress   */
+                 !put32( &lcpb_reloc, i ) ||        /* SymbolTableIndex */
+                 !put16( &lcpb_reloc, LC_IMAGE_REL_AMD64_ADDR64 ) )
+            { fail( err, errlen, "oom" ); goto done; }
+        }
+    }
+
     /* ---------------------------------------------------------------- */
     /* String table: collect names > 8 chars. Starts with a 4-byte total */
     /* length prefix (includes itself), so the first string is at off 4. */
@@ -243,8 +295,10 @@ int LcCoff_Write( const char *path, const LcCodeModule *cm, char *err, size_t er
     /* ---------------------------------------------------------------- */
     ptr_text  = LC_SZ_FILE_HEADER + num_sections * LC_SZ_SECTION_HEADER;
     ptr_rdata = ptr_text + ( unsigned )text.len;
-    ptr_reloc = ptr_rdata + ( have_rdata ? ( unsigned )cm->rodata_len : 0u );
-    ptr_symtab = ptr_reloc + num_relocs * LC_SZ_RELOCATION;
+    ptr_lcpb  = ptr_rdata + ( have_rdata ? ( unsigned )cm->rodata_len : 0u );
+    ptr_reloc = ptr_lcpb + lcpb_raw_len;
+    ptr_lcpb_reloc = ptr_reloc + num_relocs * LC_SZ_RELOCATION;
+    ptr_symtab = ptr_lcpb_reloc + ( have_lcpb ? cm->nfuncs * LC_SZ_RELOCATION : 0u );
     /* string table follows the symbol table */
 
     /* ---------------------------------------------------------------- */
@@ -292,14 +346,44 @@ int LcCoff_Write( const char *path, const LcCodeModule *cm, char *err, size_t er
         { fail( err, errlen, "oom" ); goto done; }
     }
 
+    /* .rdata$L IMAGE_SECTION_HEADER (optional; fn table + ProtoInit blob) */
+    if ( have_lcpb ) {
+        char nm[8] = { '.','r','d','a','t','a','$','L' };
+        if ( !putn( &obj, nm, 8 ) ||
+             !put32( &obj, 0 ) ||                        /* VirtualSize          */
+             !put32( &obj, 0 ) ||                        /* VirtualAddress       */
+             !put32( &obj, lcpb_raw_len ) ||             /* SizeOfRawData        */
+             !put32( &obj, ptr_lcpb ) ||                 /* PointerToRawData     */
+             !put32( &obj, ptr_lcpb_reloc ) ||           /* PointerToRelocations */
+             !put32( &obj, 0 ) ||                        /* PointerToLinenumbers */
+             !put16( &obj, cm->nfuncs ) ||               /* NumberOfRelocations  */
+             !put16( &obj, 0 ) ||                        /* NumberOfLinenumbers  */
+             !put32( &obj, LC_IMAGE_SCN_CNT_INITIALIZED_DATA | LC_IMAGE_SCN_MEM_READ |
+                           LC_IMAGE_SCN_ALIGN_16BYTES ) )
+        { fail( err, errlen, "oom" ); goto done; }
+    }
+
     /* .text raw bytes */
     if ( text.len && !putn( &obj, text.p, text.len ) ) { fail( err, errlen, "oom" ); goto done; }
 
     /* .rdata raw bytes */
     if ( have_rdata && !putn( &obj, cm->rodata, cm->rodata_len ) ) { fail( err, errlen, "oom" ); goto done; }
 
+    /* .rdata$L raw bytes: the zero-filled fn table (the linker writes the
+    ** addresses via the ADDR64 relocs) followed by the blob. */
+    if ( have_lcpb ) {
+        for ( i = 0; i < lcpb_fn_table_len; i++ ) {
+            if ( !put8( &obj, 0 ) ) { fail( err, errlen, "oom" ); goto done; }
+        }
+        if ( !putn( &obj, cm->protoblob, cm->protoblob_len ) )
+        { fail( err, errlen, "oom" ); goto done; }
+    }
+
     /* .text relocations */
     if ( reloc.len && !putn( &obj, reloc.p, reloc.len ) ) { fail( err, errlen, "oom" ); goto done; }
+
+    /* .rdata$L relocations */
+    if ( lcpb_reloc.len && !putn( &obj, lcpb_reloc.p, lcpb_reloc.len ) ) { fail( err, errlen, "oom" ); goto done; }
 
     /* symbol table */
     for ( s = 0; s < nsyms; s++ ) {
@@ -335,6 +419,7 @@ int LcCoff_Write( const char *path, const LcCodeModule *cm, char *err, size_t er
 done:
     free( text.p );
     free( reloc.p );
+    free( lcpb_reloc.p );
     free( strtab.p );
     free( obj.p );
     free( syms );

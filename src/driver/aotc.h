@@ -16,6 +16,8 @@ typedef struct LcDriverOptions {
   int          opt_level;    /* -O0..-O3                                     */
   bool         emit_dll;
   bool         keep_ir;      /* dump IR for inspection (-S style)           */
+  bool         check_only;   /* stop after resolve + closed-world + op scan */
+  bool         keep_temps;   /* keep the intermediate .o (default: delete)  */
   const char **force_pkgs;   /* -L forced packages                          */
   int          nforce_pkgs;
 } LcDriverOptions;

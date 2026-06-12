@@ -1,11 +1,28 @@
 # CLua (LuaC) — Lua 5.4, Ahead-of-Time Compiled
 
 **CLua** is an ahead-of-time optimizing compiler for the Lua 5.4 language,
-targeting Windows x64. `aotc.exe` compiles a Lua program to **native x64
+targeting Windows x64. **`clua.exe`** compiles a Lua program to **native x64
 machine code at build time** and emits an ordinary PE — standard sections, no
 bytecode blob, no in-binary VM, no JIT. Your program ships as *code*, like a
 GCC-compiled C program (which links libc); CLua links a runtime *library*
 (GC, tables, strings, metatables, coroutines, FFI) the same way.
+
+```
+clua build app.lua            ->  app.exe   (optimized, -O1 default)
+clua run app.lua -- arg1      compile + run in one step
+clua check app.lua            front-end + closed-world check only
+```
+
+**`rover.exe`** is the package manager (init / add / install / publish, with
+lockfiles, Merkle integrity and signed registries) — and it is itself a
+CLua-compiled closed-world program, the largest fidelity fixture in the tree.
+
+The pipeline is in-memory, rustc-style: front-end, optimizer, codegen and the
+COFF object (including the serialized ProtoInit blob — no generated C) all
+happen inside `clua.exe`; the only external step is one native link. A
+hello-world builds in ~190 ms and weighs ~260 KB stripped — the emitted exe
+links a dedicated `runtime-aot.a` carrying **no JIT compiler and no Lua
+front-end** (`load`-family symbols are closed-world stubs).
 
 This is a standalone project, separated from its origin (**LuaVM**, the
 JIT-based v1, which lives in its own repository). The v1 interpreter and JIT
@@ -64,15 +81,25 @@ for the complete record, including what was deliberately *not* built and why.
 From PowerShell:
 
 ```
-cmd /c "build\build-luac.bat"             # builds everything incl. aotc.exe
+cmd /c "build\build-luac.bat"             # builds everything: clua.exe, rover.exe,
+                                          # aotc.exe, runtime-aot.a, oracle luavm.exe
 build\bin\luavm.exe tools\run-tests.lua   # full auto-discovered suite
 ```
 
-Compile a program:
+Compile a program (works from any directory — `clua.exe` finds its runtime
+libraries relative to itself, or via `CLUA_HOME`):
 
 ```
-build\bin\aotc.exe -O1 program.lua -o program.exe
+build\bin\clua.exe build program.lua          # -> program.exe (-O1 default)
+build\bin\clua.exe run program.lua -- args    # compile + run
 ```
+
+`aotc.exe` is the low-level driver the test infrastructure uses (same
+pipeline, flag-compatible with the original CLI: `-O0` default, `-o out.exe`).
+For a shippable user layout run `make -f build/Makefile.luac dist` from
+`build-luac.bat`'s environment — it produces `dist\` with `clua.exe`,
+`rover.exe`, `lib\` and a README; the only external requirement on a user
+machine is a MinGW-w64 gcc on PATH (or `CLUA_GCC`) for the final link.
 
 - Build spec & implementation prompt: [`PROMPT.md`](PROMPT.md)
 - Working notes & testing discipline: [`CLAUDE.md`](CLAUDE.md)
@@ -82,9 +109,13 @@ build\bin\aotc.exe -O1 program.lua -o program.exe
 ## Roadmap
 
 - **M4**: builtin-package bundling for compiled exes, shipped-runtime
-  `lvm.c` strip, self-contained PE writer (drop the MinGW `ld` dependency).
-- **Toolchain slimming**: the v1 JIT compiler inside this repo is oracle
-  infrastructure only; once the behavioral test layers run against compiled
-  exes, the JIT can be removed (the interpreter stays — it *is* the oracle).
+  `lvm.c` strip (the `luaV_execute` interpreter loop, ~15 KB, is still the
+  AOT dispatch trampoline), self-contained PE writer (drop the MinGW `ld`
+  dependency — the last external step).
+- **Toolchain slimming**: emitted exes already exclude the JIT compiler
+  (`runtime-aot.a`) and the Lua front-end (closed-world stubs). The v1 JIT
+  inside this repo is oracle infrastructure only; once the behavioral test
+  layers run against compiled exes, it can be removed from the tree too
+  (the interpreter stays — it *is* the oracle).
 - **Workload-gated**: scalar replacement of non-escaping tables (see the
   status doc for the honest valuation).

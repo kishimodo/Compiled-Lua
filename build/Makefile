@@ -164,6 +164,7 @@ RUNTIME_SRCS := \
     $(SRC_DIR)/runtime/blob_reader.c      \
     $(SRC_DIR)/runtime/coro.c             \
     $(SRC_DIR)/runtime/native_loader.c    \
+    $(SRC_DIR)/runtime/protoinit_rt.c     \
     $(SRC_DIR)/jit/exec_mem.c             \
     $(SRC_DIR)/jit/emit_x64.c             \
     $(SRC_DIR)/jit/runtime.c              \
@@ -219,6 +220,38 @@ $(BUILD_DIR)/obj-emb/%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)/obj-emb/runtime $(BUILD_
 $(BUILD_DIR)/runtime-embedded.a: $(RUNTIME_EMB_OBJS)
 	$(AR) rcs $@ $^
 
+# --- runtime -- AOT variant (closed-world, no JIT compiler) ----------------
+# The archive aotc/clua-emitted PEs link. Same embedded flags plus
+# -DLUAC_AOT_RUNTIME, and the JIT code-generator sources (codegen,
+# codegen_ffi, emit_x64, regalloc) are excluded entirely: dispatch.c
+# compiles cache-side only and jit/runtime.c's tail-call drive loop does a
+# lookup instead of compile-if-needed, so nothing references them and a
+# shipped exe carries no JIT compiler. luavm.exe and v1 compiler.exe PEs
+# keep the full JIT via runtime.a / runtime-embedded.a (unchanged).
+AOT_RT_SRCS := $(filter-out \
+    $(SRC_DIR)/jit/codegen.c \
+    $(SRC_DIR)/jit/codegen_ffi.c \
+    $(SRC_DIR)/jit/emit_x64.c \
+    $(SRC_DIR)/jit/regalloc.c,$(RUNTIME_SRCS))
+AOT_RT_CFLAGS := $(EMBEDDED_RT_CFLAGS) -DLUAC_AOT_RUNTIME=1
+RUNTIME_AOT_OBJS := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/obj-aot/%.o,$(AOT_RT_SRCS))
+
+$(BUILD_DIR)/obj-aot/runtime:
+	if not exist "$(BUILD_DIR)\obj-aot\runtime" mkdir "$(BUILD_DIR)\obj-aot\runtime"
+$(BUILD_DIR)/obj-aot/jit:
+	if not exist "$(BUILD_DIR)\obj-aot\jit" mkdir "$(BUILD_DIR)\obj-aot\jit"
+$(BUILD_DIR)/obj-aot/ffi:
+	if not exist "$(BUILD_DIR)\obj-aot\ffi" mkdir "$(BUILD_DIR)\obj-aot\ffi"
+
+$(BUILD_DIR)/obj-aot/%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)/obj-aot/runtime $(BUILD_DIR)/obj-aot/jit $(BUILD_DIR)/obj-aot/ffi
+	$(CC) $(AOT_RT_CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/runtime-aot.a: $(RUNTIME_AOT_OBJS)
+	$(AR) rcs $@ $^
+
+.PHONY: runtime-aot
+runtime-aot: $(BUILD_DIR)/runtime-aot.a
+
 # Package objects -- embedded variant. Defined later in the Makefile
 # (after packages.mk is included and PACKAGE_OBJS is populated) via a
 # static pattern rule, since GNU Make has a path-normalization quirk
@@ -228,7 +261,7 @@ $(BUILD_DIR)/obj-emb/runtime/packages:
 
 .PHONY: runtime-embedded packages-embedded embedded
 runtime-embedded: $(BUILD_DIR)/runtime-embedded.a
-embedded: lua-embedded runtime-embedded packages-embedded
+embedded: lua-embedded runtime-embedded runtime-aot packages-embedded
 
 # --- embedded packages ----------------------------------------------------
 # Lua sources under src/runtime/packages/ are compiled into the runtime

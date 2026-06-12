@@ -367,7 +367,7 @@ note above:
 ### Known bounded divergence (not a bug to fix per-test; use pcall in tests)
 
 - **AOT-ERRBANNER-001** — an UNCAUGHT runtime error prints
-  `luac: runtime error: <msg>` (no traceback) from a compiled exe, vs
+  `clua: runtime error: <msg>` (no traceback) from a compiled exe, vs
   `luavm: <msg>` + `stack traceback: …` under `luavm -i`. The `<msg>` itself
   (including `source:line:` and operand annotations) matches. Differential
   tests must assert error behavior through `pcall` (messages compare exactly);
@@ -405,3 +405,19 @@ Regression test: `tests/differential/aot_errpath_fidelity.lua` (both engines).
   compiler reflection caveat (LuaJIT behaves analogously); a fully sound guard
   would require killing proofs on any dynamic `_ENV`/`_G` indexing. Documented,
   accepted at -O1; `-O0` is always reflection-exact.
+
+- **AOT-CLOSEDWORLD-002** (2026-06-12) — compiled exes no longer link the Lua
+  front-end: `aot_entry.c` defines closed-world stubs for `luaY_parser` /
+  `luaU_undump` / `luaU_dump` / `luaX_init`, so ld never extracts
+  lparser/lcode/llex/lundump/ldump from the archive (~34 KB text per exe). A
+  program that EVADES the compile-time closed-world scan (e.g.
+  `_G["lo".."ad"]`) gets a runtime loader error — `load(...)` returns
+  `nil, "source chunk loading is disabled in a compiled CLua program (closed
+  world)"` — where `luavm -i` would parse and run the chunk. Legal programs
+  can never reach the stubs (`load`/`loadstring`/`dofile`/`string.dump` by
+  name are compile errors), so this is a bounded divergence of the same class
+  as AOT-DEBUGREFLECT-001. Guarded by tools/test-clua-cli.lua (asserts the
+  exact stub message and a lean-exe size canary). Same date, same mechanism:
+  emitted exes link `runtime-aot.a` (LUAC_AOT_RUNTIME), which carries the
+  dispatch CACHE but no JIT compiler (codegen/emit_x64/regalloc excluded;
+  the tail-call drive loop does lookup-only dispatch).

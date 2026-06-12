@@ -1,7 +1,14 @@
 #include "jit/dispatch.h"
-#include "jit/exec_mem.h"
+#include "jit/exec_mem.h"   /* unconditional: JIT_CACHE_ENTRY_T embeds EXEC_MEM_SLOT_T */
+/* LUAC_AOT_RUNTIME compiles this file cache-side only (runtime-aot.a, linked
+** into AOT-compiled exes): the compile path (Jit_Compile and its codegen/
+** regalloc dependencies) is excluded so a shipped exe carries no JIT compiler.
+** The default build (runtime.a / runtime-embedded.a for luavm.exe + v1 PEs)
+** is unchanged. */
+#ifndef LUAC_AOT_RUNTIME
 #include "jit/codegen.h"
 #include "jit/regalloc.h"
+#endif
 
 #include "ffi/veh.h"
 #include "lauxlib.h"
@@ -58,6 +65,7 @@ static void CacheHashInsert( int32_t Index, Proto *P ) {
     }
 }
 
+#ifndef LUAC_AOT_RUNTIME
 int Jit_IsOpcodeSupported( int Opcode ) {
     /* Set grows over sub-plans 2b–2f. 2a starts with: */
     switch ( Opcode ) {
@@ -160,6 +168,7 @@ static int AllOpcodesSupported( Proto *P ) {
     }
     return 1;
 }
+#endif /* !LUAC_AOT_RUNTIME */
 
 static PJIT_CACHE_ENTRY_T CacheFind( Proto *P ) {
     if ( !g_CacheHashReady ) { return NULL; }   /* nothing compiled yet */
@@ -178,6 +187,7 @@ JIT_FUNC_T Jit_LookupCached( Proto *P ) {
     return E != NULL ? E->Entry : NULL;
 }
 
+#ifndef LUAC_AOT_RUNTIME
 /* Anchor the currently-executing closure in the Lua registry under key P.
  * The JIT cache is keyed by Proto*, but Protos are GC'd objects. If a Proto
  * is collected and a new one is allocated at the same address, CacheFind
@@ -252,6 +262,7 @@ JIT_FUNC_T Jit_Compile( lua_State *L, Proto *P ) {
              ( void * )P, ( int )P->sizecode, Slot->Slot.Used );
     return Slot->Entry;
 }
+#endif /* !LUAC_AOT_RUNTIME */
 
 int Jit_RegisterCompiled( Proto *P, JIT_FUNC_T Entry ) {
     if ( P == NULL || Entry == NULL ) { return 0; }

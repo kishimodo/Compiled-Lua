@@ -34,8 +34,8 @@ if errorlevel 1 (
     goto :done
 )
 
-echo [*] linking aotc.exe...
-make -f build/Makefile.luac aotc
+echo [*] linking aotc.exe + clua.exe (+ aot_entry.o, rover.exe)...
+make -f build/Makefile.luac aotc aot-entry clua rover
 set RC=%ERRORLEVEL%
 
 :done

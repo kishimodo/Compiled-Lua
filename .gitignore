@@ -1,6 +1,7 @@
 build/bin/
 build/gen/
 build/tmp/
+dist/
 *.exe
 *.o
 *.a

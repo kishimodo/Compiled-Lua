@@ -818,7 +818,14 @@ int Rt_TailCall( lua_State *L, int A, int NArgs ) {
                frame is still live above). This is what the original tail path
                did; routing an uncompiled callee through luaV_execute instead
                loses its result count and breaks mutual/multi-value tail calls. */
+#ifdef LUAC_AOT_RUNTIME
+            /* Closed world: every reachable Proto's native body was registered
+               at startup, so lookup is sufficient; NULL falls back to
+               luaV_execute below exactly like a compile failure. */
+            JIT_FUNC_T Jitted = Jit_LookupCached( NewCl->p );
+#else
             JIT_FUNC_T Jitted = Jit_Compile( L, NewCl->p );
+#endif
             if ( Jitted == NULL ) {
                 /* Genuine compile failure (e.g. unsupported opcode): fall back to
                    the upstream interpreter, which runs the callee to completion. */

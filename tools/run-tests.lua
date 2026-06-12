@@ -150,6 +150,12 @@ local ARCHIVE_EXCLUDE = {
   -- aot_entry.c (added by a later task) defines main() for compiled PEs; it
   -- must stay out of the unit-test archive, like the other *_main objects.
   ["aot_entry.o"] = true,
+  -- clua_main.c is an empty TU without -DLUAC_CLUA_STANDALONE, but exclude it
+  -- defensively (it defines main() when that define is set).
+  ["clua_main.o"] = true,
+  -- protoinit_rt.c references luac_protoblob/luac_fn_table, which exist only
+  -- in aotc-emitted user objects -- never in a unit-test link.
+  ["protoinit_rt.o"] = true,
 }
 
 local function build_archive()

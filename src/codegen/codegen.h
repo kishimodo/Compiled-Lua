@@ -77,6 +77,12 @@ typedef struct LcCodeModule {
   uint32_t        nfuncs;
   uint8_t        *rodata;  /* pooled constants                                  */
   size_t          rodata_len;
+  /* LCPB ProtoInit blob (attached by the driver from LcBuildProtoBlob; owned
+  ** by this module, freed by lc_codemodule_free). When non-NULL the COFF
+  ** writer emits a .rdata$L section holding luac_fn_table (ADDR64-relocated
+  ** native body pointers, one per funcs[i]) followed by luac_protoblob. */
+  uint8_t        *protoblob;
+  size_t          protoblob_len;
 } LcCodeModule;
 
 /* Compile the optimized module. Each LcFunc -> one LcCompiledFunc. */

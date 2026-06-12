@@ -1,18 +1,21 @@
 /*
-** pe_link_v2.c — native link glue for the LuaC AOT driver (M0).
+** pe_link_v2.c — native link glue for the CLua AOT driver.
 **
-** See pe_link_v2.h. Three steps, each a MinGW gcc invocation via system():
-**   1. compile the generated ProtoInit C  -> luac_protoinit_<pid>.o
-**   2. compile src/runtime/aot_entry.c     -> luac_aotentry_<pid>.o
-**   3. link userObj + (1) + (2) + runtime-embedded.a + liblua54-embedded.a
-**      into the output PE (console subsystem).
+** See pe_link_v2.h. ONE MinGW gcc invocation links:
+**   userObj (luac_fn_<i> bodies + .rdata$L ProtoInit blob/fn-table)
+**   + aot_entry.o            (main(), AOT dispatch hook, closed-world stubs;
+**                             precompiled at toolchain build time — compiled
+**                             from source only as a cold-tree fallback)
+**   + runtime-aot.a          (Rt_* helpers, dispatch cache, coroutines, FFI,
+**                             protoinit_rt.o — NO JIT compiler)
+**   + liblua54-embedded.a    (the Lua core; the parser/lexer/dump members are
+**                             never extracted thanks to aot_entry's stubs)
+** into a stripped console PE.
 **
-** The link recipe matches the proven Task-2/12 spike (tests/unit/
-** test_lc_coff_spike.c link_probe + coff_probe_main.c): our own main() lives in
-** aot_entry.o, so ld does NOT pull the runtime archive's runtime_entry.o (and
-** thus not runtime_init.o / the undefined g_LuaBlob / Runtime_GetPackages blob
-** symbols). No -Wl,--strip-all (the AOT bodies are force-resolved by reference
-** from ProtoInit's `extern int luac_fn_<i>(lua_State*)`).
+** The link recipe descends from the proven Task-2/12 spike: our own main()
+** lives in aot_entry.o, so ld does NOT pull the runtime archive's
+** runtime_entry.o (and thus not runtime_init.o / the undefined g_LuaBlob /
+** Runtime_GetPackages blob symbols).
 */
 #include "link/pe_link_v2.h"
 
@@ -20,6 +23,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
+
+#include <windows.h>   /* GetModuleFileNameA */
 
 static void set_errv( char *err, size_t errlen, const char *fmt, ... ) {
     if ( err == NULL || errlen == 0 ) return;
@@ -29,90 +34,191 @@ static void set_errv( char *err, size_t errlen, const char *fmt, ... ) {
     va_end( ap );
 }
 
-/* The compile flags that match the base Makefile's runtime-embedded objects
-** (include dirs + the Windows-x64 target define). We deliberately do NOT pass
-** the -Os/-g0 hardening flags here: the per-build ProtoInit + aot_entry objects
-** only need to link correctly, and matching the include/target macros is what
-** keeps the Lua struct layouts identical to the archives. */
-#define LUAC_GCC          "x86_64-w64-mingw32-gcc"
-#define LUAC_INCLUDES     "-I./src -I./lua-5.4/src -I./build/gen"
-/* NB: do NOT pass -DLUA_USE_WINDOWS here — luaconf.h already defines it on a
-** Windows target, and passing it again triggers a redefinition warning. The
-** struct layouts that must match the archives are governed by the include dirs
-** + the target macro, not LUA_USE_WINDOWS. */
-#define LUAC_DEFINES      "-DLUAVM_TARGET_WINDOWS_X64=1 -DLUA_COMPAT_5_3"
+/* The compile flags used by the cold-tree aot_entry.c fallback. They match
+** the base Makefile's archive objects where it matters: the include dirs +
+** the Windows-x64 target define govern the Lua struct layouts. (NB: do NOT
+** pass -DLUA_USE_WINDOWS — luaconf.h already defines it on a Windows target.) */
+#define LUAC_DEFINES "-DLUAVM_TARGET_WINDOWS_X64=1 -DLUA_COMPAT_5_3 -DLUAC_AOT_RUNTIME=1"
 
-#define LUAC_RUNTIME_A    "build/bin/runtime-embedded.a"
-#define LUAC_LUALIB_A     "build/bin/liblua54-embedded.a"
-#define LUAC_AOT_ENTRY_C  "src/runtime/aot_entry.c"
+#define LC_PATH_MAX 1024
+
+typedef struct {
+    char runtime_a[ LC_PATH_MAX ];    /* runtime-aot.a                        */
+    char lualib_a[ LC_PATH_MAX ];     /* liblua54-embedded.a                  */
+    char aot_entry_o[ LC_PATH_MAX ];  /* precompiled entry ("" if not found)  */
+    char inc_src[ LC_PATH_MAX ];      /* -I dir containing jit/, runtime/     */
+    char inc_lua[ LC_PATH_MAX ];      /* -I dir containing lua.h              */
+    char aot_entry_c[ LC_PATH_MAX ];  /* fallback source ("" if not found)    */
+} LcToolchain;
+
+static int FileExists( const char *path ) {
+    FILE *f;
+    if ( path == NULL || path[0] == '\0' ) return 0;
+    f = fopen( path, "rb" );
+    if ( f == NULL ) return 0;
+    fclose( f );
+    return 1;
+}
+
+/* Try one root layout. `lib` is the subdirectory holding the archives
+** ("lib" for a dist tree, "" when the archives sit next to the root itself).
+** Returns 1 and fills `tc` if both archives are present. */
+static int TryRoot( LcToolchain *tc, const char *root, const char *lib,
+                    const char *inc_src, const char *inc_lua,
+                    const char *entry_c ) {
+    char a[ LC_PATH_MAX ], b[ LC_PATH_MAX ];
+    const char *sep = ( lib && lib[0] ) ? "\\" : "";
+    if ( lib == NULL ) lib = "";
+
+    snprintf( a, sizeof( a ), "%s\\%s%sruntime-aot.a", root, lib, sep );
+    snprintf( b, sizeof( b ), "%s\\%s%sliblua54-embedded.a", root, lib, sep );
+    if ( !FileExists( a ) || !FileExists( b ) ) return 0;
+
+    snprintf( tc->runtime_a, sizeof( tc->runtime_a ), "%s", a );
+    snprintf( tc->lualib_a,  sizeof( tc->lualib_a ),  "%s", b );
+    snprintf( tc->aot_entry_o, sizeof( tc->aot_entry_o ),
+              "%s\\%s%saot_entry.o", root, lib, sep );
+    if ( !FileExists( tc->aot_entry_o ) ) tc->aot_entry_o[0] = '\0';
+
+    /* cold-tree fallback inputs (optional — only needed when aot_entry.o is
+    ** absent): include dirs + the entry source, given relative to root. */
+    tc->inc_src[0] = tc->inc_lua[0] = tc->aot_entry_c[0] = '\0';
+    if ( inc_src ) snprintf( tc->inc_src, sizeof( tc->inc_src ), "%s\\%s", root, inc_src );
+    if ( inc_lua ) snprintf( tc->inc_lua, sizeof( tc->inc_lua ), "%s\\%s", root, inc_lua );
+    if ( entry_c ) {
+        snprintf( tc->aot_entry_c, sizeof( tc->aot_entry_c ), "%s\\%s", root, entry_c );
+        if ( !FileExists( tc->aot_entry_c ) ) tc->aot_entry_c[0] = '\0';
+    }
+    return 1;
+}
+
+/* Resolve the toolchain resources. Order:
+**   1. %CLUA_HOME%        (dist root: lib\*.a + lib\aot_entry.o)
+**   2. <exedir>           (dist roots: <exedir>\lib, <exedir>\..\lib)
+**   3. <exedir>           (repo: archives are SIBLINGS of the exe in build\bin)
+**   4. CWD                (repo: build\bin\*.a — the historical behavior)
+*/
+static int ResolveToolchain( LcToolchain *tc, char *err, size_t errlen ) {
+    char exedir[ LC_PATH_MAX ] = { 0 };
+    char parent[ LC_PATH_MAX ] = { 0 };
+    const char *home = getenv( "CLUA_HOME" );
+
+    memset( tc, 0, sizeof( *tc ) );
+
+    if ( home && home[0] ) {
+        if ( TryRoot( tc, home, "lib", "include", "include", NULL ) ) return 1;
+        /* a CLUA_HOME pointed at a repo checkout also works: */
+        if ( TryRoot( tc, home, "build\\bin", "src", "lua-5.4\\src",
+                      "src\\runtime\\aot_entry.c" ) ) return 1;
+        set_errv( err, errlen,
+                  "CLUA_HOME is set ('%s') but no toolchain found under it "
+                  "(expected lib\\runtime-aot.a + lib\\liblua54-embedded.a)",
+                  home );
+        return 0;
+    }
+
+    if ( GetModuleFileNameA( NULL, exedir, sizeof( exedir ) ) > 0 ) {
+        char *slash = strrchr( exedir, '\\' );
+        if ( slash ) {
+            *slash = '\0';
+            /* dist: <exedir>\lib\... (flat) */
+            if ( TryRoot( tc, exedir, "lib", "include", "include", NULL ) ) return 1;
+            /* repo: the archives sit next to the exe in build\bin; the repo
+            ** root is two levels up. */
+            if ( TryRoot( tc, exedir, "", "..\\..\\src", "..\\..\\lua-5.4\\src",
+                          "..\\..\\src\\runtime\\aot_entry.c" ) ) return 1;
+            /* dist: bin\clua.exe + ..\lib\... */
+            snprintf( parent, sizeof( parent ), "%s\\..", exedir );
+            if ( TryRoot( tc, parent, "lib", "include", "include", NULL ) ) return 1;
+        }
+    }
+
+    /* CWD repo layout (running from a repo root with copied binaries) */
+    if ( TryRoot( tc, ".", "build\\bin", "src", "lua-5.4\\src",
+                  "src\\runtime\\aot_entry.c" ) ) return 1;
+
+    set_errv( err, errlen,
+              "cannot locate the CLua runtime libraries (runtime-aot.a + "
+              "liblua54-embedded.a). Looked in %%CLUA_HOME%%\\lib, next to "
+              "the executable, <exedir>\\lib, <exedir>\\..\\lib, and "
+              ".\\build\\bin. Set CLUA_HOME to your CLua installation root." );
+    return 0;
+}
 
 static int run_cmd( const char *cmd ) {
-    /* system() returns the child's exit status (0 == success on success). */
+    /* system() returns the child's exit status (0 == success). */
     return system( cmd );
 }
 
-int LuacLink_LinkProgram( const char *userObj, const char *protoInitC,
-                          const char *outExe, char *err, size_t errlen ) {
-    char cmd[ 4096 ];
-    char protoObj[ 1024 ];
-    char entryObj[ 1024 ];
-    int  rc;
+/* gcc command: %CLUA_GCC% override, else the MinGW triplet on PATH. */
+static const char *GccCommand( void ) {
+    const char *g = getenv( "CLUA_GCC" );
+    return ( g && g[0] ) ? g : "x86_64-w64-mingw32-gcc";
+}
+
+int LuacLink_LinkProgram( const char *userObj, const char *outExe,
+                          char *err, size_t errlen ) {
+    char        cmd[ 4096 ];
+    char        entry_obj[ LC_PATH_MAX ];
+    LcToolchain tc;
+    int         rc;
 
     if ( err && errlen ) err[ 0 ] = '\0';
-    if ( userObj == NULL || protoInitC == NULL || outExe == NULL ) {
+    if ( userObj == NULL || outExe == NULL ) {
         set_errv( err, errlen, "LuacLink: NULL argument" );
         return 0;
     }
 
-    /* Derive sibling object paths from the ProtoInit C path (same tmp dir). */
-    snprintf( protoObj, sizeof( protoObj ), "%s.o", protoInitC );
-    {
-        /* place the aot_entry obj next to the user obj */
+    if ( !ResolveToolchain( &tc, err, errlen ) ) return 0;
+
+    /* Precompiled aot_entry.o, or the cold-tree fallback: compile it next to
+    ** the user object (one extra gcc step, dev-tree only). */
+    if ( tc.aot_entry_o[0] ) {
+        snprintf( entry_obj, sizeof( entry_obj ), "%s", tc.aot_entry_o );
+    } else {
         const char *dot = strrchr( userObj, '.' );
         size_t baselen = dot ? ( size_t )( dot - userObj ) : strlen( userObj );
-        if ( baselen + 16 >= sizeof( entryObj ) ) baselen = sizeof( entryObj ) - 16;
-        memcpy( entryObj, userObj, baselen );
-        entryObj[ baselen ] = '\0';
-        strncat( entryObj, "_entry.o", sizeof( entryObj ) - strlen( entryObj ) - 1 );
+        if ( !tc.aot_entry_c[0] || !tc.inc_src[0] || !tc.inc_lua[0] ) {
+            set_errv( err, errlen,
+                      "no precompiled aot_entry.o and no aot_entry.c fallback "
+                      "in the resolved toolchain ('%s') — rebuild with "
+                      "build\\build-luac.bat", tc.runtime_a );
+            return 0;
+        }
+        if ( baselen + 16 >= sizeof( entry_obj ) ) baselen = sizeof( entry_obj ) - 16;
+        memcpy( entry_obj, userObj, baselen );
+        entry_obj[ baselen ] = '\0';
+        strncat( entry_obj, "_entry.o", sizeof( entry_obj ) - strlen( entry_obj ) - 1 );
+        snprintf( cmd, sizeof( cmd ),
+                  "%s -std=c99 -I\"%s\" -I\"%s\" " LUAC_DEFINES
+                  " -c \"%s\" -o \"%s\"",
+                  GccCommand( ), tc.inc_src, tc.inc_lua, tc.aot_entry_c,
+                  entry_obj );
+        rc = run_cmd( cmd );
+        if ( rc != 0 ) {
+            set_errv( err, errlen,
+                      "compiling aot_entry.c failed (gcc rc=%d): %s", rc, cmd );
+            return 0;
+        }
     }
 
-    /* ---- 1. compile the generated ProtoInit C ---- */
+    /* ---- the single link ----
+    ** Order: user bodies+blob, aot_entry (main + closed-world stubs, defined
+    ** BEFORE the archives so the parser/lexer/dump members are never
+    ** extracted), runtime-aot.a (pulls protoinit_rt.o via
+    ** LuacProgram_BuildEntry), the Lua core, then the Win32 import libs.
+    ** -s strips symbols/debug info (~40% smaller PEs). */
     snprintf( cmd, sizeof( cmd ),
-              LUAC_GCC " -std=c99 " LUAC_INCLUDES " " LUAC_DEFINES
-              " -c \"%s\" -o \"%s\"",
-              protoInitC, protoObj );
-    rc = run_cmd( cmd );
-    if ( rc != 0 ) {
-        set_errv( err, errlen,
-                  "compiling ProtoInit C failed (gcc rc=%d): %s", rc, cmd );
-        return 0;
-    }
-
-    /* ---- 2. compile the AOT entry ---- */
-    snprintf( cmd, sizeof( cmd ),
-              LUAC_GCC " -std=c99 " LUAC_INCLUDES " " LUAC_DEFINES
-              " -c \"" LUAC_AOT_ENTRY_C "\" -o \"%s\"",
-              entryObj );
-    rc = run_cmd( cmd );
-    if ( rc != 0 ) {
-        set_errv( err, errlen,
-                  "compiling aot_entry.c failed (gcc rc=%d): %s", rc, cmd );
-        return 0;
-    }
-
-    /* ---- 3. link the program ----
-    ** Order: user bodies, ProtoInit (references luac_fn_<i>, keeping the bodies),
-    ** aot_entry (supplies main + references LuacProgram_BuildEntry), then the
-    ** runtime + lua archives, then the Win32 import libs the runtime needs. */
-    snprintf( cmd, sizeof( cmd ),
-              LUAC_GCC " -o \"%s\" \"%s\" \"%s\" \"%s\" "
-              LUAC_RUNTIME_A " " LUAC_LUALIB_A " "
-              "-Wl,--subsystem,console "
+              "%s -o \"%s\" \"%s\" \"%s\" \"%s\" \"%s\" "
+              "-Wl,--subsystem,console -s "
               "-lm -lkernel32 -ladvapi32 -liphlpapi -lpsapi",
-              outExe, userObj, protoObj, entryObj );
+              GccCommand( ), outExe, userObj, entry_obj,
+              tc.runtime_a, tc.lualib_a );
     rc = run_cmd( cmd );
     if ( rc != 0 ) {
-        set_errv( err, errlen, "link failed (gcc rc=%d): %s", rc, cmd );
+        set_errv( err, errlen,
+                  "link failed (gcc rc=%d; is MinGW-w64 gcc on PATH, or set "
+                  "CLUA_GCC): %s", rc, cmd );
         return 0;
     }
 

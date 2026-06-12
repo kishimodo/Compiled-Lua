@@ -61,3 +61,61 @@ $(BUILD_DIR)/aotc.exe: $(AOTC_MAIN_OBJ) $(BACKEND_OBJS) $(FRONTEND_OBJS) $(BUILD
 
 .PHONY: aotc
 aotc: $(BUILD_DIR)/aotc.exe
+
+# --- precompiled AOT entry object -------------------------------------------
+# main() + the AOT dispatch hook + the closed-world stubs for every compiled
+# program. Built ONCE here so user builds skip the per-program gcc compile;
+# pe_link_v2.c resolves it next to the archives (and falls back to compiling
+# the source in a cold tree). Flags must match the embedded archives' ABI
+# surface: include dirs + LUAVM_TARGET_WINDOWS_X64 (+ LUA_COMPAT_5_3) govern
+# the Lua struct layouts.
+$(BUILD_DIR)/aot_entry.o: $(SRC_DIR)/runtime/aot_entry.c
+	$(CC) -std=c99 -I$(SRC_DIR) -I$(LUA_DIR) \
+	    -DLUAVM_TARGET_WINDOWS_X64=1 -DLUA_COMPAT_5_3 -DLUAC_AOT_RUNTIME=1 \
+	    -c $< -o $@
+
+.PHONY: aot-entry
+aot-entry: $(BUILD_DIR)/aot_entry.o
+
+# --- clua.exe — the user-facing toolchain front-end --------------------------
+# Same pipeline as aotc.exe (shared lc_drive in the plain obj/driver/main.o,
+# which has no main()), plus the subcommand CLI compiled standalone.
+CLUA_MAIN_OBJ := $(BUILD_DIR)/obj-aotc/clua_main.o
+
+$(CLUA_MAIN_OBJ): $(SRC_DIR)/driver/clua_main.c | $(BUILD_DIR)/obj-aotc
+	$(CC) $(CFLAGS) -DLUAC_CLUA_STANDALONE -c $< -o $@
+
+$(BUILD_DIR)/clua.exe: $(CLUA_MAIN_OBJ) $(BUILD_DIR)/obj/driver/main.o $(BACKEND_OBJS) $(FRONTEND_OBJS) $(BUILD_DIR)/liblua54.a $(BUILD_DIR)/aot_entry.o
+	$(CC) $(CFLAGS) -o $@ $(CLUA_MAIN_OBJ) $(BUILD_DIR)/obj/driver/main.o \
+	    $(BACKEND_OBJS) $(FRONTEND_OBJS) \
+	    $(BUILD_DIR)/liblua54.a -lm -lkernel32 -ladvapi32
+
+.PHONY: clua
+clua: $(BUILD_DIR)/clua.exe
+
+# --- rover.exe — the CLua package manager, compiled by CLua itself -----------
+# Dogfood: rover is an AOT-compiled closed-world Lua program (the largest
+# fidelity fixture in the tree). Needs the archives + aot_entry.o + gcc on
+# PATH (build-luac.bat arranges all three).
+$(BUILD_DIR)/rover.exe: $(BUILD_DIR)/clua.exe $(BUILD_DIR)/aot_entry.o $(ROOT)/package-manager/src/luavm-pkg.lua
+	$(BUILD_DIR)/clua.exe build $(ROOT)/package-manager/src/luavm-pkg.lua -O1 -o $@
+
+.PHONY: rover
+rover: $(BUILD_DIR)/rover.exe
+
+# --- dist — the user-facing distribution layout ------------------------------
+#   dist\clua.exe  dist\rover.exe  dist\lib\{runtime-aot.a,liblua54-embedded.a,
+#   aot_entry.o}  dist\README.txt
+# No headers ship: the ProtoInit blob killed the generated-C compile step, so
+# a user build is front-end + in-process codegen + ONE native link.
+.PHONY: dist
+dist: $(BUILD_DIR)/clua.exe $(BUILD_DIR)/rover.exe $(BUILD_DIR)/aot_entry.o
+	if not exist "$(ROOT)\dist\lib" mkdir "$(ROOT)\dist\lib"
+	copy /Y "$(BUILD_DIR)\clua.exe"            "$(ROOT)\dist\clua.exe" >nul
+	copy /Y "$(BUILD_DIR)\rover.exe"           "$(ROOT)\dist\rover.exe" >nul
+	copy /Y "$(BUILD_DIR)\runtime-aot.a"       "$(ROOT)\dist\lib\runtime-aot.a" >nul
+	copy /Y "$(BUILD_DIR)\liblua54-embedded.a" "$(ROOT)\dist\lib\liblua54-embedded.a" >nul
+	copy /Y "$(BUILD_DIR)\aot_entry.o"         "$(ROOT)\dist\lib\aot_entry.o" >nul
+	copy /Y "$(ROOT)\build\dist-README.txt"    "$(ROOT)\dist\README.txt" >nul
+	strip "$(ROOT)\dist\clua.exe"
+	@echo [+] dist\ ready (clua.exe + rover.exe + lib\)
