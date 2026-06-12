@@ -50,6 +50,12 @@ static void usage( FILE *to ) {
         "  -O0|-O1|-O2      optimization level (default: -O1)\n"
         "  -L <pkg>         force-bundle a package\n"
         "  --keep-temps     keep the intermediate object file\n"
+        "  --shared-rt      link against the shared runtime (clua-rt.dll)\n"
+        "                   instead of the static archives: ~30 KB exes for\n"
+        "                   many-tool workspaces. The exe needs clua-rt.dll\n"
+        "                   beside it (or on PATH) at run time — copy it from\n"
+        "                   <toolchain>\\lib\\ (repo: build\\bin\\). Default\n"
+        "                   stays fully static, single-file.\n"
         "\n"
         "environment:\n"
         "  CLUA_HOME        CLua installation root (lib\\runtime-aot.a ...)\n"
@@ -101,6 +107,8 @@ static int parse_build_args( CluaArgs *a, int argc, char **argv, int from,
             a->opt.opt_level = 1;
         } else if ( strcmp( s, "--keep-temps" ) == 0 ) {
             a->opt.keep_temps = true;
+        } else if ( strcmp( s, "--shared-rt" ) == 0 ) {
+            a->opt.shared_rt = true;
         } else if ( ( strcmp( s, "-L" ) == 0 || strcmp( s, "--link" ) == 0 )
                     && i + 1 < argc ) {
             if ( nforce < 63 ) {

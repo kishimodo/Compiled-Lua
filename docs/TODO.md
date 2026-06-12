@@ -26,9 +26,13 @@ the honest valuation from the optimizer status doc), and **stale markers**
    differential still guards the shared `Rt_*` helpers until then).
 6. **AOT-ERRBANNER-001 polish:** a traceback-printing message handler in
    `aot_entry.c` would narrow the uncaught-error divergence vs the oracle.
-7. **Shared `clua-rt.dll` option** for ~20–30 KB per-program exes (runtime
+7. ~~**Shared `clua-rt.dll` option** for ~20–30 KB per-program exes (runtime
    ships once). Real export-surface engineering; valuable for many-tool
-   workspaces.
+   workspaces.~~ **DONE 2026-06-12:** `clua build --shared-rt` links against
+   `clua-rt.dll` (full runtime + Lua core, no front-end, full interpreter;
+   `--export-all-symbols` + import lib, data hooks via auto-import
+   pseudo-relocs; `protoinit_rt.o` stays per-exe). Hello-world ~30 KB.
+   Static remains the default, byte-for-byte unchanged.
 8. `coff_write.c`: function `.text` entries are concatenated tight (16-byte
    section alignment only); per-function alignment is a micro-polish noted
    in its header.

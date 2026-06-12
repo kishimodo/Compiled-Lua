@@ -128,6 +128,79 @@ print(mt.hello)
   os.remove(src); os.remove(exe)
 end
 
+-- ---- 3b. --shared-rt: the OPT-IN shared runtime (clua-rt.dll) ----
+-- Static stays the default (section 3 above is untouched); --shared-rt links
+-- the exe against clua-rt.dll instead of the static archives. Checks: the
+-- exe is tiny (< 40 KB), runs with the DLL beside it, prints EXACTLY what
+-- the static build prints, the closed-world stub still answers (the DLL
+-- carries the stubs, not the parser), and the AOT-MULTIMOD-001 GC fix holds
+-- under the DLL (150-module startup blob volume vs the -i oracle).
+do
+  local dll = ROOT .. "\\build\\bin\\clua-rt.dll"
+  if not exists(dll) then
+    print("[~] SKIP --shared-rt checks (build\\bin\\clua-rt.dll not built; run build\\build-luac.bat)")
+  else
+    run(("copy /Y \"%s\" \"%s\\clua-rt.dll\" >nul"):format(dll, TEMP))
+
+    local src  = TEMP .. "\\clua_t_shared.lua"
+    local sexe = TEMP .. "\\clua_t_shared.exe"
+    local xexe = TEMP .. "\\clua_t_shared_static.exe"
+    writefile(src, [[
+local t = {}
+for i = 1, 10 do t[#t+1] = i * i end
+print(table.concat(t, ","))
+print(("fmt %d %s %.3f"):format(42, "x", 1.5))
+local mt = setmetatable({}, { __index = function(_, k) return k .. "!" end })
+print(mt.hello)
+local co = coroutine.wrap(function() coroutine.yield("from-coro") end)
+print(co())
+]])
+    local c1, o1 = run(("\"%s\" build \"%s\" -o \"%s\" --shared-rt")
+                       :format(clua_abs, src, sexe))
+    ok(c1 == 0, "clua build --shared-rt links against clua-rt.dll", o1)
+    local f = io.open(sexe, "rb")
+    local size = f and f:seek("end") or -1
+    if f then f:close() end
+    ok(size > 0 and size < 40 * 1024, "--shared-rt exe is tiny (< 40 KB)",
+       ("size=%d"):format(size))
+    local c2, o2 = run(("\"%s\" build \"%s\" -o \"%s\""):format(clua_abs, src, xexe))
+    local c3, shared_out = run(("\"%s\""):format(sexe))
+    local c4, static_out = run(("\"%s\""):format(xexe))
+    ok(c2 == 0 and c3 == 0 and c4 == 0 and #shared_out > 0
+       and shared_out == static_out,
+       "--shared-rt output matches the static build",
+       ("shared=%q static=%q"):format(shared_out:sub(1, 80), static_out:sub(1, 80)))
+    os.remove(src); os.remove(sexe); os.remove(xexe)
+
+    -- closed-world stub under the DLL (AOT-CLOSEDWORLD-002): the shared
+    -- runtime ships closed_world_stubs.o, NOT the parser
+    local esrc = TEMP .. "\\clua_t_shared_evade.lua"
+    local eexe = TEMP .. "\\clua_t_shared_evade.exe"
+    writefile(esrc, 'local f = _G["lo".."ad"]\nprint(pcall(f, "return 1"))\n')
+    local c5, o5 = run(("\"%s\" build \"%s\" -o \"%s\" --shared-rt")
+                       :format(clua_abs, esrc, eexe))
+    local c6, o6 = run(("\"%s\""):format(eexe))
+    ok(c5 == 0 and c6 == 0 and o6:find(
+         "source chunk loading is disabled in a compiled CLua program", 1, true) ~= nil,
+       "closed-world stub answers evading load() under --shared-rt", o6)
+    os.remove(esrc); os.remove(eexe)
+
+    -- AOT-MULTIMOD-001 coverage under the DLL: enough startup blob volume to
+    -- complete a GC cycle mid-build; output must match the -i oracle exactly
+    local mexe = TEMP .. "\\clua_t_mm_shared.exe"
+    local c7, o7 = run(("\"%s\" build tests\\differential\\aot_multimod.lua -o \"%s\" --shared-rt")
+                       :format(clua_abs, mexe))
+    ok(c7 == 0, "clua build --shared-rt compiles aot_multimod (150 modules)", o7)
+    local c8, mm_native = run(("\"%s\""):format(mexe))
+    local c9, mm_oracle = run(("\"%s\" -i tests\\differential\\aot_multimod.lua"):format(luavm_abs))
+    ok(c8 == 0 and c9 == 0 and #mm_native > 0 and mm_native == mm_oracle,
+       "--shared-rt aot_multimod matches luavm -i (GC fix holds under the DLL)",
+       ("native=%q oracle=%q"):format(mm_native:sub(1, 80), mm_oracle:sub(1, 80)))
+    os.remove(mexe)
+    run(("del /q \"%s\\clua-rt.dll\" 2>nul"):format(TEMP))
+  end
+end
+
 -- ---- 4. clua run: args reach the program's arg global, exit code forwards ----
 do
   local src = TEMP .. "\\clua_t_run.lua"

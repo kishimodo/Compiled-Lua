@@ -12,6 +12,10 @@
 **                             never extracted thanks to aot_entry's stubs)
 ** into a stripped console PE.
 **
+** Opt-in alternative (--shared-rt): the same userObj + aot_entry.o, plus a
+** loose protoinit_rt.o, link against libclua-rt.dll.a instead of the static
+** archives — a ~30 KB exe that loads the shared clua-rt.dll at run time.
+**
 ** The link recipe descends from the proven Task-2/12 spike: our own main()
 ** lives in aot_entry.o, so ld does NOT pull the runtime archive's
 ** runtime_entry.o (and thus not runtime_init.o / the undefined g_LuaBlob /
@@ -47,6 +51,8 @@ typedef struct {
     char lualib_a[ LC_PATH_MAX ];     /* liblua54-embedded.a                  */
     char aot_entry_o[ LC_PATH_MAX ];  /* precompiled entry ("" if not found)  */
     char lvm_nointerp_o[ LC_PATH_MAX ]; /* interpreter-free lvm ("" if absent)*/
+    char rt_implib[ LC_PATH_MAX ];    /* libclua-rt.dll.a ("" if absent)      */
+    char protoinit_o[ LC_PATH_MAX ];  /* loose protoinit_rt.o ("" if absent)  */
     char inc_src[ LC_PATH_MAX ];      /* -I dir containing jit/, runtime/     */
     char inc_lua[ LC_PATH_MAX ];      /* -I dir containing lua.h              */
     char aot_entry_c[ LC_PATH_MAX ];  /* fallback source ("" if not found)    */
@@ -83,6 +89,13 @@ static int TryRoot( LcToolchain *tc, const char *root, const char *lib,
     snprintf( tc->lvm_nointerp_o, sizeof( tc->lvm_nointerp_o ),
               "%s\\%s%slvm_nointerp.o", root, lib, sep );
     if ( !FileExists( tc->lvm_nointerp_o ) ) tc->lvm_nointerp_o[0] = '\0';
+    /* shared-runtime pieces (only required for --shared-rt links) */
+    snprintf( tc->rt_implib, sizeof( tc->rt_implib ),
+              "%s\\%s%slibclua-rt.dll.a", root, lib, sep );
+    if ( !FileExists( tc->rt_implib ) ) tc->rt_implib[0] = '\0';
+    snprintf( tc->protoinit_o, sizeof( tc->protoinit_o ),
+              "%s\\%s%sprotoinit_rt.o", root, lib, sep );
+    if ( !FileExists( tc->protoinit_o ) ) tc->protoinit_o[0] = '\0';
 
     /* cold-tree fallback inputs (optional — only needed when aot_entry.o is
     ** absent): include dirs + the entry source, given relative to root. */
@@ -160,7 +173,7 @@ static const char *GccCommand( void ) {
 }
 
 int LuacLink_LinkProgram( const char *userObj, const char *outExe,
-                          int no_interp, int require_ffi,
+                          int no_interp, int require_ffi, int shared_rt,
                           char *err, size_t errlen ) {
     char        cmd[ 4096 ];
     char        entry_obj[ LC_PATH_MAX ];
@@ -205,6 +218,40 @@ int LuacLink_LinkProgram( const char *userObj, const char *outExe,
                       "compiling aot_entry.c failed (gcc rc=%d): %s", rc, cmd );
             return 0;
         }
+    }
+
+    /* ---- the shared-runtime link (--shared-rt) ----
+    ** userObj + aot_entry.o + protoinit_rt.o (the LCPB deserializer reads
+    ** luac_protoblob/luac_fn_table from the user object, so it must live in
+    ** the exe — a DLL cannot import from its host) against the clua-rt.dll
+    ** import lib. Function calls resolve through import thunks; the
+    ** clua_dispatch_hook/clua_invoke_hook data writes resolve via MinGW
+    ** auto-import pseudo-relocs. No lvm_nointerp / --gc-sections here: the
+    ** DLL carries the full runtime (interpreter included) once, shared by
+    ** every --shared-rt exe; the exe itself has nothing left to shake. */
+    if ( shared_rt ) {
+        if ( !tc.rt_implib[0] || !tc.protoinit_o[0] ) {
+            set_errv( err, errlen,
+                      "--shared-rt: libclua-rt.dll.a / protoinit_rt.o not "
+                      "found next to '%s' — rebuild with build\\build-luac.bat "
+                      "(repo) or install a dist with lib\\clua-rt.dll",
+                      tc.runtime_a );
+            return 0;
+        }
+        snprintf( cmd, sizeof( cmd ),
+                  "%s -o \"%s\" \"%s\" \"%s\" \"%s\" %s\"%s\" "
+                  "-Wl,--subsystem,console -s -lm -lkernel32 -ladvapi32",
+                  GccCommand( ), outExe, userObj, entry_obj, tc.protoinit_o,
+                  require_ffi ? "-Wl,--undefined=Clua_OpenFfi " : "",
+                  tc.rt_implib );
+        rc = run_cmd( cmd );
+        if ( rc != 0 ) {
+            set_errv( err, errlen,
+                      "shared-rt link failed (gcc rc=%d; is MinGW-w64 gcc on "
+                      "PATH, or set CLUA_GCC): %s", rc, cmd );
+            return 0;
+        }
+        return 1;
     }
 
     /* Interpreter selection: a program whose closed-world scan proves it

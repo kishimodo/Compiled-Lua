@@ -12,6 +12,12 @@ Quick start
   clua check app.lua            front-end + closed-world check only
   clua help                     all options
 
+Shared runtime (optional)
+  clua build app.lua --shared-rt links a ~30 KB exe against lib\clua-rt.dll
+  instead of the static runtime — handy when shipping many small tools.
+  Copy clua-rt.dll next to your exe (or put it on PATH). The default build
+  stays fully static and single-file.
+
   rover init                    start a project (luavm.toml)
   rover add <package>           add a dependency
   rover install                 reproducible install from the lockfile

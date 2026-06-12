@@ -18,6 +18,9 @@ typedef struct LcDriverOptions {
   bool         keep_ir;      /* dump IR for inspection (-S style)           */
   bool         check_only;   /* stop after resolve + closed-world + op scan */
   bool         keep_temps;   /* keep the intermediate .o (default: delete)  */
+  bool         shared_rt;    /* link against clua-rt.dll instead of the
+                                static archives (--shared-rt; small exe,
+                                needs the DLL beside it at run time)       */
   const char **force_pkgs;   /* -L forced packages                          */
   int          nforce_pkgs;
 } LcDriverOptions;

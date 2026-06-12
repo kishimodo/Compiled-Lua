@@ -266,6 +266,55 @@ $(BUILD_DIR)/runtime-aot.a: $(RUNTIME_AOT_OBJS)
 .PHONY: runtime-aot
 runtime-aot: $(BUILD_DIR)/runtime-aot.a
 
+# --- clua-rt.dll -- the OPT-IN shared runtime (clua build --shared-rt) -----
+# One DLL carrying the full AOT runtime + Lua core so many small tools don't
+# each duplicate the ~180 KB static runtime. Composition mirrors what a
+# static AOT exe links, except:
+#   * the v1 blob-boot objects (runtime_entry/runtime_init/embedded_loader/
+#     blob_reader/native_loader) stay out -- they reference per-build blob
+#     symbols (g_LuaBlob, Runtime_GetPackages) that don't exist here;
+#   * protoinit_rt.o stays out and is linked INTO each exe instead -- it
+#     reads luac_protoblob/luac_fn_table, defined in the user object (a DLL
+#     cannot import from the exe); a loose copy is published next to the
+#     archives for pe_link_v2.c to find;
+#   * the Lua front-end members (lparser/llex/lcode/ldump/lundump) stay out
+#     (closed world); closed_world_stubs.o answers ldo/lstate/lapi's
+#     luaY_parser/luaU_undump/luaU_dump/luaX_init references DLL-internally;
+#   * the FULL lvm.o is in (no nointerp variant): debug-using programs share
+#     the same DLL, so the bytecode interpreter must exist.
+# --export-all-symbols + the import lib give the exe-side link every
+# function (call thunks) and data symbol (clua_dispatch_hook/clua_invoke_hook
+# via MinGW auto-import pseudo-relocs -- the CRT's runtime relocator ships in
+# every mingw exe). -static-libgcc keeps the DLL itself dependency-free.
+CLUA_RT_LUA_OBJS := $(filter-out \
+    $(BUILD_DIR)/lua-emb/lparser.o \
+    $(BUILD_DIR)/lua-emb/llex.o \
+    $(BUILD_DIR)/lua-emb/lcode.o \
+    $(BUILD_DIR)/lua-emb/ldump.o \
+    $(BUILD_DIR)/lua-emb/lundump.o,$(LUA_EMB_OBJS))
+CLUA_RT_RUNTIME_OBJS := $(filter-out \
+    $(BUILD_DIR)/obj-aot/runtime/runtime_entry.o \
+    $(BUILD_DIR)/obj-aot/runtime/runtime_init.o \
+    $(BUILD_DIR)/obj-aot/runtime/embedded_loader.o \
+    $(BUILD_DIR)/obj-aot/runtime/blob_reader.o \
+    $(BUILD_DIR)/obj-aot/runtime/native_loader.o \
+    $(BUILD_DIR)/obj-aot/runtime/protoinit_rt.o,$(RUNTIME_AOT_OBJS)) \
+    $(BUILD_DIR)/obj-aot/runtime/closed_world_stubs.o
+
+$(BUILD_DIR)/clua-rt.dll: $(CLUA_RT_RUNTIME_OBJS) $(CLUA_RT_LUA_OBJS)
+	$(CC) -shared -o $@ $(CLUA_RT_RUNTIME_OBJS) $(CLUA_RT_LUA_OBJS) \
+	    -Wl,--out-implib,$(BUILD_DIR)/libclua-rt.dll.a \
+	    -Wl,--export-all-symbols -static-libgcc -s \
+	    -lm -lkernel32 -ladvapi32
+
+# Loose protoinit_rt.o next to the archives: the per-exe deserializer every
+# --shared-rt link adds (in static links it comes out of runtime-aot.a).
+$(BUILD_DIR)/protoinit_rt.o: $(BUILD_DIR)/obj-aot/runtime/protoinit_rt.o
+	copy /Y "$(BUILD_DIR)\obj-aot\runtime\protoinit_rt.o" "$(BUILD_DIR)\protoinit_rt.o" >nul
+
+.PHONY: clua-rt
+clua-rt: $(BUILD_DIR)/clua-rt.dll $(BUILD_DIR)/protoinit_rt.o
+
 # Package objects -- embedded variant. Defined later in the Makefile
 # (after packages.mk is included and PACKAGE_OBJS is populated) via a
 # static pattern rule, since GNU Make has a path-normalization quirk
@@ -275,7 +324,7 @@ $(BUILD_DIR)/obj-emb/runtime/packages:
 
 .PHONY: runtime-embedded packages-embedded embedded
 runtime-embedded: $(BUILD_DIR)/runtime-embedded.a
-embedded: lua-embedded runtime-embedded runtime-aot packages-embedded
+embedded: lua-embedded runtime-embedded runtime-aot packages-embedded clua-rt
 
 # --- embedded packages ----------------------------------------------------
 # Lua sources under src/runtime/packages/ are compiled into the runtime

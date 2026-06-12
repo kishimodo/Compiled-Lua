@@ -117,6 +117,9 @@ dist: $(BUILD_DIR)/clua.exe $(BUILD_DIR)/rover.exe $(BUILD_DIR)/aot_entry.o
 	copy /Y "$(BUILD_DIR)\liblua54-embedded.a" "$(ROOT)\dist\lib\liblua54-embedded.a" >nul
 	copy /Y "$(BUILD_DIR)\aot_entry.o"         "$(ROOT)\dist\lib\aot_entry.o" >nul
 	copy /Y "$(BUILD_DIR)\lvm_nointerp.o"      "$(ROOT)\dist\lib\lvm_nointerp.o" >nul
+	copy /Y "$(BUILD_DIR)\clua-rt.dll"         "$(ROOT)\dist\lib\clua-rt.dll" >nul
+	copy /Y "$(BUILD_DIR)\libclua-rt.dll.a"    "$(ROOT)\dist\lib\libclua-rt.dll.a" >nul
+	copy /Y "$(BUILD_DIR)\protoinit_rt.o"      "$(ROOT)\dist\lib\protoinit_rt.o" >nul
 	if not exist "$(ROOT)\dist\lib\packages" mkdir "$(ROOT)\dist\lib\packages"
 	xcopy /E /I /Y /Q "$(ROOT)\clua\src\runtime\packages" "$(ROOT)\dist\lib\packages" >nul
 	copy /Y "$(ROOT)\build\dist-README.txt"    "$(ROOT)\dist\README.txt" >nul

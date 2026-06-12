@@ -320,6 +320,7 @@ int lc_drive( const LcDriverOptions *opt ) {
         if ( !LuacLink_LinkProgram( obj_path, opt->output,
                                     !lc_module_uses_debug( m ),
                                     res.RequiresFfi || lc_module_uses_ffi( m ),
+                                    opt->shared_rt,
                                     err, sizeof( err ) ) ) {
             fprintf( stderr, "aotc: error: link failed: %s\n",
                      err[0] ? err : "(unknown)" );
@@ -349,7 +350,8 @@ cleanup:
 static void usage( const char *argv0 ) {
     fprintf( stderr,
              "aotc (LuaC) — Lua 5.4 -> native Windows x64 PE\n"
-             "usage: %s <main.lua> [-o output.exe] [-O<n>] [-L <pkg>]...\n",
+             "usage: %s <main.lua> [-o output.exe] [-O<n>] [-L <pkg>]... "
+             "[--shared-rt]\n",
              argv0 );
 }
 
@@ -372,6 +374,8 @@ int main( int argc, char **argv ) {
             opt.opt_level = 1;
         } else if ( strcmp( a, "--dll" ) == 0 ) {
             opt.emit_dll = true;
+        } else if ( strcmp( a, "--shared-rt" ) == 0 ) {
+            opt.shared_rt = true;
         } else if ( ( strcmp( a, "-L" ) == 0 || strcmp( a, "--link" ) == 0 )
                     && i + 1 < argc ) {
             if ( nforce < 63 ) {

@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### clua
+
+- **Opt-in shared runtime: `clua build --shared-rt`** (also on `aotc`). Links
+  the program against a new `clua-rt.dll` (the full AOT runtime + Lua core,
+  built once, shipped in `lib\`) instead of the static archives, dropping a
+  hello-world from ~186 KB to ~30 KB — for workspaces with many small tools,
+  the runtime ships once instead of per-exe. The exe needs `clua-rt.dll`
+  beside it (or on PATH) at run time. Composition mirrors a static exe's
+  link: no Lua front-end (the closed-world stubs moved to
+  `clua/src/runtime/closed_world_stubs.c`, textually included by
+  `aot_entry.c` so static links are unchanged, and compiled standalone into
+  the DLL), no v1 blob-boot objects, and the FULL interpreter (debug-using
+  programs share the same DLL, so `lvm_nointerp` does not apply).
+  `protoinit_rt.o` links into each exe (it reads `luac_protoblob`/
+  `luac_fn_table` from the user object — a DLL cannot import from its host).
+  **Static linking stays the default and is byte-for-byte unaffected.**
+  `dist\lib\` now ships `clua-rt.dll` + `libclua-rt.dll.a` + `protoinit_rt.o`.
+
 ### rover
 
 - **Official registry default** (Go/cargo-style DX): with no `--registry`
