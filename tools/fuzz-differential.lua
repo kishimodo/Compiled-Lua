@@ -1,21 +1,23 @@
--- tools/fuzz-differential.lua : differential fuzzer -- JIT vs interpreter.
+-- tools/fuzz-differential.lua : differential fuzzer -- compiled exe vs interpreter.
 --
 --   build\bin\luavm.exe tools\fuzz-differential.lua [start_seed] [count] [--keep]
 --
--- Generates deterministic Lua programs from a seeded PRNG, runs each under the
--- JIT (default executor) and the bytecode interpreter (-i), and byte-compares
--- stdout. The interpreter is the oracle: any divergence is a JIT bug. A
--- divergence is re-run once to confirm (filters environmental flakiness), then
--- the case is saved to tests/fuzz-failures/fuzz_seed_<n>.lua with a header
--- ready for promotion into tests/conformance/ (add `-- DIFF-XFAIL: <reason>`
--- while the bug lives; the conformance phase flips it to XPASS when fixed).
+-- Generates deterministic Lua programs from a seeded PRNG, compiles each with
+-- aotc.exe at -O1 into a native PE, runs it, and byte-compares its stdout
+-- against the bytecode interpreter (luavm.exe -i). The interpreter is the
+-- oracle: any divergence is an AOT codegen/optimizer bug. A divergence is
+-- re-run once to confirm (filters environmental flakiness), then the case is
+-- saved to tests/fuzz-failures/fuzz_seed_<n>.lua with a header ready for
+-- promotion into tests/conformance/ (add `-- DIFF-XFAIL: <reason>` while the
+-- bug lives; the conformance phase flips it to XPASS when fixed).
 --
 -- The grammar is weighted toward the constructs that historically produced
--- real JIT bugs here: generic-for + vararg forwarding (JIT-VARARG-001),
--- <close> variables (JIT-001), stack-relocating metamethods (Round-3/4 stale
--- register/pointer class), tail calls (JIT-003), numeric-for loop-variable
--- mutation (R4-001), immediate-operand comparisons (EQI/LTI/GTI/...), long
--- method names (R4-006), and fiber coroutines (R4-009).
+-- real codegen bugs here (in the since-removed v1 JIT and the AOT backend):
+-- generic-for + vararg forwarding (JIT-VARARG-001), <close> variables
+-- (JIT-001), stack-relocating metamethods (Round-3/4 stale register/pointer
+-- class), tail calls (JIT-003), numeric-for loop-variable mutation (R4-001),
+-- immediate-operand comparisons (EQI/LTI/GTI/...), long method names
+-- (R4-006), and fiber coroutines (R4-009).
 --
 -- Determinism rules (load-bearing -- the oracle compares across PROCESSES):
 --   * never print raw pairs() iteration order (per-process string-hash seed
@@ -32,7 +34,9 @@ local KEEP  = (args[3] == "--keep")
 
 local BIN      = "build\\bin"
 local LUAVM    = BIN .. "\\luavm.exe"
+local AOTC     = BIN .. "\\aotc.exe"
 local CASE     = BIN .. "\\tests\\_fuzz_case.lua"
+local CASEEXE  = BIN .. "\\tests\\_fuzz_case.exe"
 local WATCHDOG = BIN .. "\\tests\\timeout-run.exe"
 local FAILDIR  = "tests\\fuzz-failures"
 local CHILD_TIMEOUT_MS = 30000
@@ -454,26 +458,42 @@ local function write_file(path, text)
   f:close()
 end
 
+-- Engine 1: aotc-compiled native exe (-O1). Engine 2: the interpreter oracle.
+-- An aotc compile/link failure is reported as exit code 125 in `ra` so it
+-- diverges loudly (a generated program must always compile -- the generator
+-- emits no closed-world-banned constructs).
 local function run_case()
-  local oj, rj = capture(guard('"' .. LUAVM .. '" "' .. CASE .. '" 2>nul'))
+  local _, rc = capture(guard('"' .. AOTC .. '" -O1 "' .. CASE
+                              .. '" -o "' .. CASEEXE .. '" 2>&1'))
+  local oa, ra
+  if rc ~= 0 then
+    oa, ra = "", 125
+  else
+    oa, ra = capture(guard('"' .. CASEEXE .. '" 2>nul'))
+  end
   local oi, ri = capture(guard('"' .. LUAVM .. '" -i "' .. CASE .. '" 2>nul'))
-  return oj, rj, oi, ri
+  return oa, ra, oi, ri
 end
 
 os.execute('if not exist "' .. BIN .. '\\tests" mkdir "' .. BIN .. '\\tests" >nul 2>&1')
+
+if not file_exists(AOTC) then
+  print("[-] FAIL fuzz: " .. AOTC .. " not built (run build\\build-luac.bat)")
+  os.exit(1)
+end
 
 local divergences, oracle_fails = {}, {}
 
 for seed = START, START + COUNT - 1 do
   local program = generate(seed)
   write_file(CASE, program)
-  local oj, rj, oi, ri = run_case()
+  local oa, ra, oi, ri = run_case()
 
-  local diverged = (ri == 0) and (rj ~= 0 or oj ~= oi)
+  local diverged = (ri == 0) and (ra ~= 0 or oa ~= oi)
   if diverged then
     -- confirm: re-run once; only report stable divergences
-    local oj2, rj2, oi2, ri2 = run_case()
-    diverged = (ri2 == 0) and (rj2 ~= 0 or oj2 ~= oi2)
+    local oa2, ra2, oi2, ri2 = run_case()
+    diverged = (ri2 == 0) and (ra2 ~= 0 or oa2 ~= oi2)
   end
 
   if ri ~= 0 then
@@ -486,18 +506,19 @@ for seed = START, START + COUNT - 1 do
     os.execute('if not exist "' .. FAILDIR .. '" mkdir "' .. FAILDIR .. '" >nul 2>&1')
     local saved = FAILDIR .. "\\fuzz_seed_" .. seed .. ".lua"
     write_file(saved,
-      "-- JIT-vs-interpreter DIVERGENCE found by tools/fuzz-differential.lua (seed " .. seed .. ").\n" ..
-      "-- Reproduce:  build\\bin\\luavm.exe <this file>   vs   build\\bin\\luavm.exe -i <this file>\n" ..
+      "-- compiled-vs-interpreter DIVERGENCE found by tools/fuzz-differential.lua (seed " .. seed .. ").\n" ..
+      "-- Reproduce:  build\\bin\\aotc.exe -O1 <this file> -o case.exe && case.exe   vs   build\\bin\\luavm.exe -i <this file>\n" ..
       "-- To track as a known bug: add `-- DIFF-XFAIL: <reason>` and move into tests/conformance/.\n" ..
       program)
-    print(string.format("  [-] FAIL fuzz seed %d (JIT vs -i divergence) -> %s", seed, saved))
+    print(string.format("  [-] FAIL fuzz seed %d (compiled exe vs -i divergence%s) -> %s",
+                        seed, ra == 125 and "; aotc compile failed" or "", saved))
     -- show the first differing line for instant triage
-    local ja, ia = {}, {}
-    for l in oj:gmatch("[^\r\n]+") do ja[#ja + 1] = l end
+    local aa, ia = {}, {}
+    for l in oa:gmatch("[^\r\n]+") do aa[#aa + 1] = l end
     for l in oi:gmatch("[^\r\n]+") do ia[#ia + 1] = l end
-    for i = 1, math.max(#ja, #ia) do
-      if ja[i] ~= ia[i] then
-        print("        JIT: " .. tostring(ja[i]))
+    for i = 1, math.max(#aa, #ia) do
+      if aa[i] ~= ia[i] then
+        print("        exe: " .. tostring(aa[i]))
         print("        -i : " .. tostring(ia[i]))
         break
       end
@@ -507,7 +528,7 @@ for seed = START, START + COUNT - 1 do
   end
 end
 
-if not KEEP then os.remove(CASE) end
+if not KEEP then os.remove(CASE) os.remove(CASEEXE) end
 
 print(string.format("[fuzz] %d case(s), seeds %d..%d: %d divergence(s), %d oracle-failure(s)%s",
                     COUNT, START, START + COUNT - 1, #divergences, #oracle_fails,
@@ -516,5 +537,5 @@ if #divergences > 0 then
   print("[fuzz] divergent seeds: " .. table.concat(divergences, ", "))
 end
 if #divergences > 0 or #oracle_fails > 0 then os.exit(1) end
-print("[+] PASS fuzz (" .. COUNT .. " cases, JIT == interpreter)")
+print("[+] PASS fuzz (" .. COUNT .. " cases, compiled exe == interpreter)")
 os.exit(0)

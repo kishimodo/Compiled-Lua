@@ -1715,10 +1715,18 @@ static void clua_Interpret (lua_State *L, CallInfo *ci) {
         TValue *rb = KB(i);
         /* basic types do not use '__eq'; we can use raw equality.
            Exception: full userdata (FFI cdata) may use __eq against nil
-           or other constants (LuaJIT compat: null-pointer cdata == nil). */
-        int cond = ttisfulluserdata(s2v(ra))
-                   ? luaV_equalobj(L, s2v(ra), rb)
-                   : luaV_rawequalobj(s2v(ra), rb);
+           or other constants (LuaJIT compat: null-pointer cdata == nil).
+           The metamethod path MUST run under Protect like OP_EQ: it calls
+           luaT_callTMres, which writes its frame + result at L->top.p --
+           without savestate's `L->top.p = ci->top.p` reset that lands on
+           a stale top INSIDE the live register window and corrupts locals
+           (caught by the compiled-vs-interpreter migration: `cd ~= nil`
+           as a call argument overwrote the callee register). */
+        int cond;
+        if (ttisfulluserdata(s2v(ra)))
+          Protect(cond = luaV_equalobj(L, s2v(ra), rb));
+        else
+          cond = luaV_rawequalobj(s2v(ra), rb);
         docondjump();
         vmbreak;
       }

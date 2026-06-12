@@ -6,15 +6,20 @@
 ** program reference the `ffi`/`bit` runtime globals, the link adds
 ** -Wl,--undefined=Clua_OpenFfi, which extracts this member from
 ** runtime-aot.a and binds the weak call. Mirrors v1 runtime_init's FFI
-** bring-up: type tables, Windows primitive typedefs, then the library
-** (which installs the `ffi` global).
+** bring-up: callback dispatch state, type tables, Windows primitive
+** typedefs, then the library (which installs the `ffi` global).
 */
 #include "lua.h"
 #include "ffi/ctype.h"
 #include "ffi/ffi_lib.h"
+#include "ffi/ffi_callback.h"
 #include "ffi/win_types.h"
 
 void Clua_OpenFfi( lua_State *L ) {
+    /* Register L for the callback dispatcher (single-threaded, like v1).
+       Without this, ffi.cast'd Lua callbacks invoked from C silently
+       return 0 (FfiCallback_Dispatch bails on g_DispatchL == NULL). */
+    Ffi_SetDispatchL( L );
     Ctype_Init( );
     Ffi_RegisterWindowsTypes( );
     Ffi_OpenLib( L );

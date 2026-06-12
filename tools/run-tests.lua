@@ -3,12 +3,19 @@
 -- Run it via  build\run-tests.bat  (which sets the MinGW/make PATH so gcc/ar are
 -- found, builds the products, then calls  build\bin\luavm.exe tools\run-tests.lua).
 --
--- It discovers and runs four test layers with ZERO per-test wiring -- drop a file
+-- The two execution engines are COMPILED NATIVE EXES (aotc/clua-emitted PEs)
+-- and the REFERENCE BYTECODE INTERPRETER (luavm.exe; `-i` is accepted as a
+-- no-op). The v1 JIT has been removed from the tree, so every differential
+-- layer diffs a compiled exe against the interpreter oracle.
+--
+-- It discovers and runs the test layers with ZERO per-test wiring -- drop a file
 -- in the matching folder and it runs; delete one and nothing breaks:
 --   tests/unit/test_*.c        C unit tests, compiled against build/bin/libcluatest.a
---   tests/lua/*.lua            behavioral, run under luavm.exe (assert + exit non-zero)
+--   tests/lua/*.lua            behavioral, run under luavm.exe (interpreter) AND
+--                              as an aotc-compiled exe (same pass criteria)
 --   tests/packages/test_*.lua  package tests, compiled with compiler.exe then run
---   tests/differential/*.lua   same script under JIT and -i; stdout must match
+--   tests/differential/*.lua   aotc-compiled at -O0 and -O1; stdout must match -i
+--   tests/conformance/*.lua    same compiled-vs-interpreter check, DIFF-XFAIL aware
 -- ...plus the self-contained tools/ behavioral suites. Prints one PASS/FAIL/SKIP
 -- tally and exits non-zero if anything failed.
 --
@@ -18,6 +25,7 @@
 local BIN      = "build\\bin"
 local LUAVM    = BIN .. "\\luavm.exe"
 local COMPILER = BIN .. "\\compiler.exe"
+local AOTC     = BIN .. "\\aotc.exe"
 local ARCHIVE  = BIN .. "\\libcluatest.a"
 local LUALIB   = BIN .. "\\liblua54.a"
 local TESTBIN  = BIN .. "\\tests"
@@ -56,7 +64,7 @@ end
 -- ---- watchdog ---------------------------------------------------------------
 -- Every test invocation runs under tools/timeout-run.exe (compiled lazily with
 -- the same gcc as the unit tests): a kill-on-close Job Object enforces a hard
--- wall-clock deadline on the whole child process tree, so one hung JIT loop
+-- wall-clock deadline on the whole child process tree, so one hung test
 -- cannot wedge the suite. Exit 124 = deadline fired (GNU timeout convention).
 -- Override the budget with CLUA_TEST_TIMEOUT_MS; if the watchdog fails to
 -- build we warn and run unguarded rather than refusing to test.
@@ -208,12 +216,44 @@ end
 
 -- ---- phase 3: Lua behavioral ----------------------------------------------
 
+-- Tests that legitimately use closed-world-banned constructs (load/dofile/...)
+-- cannot be aotc-compiled; they run interpreter-only and are tallied as a SKIP
+-- for the compiled half so the gap stays visible.
+local LUA_INTERP_ONLY = {
+  test_jit_limits    = "uses load() to build oversized chunks",
+  test_lua54_corners = "uses load() for %q round-trip checks",
+}
+
 local function run_lua()
-  header("Lua behavioral (tests/lua/*.lua)")
+  header("Lua behavioral (tests/lua/*.lua, interpreter + compiled exe)")
   for _, src in ipairs(glob("tests/lua", "*.lua")) do
     if not src:match("/_") then         -- skip _helpers.lua etc.
-      local out, rc = capture(guard('"' .. LUAVM .. '" "' .. src .. '" 2>&1'))
-      record("lua", basename(src, "%.lua"), out, rc)
+      local name = basename(src, "%.lua")
+      -- engine 1: the reference interpreter
+      local out, rc = capture(guard('"' .. LUAVM .. '" -i "' .. src .. '" 2>&1'))
+      record("lua", name, out, rc)
+      -- engine 2: the same test compiled to a native exe (aotc -O1)
+      local why = LUA_INTERP_ONLY[name]
+      if why then
+        skip = skip + 1
+        print(string.format("  [~] SKIP  %-9s %s   interpreter-only: %s (closed world)",
+                            "luaexe", name, why))
+      else
+        local exe = TESTBIN .. "\\" .. name .. "_lua.exe"
+        local clog, crc = capture(guard('"' .. AOTC .. '" -O1 "' .. src
+                                        .. '" -o "' .. exe .. '" 2>&1'))
+        if crc ~= 0 then
+          fail = fail + 1
+          failed[#failed + 1] = "luaexe:" .. name
+          print(string.format("  [-] FAIL  %-9s %s (aotc compile/link error)", "luaexe", name))
+          for line in clog:gmatch("[^\r\n]+") do
+            if line:find("error") then print("            " .. line) end
+          end
+        else
+          local oexe, rexe = capture(guard('"' .. exe .. '" 2>&1'))
+          record("luaexe", name, oexe, rexe)
+        end
+      end
     end
   end
 end
@@ -224,10 +264,10 @@ end
 -- straight from src/ -- the compiled exe embeds them, but luavm.exe does not.
 local PKG_LUA_PATH = "clua\\src\\runtime\\packages\\?\\init.lua;clua\\src\\runtime\\packages\\?.lua"
 
--- Strip per-run noise (JIT compile traces land on stderr already, but be
--- robust if a future change moves them) before diffing two captures.
-local function strip_traces(s)
-  return (s:gsub("%[%*%] jit:[^\r\n]*[\r\n]*", ""):gsub("%[%*%] runtime:[^\r\n]*[\r\n]*", ""))
+local function file_exists(path)
+  local f = io.open(path:gsub("/", "\\"), "rb")
+  if f then f:close(); return true end
+  return false
 end
 
 local function run_packages()
@@ -244,29 +284,28 @@ local function run_packages()
       local out, rc = capture(guard('"' .. exe .. '" 2>&1'))
       record("package", name, out, rc)
 
-      -- Interpreter-oracle cross-check: the compiled exe's executor IS the
-      -- JIT, so package code would otherwise never meet the bytecode
-      -- interpreter anywhere in the suite (a weak assert can't catch a JIT
-      -- miscompile -- JIT-VARARG-001 was first exposed through a package).
-      -- Run the same test source under luavm.exe (JIT) and luavm.exe -i with
-      -- LUA_PATH pointed at the package sources and diff stdout. Packages
-      -- whose require only works inside a compiled exe (native loaders)
-      -- simply fail the source require under BOTH modes -- skip those.
+      -- Second-engine cross-check: run the same test source under the
+      -- reference interpreter (luavm.exe -i, LUA_PATH pointed at the package
+      -- sources) and diff its stdout against the compiled exe's stdout. This
+      -- validates the whole embed pipeline (bytecode blob, compression,
+      -- preload registration) against the plain-source oracle. Packages whose
+      -- require only works inside a compiled exe (native loaders) fail the
+      -- source require -- those are covered by the compiled run alone.
       if rc == 0 and out:find("%[%+%] PASS") then
         local setenv = 'set "LUA_PATH=' .. PKG_LUA_PATH .. '" && '
-        local oj, rj = capture(setenv .. guard('"' .. LUAVM .. '" "' .. src .. '" 2>nul'))
         local oi, ri = capture(setenv .. guard('"' .. LUAVM .. '" -i "' .. src .. '" 2>nul'))
-        if rj == 0 and ri == 0 then
-          if strip_traces(oj) == strip_traces(oi) then
+        if ri == 0 then
+          local oe, re = capture(guard('"' .. exe .. '" 2>nul'))   -- stdout only
+          if re == 0 and oe == oi then
             pass = pass + 1
-            print(string.format("  [+] PASS  %-9s %s (src JIT == -i)", "pkgdiff", name))
+            print(string.format("  [+] PASS  %-9s %s (exe == -i src)", "pkgdiff", name))
           else
             fail = fail + 1
             failed[#failed + 1] = "pkgdiff:" .. name
-            print(string.format("  [-] FAIL  %-9s %s (JIT vs -i stdout mismatch on package source)", "pkgdiff", name))
+            print(string.format("  [-] FAIL  %-9s %s (compiled exe vs -i source stdout mismatch)", "pkgdiff", name))
           end
         end
-        -- rj~=0 or ri~=0: source require unavailable under the script runner
+        -- ri~=0: source require unavailable under the script runner
         -- (embedded-only package) or the test needs the compiled environment;
         -- the compiled-exe result above already covers it -- no extra entry.
       end
@@ -274,53 +313,24 @@ local function run_packages()
   end
 end
 
--- ---- phase 5: differential (JIT vs interpreter) ---------------------------
+-- ---- phase 5: differential (compiled exe vs interpreter) -------------------
 
-local function run_differential()
-  header("Differential JIT-vs-interpreter (tests/differential/*.lua)")
-  for _, src in ipairs(glob("tests/differential", "*.lua")) do
-    local name = basename(src, "%.lua")
-    local oj, rj = capture(guard('"' .. LUAVM .. '" "' .. src .. '" 2>nul'))
-    local oi, ri = capture(guard('"' .. LUAVM .. '" -i "' .. src .. '" 2>nul'))
-    if rj == 0 and ri == 0 and oj == oi and #oj > 0 then
-      pass = pass + 1
-      print(string.format("  [+] PASS  %-9s %s", "diff", name))
-    else
-      fail = fail + 1
-      failed[#failed + 1] = "diff:" .. name
-      local reason = (rj ~= 0 or ri ~= 0) and "(nonzero exit)" or "(JIT vs -i stdout mismatch)"
-      print(string.format("  [-] FAIL  %-9s %s %s", "diff", name, reason))
-    end
-  end
-end
-
--- ---- phase 5a: AOT differential (aotc.exe PE vs interpreter) --------------
-
--- Compile each tests/differential/aot_*.lua with aotc.exe into a real PE, run
--- it, and diff its stdout against luavm.exe -i on the same source (the M0
--- arbiter: a compiled program must match the interpreter byte-for-byte). The
--- phase self-skips if aotc.exe isn't built (run-tests.bat builds luac-objs but
--- not aotc.exe; build it with build\build-luac.bat to exercise this layer).
-local AOTC = BIN .. "\\aotc.exe"
-
-local function file_exists(path)
-  local f = io.open(path:gsub("/", "\\"), "rb")
-  if f then f:close(); return true end
-  return false
-end
-
+-- Compile each tests/differential/*.lua with aotc.exe into a real PE, run it,
+-- and diff its stdout against luavm.exe -i on the same source (the arbiter: a
+-- compiled program must match the interpreter byte-for-byte). Each file is
+-- exercised at BOTH -O0 (faithful boxed baseline) and -O1 (the optimizer's
+-- typed fastpaths), so the optimizer can never silently change behavior.
 local function run_aot_differential()
-  header("AOT differential aotc-PE-vs-interpreter (tests/differential/aot_*.lua)")
+  header("Differential compiled-PE-vs-interpreter (tests/differential/*.lua, O0+O1)")
   if not file_exists(AOTC) then
-    print("  [~] SKIP  aotdiff   aotc.exe not built (run build\\build-luac.bat to enable)")
+    fail = fail + 1
+    failed[#failed + 1] = "aotdiff:aotc-missing"
+    print("  [-] FAIL  aotdiff   aotc.exe not built (run build\\build-luac.bat)")
     return
   end
-  -- Each differential is exercised at BOTH -O0 (faithful boxed baseline) and -O1
-  -- (the optimizer's typed fastpaths). Both must match the interpreter exactly,
-  -- so the optimizer can never silently change behavior (sound-conservative).
   local OPT_LEVELS = { { flag = "",    tag = "O0" },
                        { flag = "-O1", tag = "O1" } }
-  for _, src in ipairs(glob("tests/differential", "aot_*.lua")) do
+  for _, src in ipairs(glob("tests/differential", "*.lua")) do
     local base = basename(src, "%.lua")
     local oi, ri = capture(guard('"' .. LUAVM .. '" -i "' .. src .. '" 2>nul'))
     for _, lvl in ipairs(OPT_LEVELS) do
@@ -351,7 +361,7 @@ local function run_aot_differential()
   end
 end
 
--- ---- phase 5b: conformance corpus (JIT vs interpreter, with DIFF-XFAIL) ----
+-- ---- phase 5b: conformance corpus (compiled vs interpreter, DIFF-XFAIL) ----
 
 -- Read up to the first ~10 lines of a file looking for a `-- DIFF-XFAIL: reason`
 -- directive. Returns the reason string (sans leading/trailing space) or nil.
@@ -370,49 +380,66 @@ local function diff_xfail_reason(path)
 end
 
 -- A broad Lua 5.4 conformance corpus run through the SAME differential check as
--- phase 5 (JIT stdout vs interpreter stdout, byte-for-byte). A divergence is a
--- JIT codegen bug. Files may opt into a known divergence with a first-lines
--- comment `-- DIFF-XFAIL: <reason>`: such a file's divergence is tallied as an
--- expected XFAIL (the live 'distance to conformance' metric) rather than a FAIL,
--- and an UNEXPECTED MATCH on an xfail'd file is reported XPASS so the marker can
--- be removed once the JIT bug is fixed.
+-- phase 5 (compiled-exe stdout vs interpreter stdout, byte-for-byte, at both
+-- -O0 and -O1). A divergence is an AOT codegen/optimizer bug. Files may opt
+-- into a known divergence with a first-lines comment `-- DIFF-XFAIL: <reason>`:
+-- such a file's divergence is tallied as an expected XFAIL (the live 'distance
+-- to conformance' metric) rather than a FAIL, and an UNEXPECTED MATCH on an
+-- xfail'd file is reported XPASS so the marker can be removed once fixed.
 local function run_conformance()
-  header("Conformance corpus JIT-vs-interpreter (tests/conformance/*.lua)")
+  header("Conformance corpus compiled-vs-interpreter (tests/conformance/*.lua, O0+O1)")
+  if not file_exists(AOTC) then
+    fail = fail + 1
+    failed[#failed + 1] = "conform:aotc-missing"
+    print("  [-] FAIL  conform   aotc.exe not built (run build\\build-luac.bat)")
+    return
+  end
+  local OPT_LEVELS = { { flag = "",    tag = "O0" },
+                       { flag = "-O1", tag = "O1" } }
   for _, src in ipairs(glob("tests/conformance", "*.lua")) do
-    local name   = basename(src, "%.lua")
+    local base   = basename(src, "%.lua")
     local reason = diff_xfail_reason(src)
-    local oj, rj = capture(guard('"' .. LUAVM .. '" "' .. src .. '" 2>nul'))
     local oi, ri = capture(guard('"' .. LUAVM .. '" -i "' .. src .. '" 2>nul'))
     -- The interpreter is the oracle: it must run clean and produce output.
     local oracle_ok = (ri == 0 and #oi > 0)
-    local matches   = (rj == 0 and oracle_ok and oj == oi)
-    if reason then
-      -- Expected-divergence file. A continuing divergence is the expected XFAIL;
-      -- a match means the JIT bug is gone -> XPASS (clean up the marker).
-      if matches then
-        xpass_n = xpass_n + 1
-        xpassed[#xpassed + 1] = "conform:" .. name
-        print(string.format("  [!] XPASS conform   %s   (now matches; drop DIFF-XFAIL: %s)", name, reason))
-      else
-        xfail_n = xfail_n + 1
-        print(string.format("  [x] XFAIL conform   %s   (%s)", name, reason))
+    for _, lvl in ipairs(OPT_LEVELS) do
+      local name = base .. "[" .. lvl.tag .. "]"
+      local exe  = TESTBIN .. "\\conf_" .. base .. "_" .. lvl.tag .. ".exe"
+      local _, crc = capture(guard('"' .. AOTC .. '" ' .. lvl.flag .. ' "' .. src
+                                   .. '" -o "' .. exe .. '" 2>&1'))
+      local matches = false
+      if crc == 0 then
+        local oa, ra = capture(guard('"' .. exe .. '" 2>nul'))
+        matches = (ra == 0 and oracle_ok and oa == oi)
       end
-    else
-      if matches then
-        pass = pass + 1
-        print(string.format("  [+] PASS  %-9s %s", "conform", name))
-      else
-        fail = fail + 1
-        failed[#failed + 1] = "conform:" .. name
-        local why
-        if not oracle_ok then
-          why = "(interpreter oracle failed -- not a clean deterministic program)"
-        elseif rj ~= 0 then
-          why = "(JIT nonzero exit)"
+      if reason then
+        -- Expected-divergence file. A continuing divergence is the expected
+        -- XFAIL; a match means the bug is gone -> XPASS (clean up the marker).
+        if matches then
+          xpass_n = xpass_n + 1
+          xpassed[#xpassed + 1] = "conform:" .. name
+          print(string.format("  [!] XPASS conform   %s   (now matches; drop DIFF-XFAIL: %s)", name, reason))
         else
-          why = "(JIT vs -i stdout mismatch -- add a DIFF-XFAIL if this is a known JIT bug)"
+          xfail_n = xfail_n + 1
+          print(string.format("  [x] XFAIL conform   %s   (%s)", name, reason))
         end
-        print(string.format("  [-] FAIL  %-9s %s %s", "conform", name, why))
+      else
+        if matches then
+          pass = pass + 1
+          print(string.format("  [+] PASS  %-9s %s", "conform", name))
+        else
+          fail = fail + 1
+          failed[#failed + 1] = "conform:" .. name
+          local why
+          if crc ~= 0 then
+            why = "(aotc compile/link error)"
+          elseif not oracle_ok then
+            why = "(interpreter oracle failed -- not a clean deterministic program)"
+          else
+            why = "(compiled exe vs -i stdout mismatch -- add a DIFF-XFAIL if this is a known bug)"
+          end
+          print(string.format("  [-] FAIL  %-9s %s %s", "conform", name, why))
+        end
       end
     end
   end
@@ -435,8 +462,8 @@ end
 
 -- A small FIXED-seed slice of the differential fuzzer (tools/fuzz-differential.lua)
 -- so the generator+harness itself is gated on every run: 25 deterministic
--- programs, each run under the JIT and -i, stdout diffed. Fixed seeds keep CI
--- deterministic; long exploratory campaigns live in build\run-fuzz.bat.
+-- programs, each aotc-compiled at -O1 and run, stdout diffed against -i. Fixed
+-- seeds keep CI deterministic; long campaigns live in build\run-fuzz.bat.
 local function run_fuzz_smoke()
   header("Differential fuzz smoke (tools/fuzz-differential.lua, seeds 1-25)")
   local out, rc = capture(guard('"' .. LUAVM .. '" tools\\fuzz-differential.lua 1 25 2>&1'))
@@ -458,7 +485,6 @@ build_watchdog()
 run_unit()
 run_lua()
 run_packages()
-run_differential()
 run_aot_differential()
 run_conformance()
 run_suites()

@@ -1,8 +1,11 @@
 @echo off
-rem CLua test runner. Builds the products, then runs the auto-discovering Lua
-rem test runner (tools\run-tests.lua), which compiles + runs every test under
-rem tests\ (unit / lua / packages / differential) plus the tools\ behavioral
-rem suites, and prints one PASS/FAIL/SKIP tally. Returns non-zero on any failure.
+rem CLua test runner. Builds the products (including aotc.exe -- the
+rem differential layers compile every test to a native exe and diff it against
+rem the interpreter oracle), then runs the auto-discovering Lua test runner
+rem (tools\run-tests.lua), which compiles + runs every test under tests\
+rem (unit / lua / packages / differential / conformance) plus the tools\
+rem behavioral suites, and prints one PASS/FAIL/SKIP tally. Returns non-zero
+rem on any failure.
 rem
 rem PATH: prepend GnuWin32 make + the MinGW bin so gcc/ar/make are found (same as
 rem build.bat). Override CLUA_MINGW_BIN / CLUA_MAKE_BIN if your bundle differs.
@@ -36,6 +39,15 @@ rem "cannot find build/bin/runtime-embedded.a".
 make -f build/Makefile compiler luavm embedded luac-objs
 if errorlevel 1 (
     echo [-] product build failed
+    set RC=1
+    goto :done
+)
+
+rem aotc.exe + aot_entry.o: the compiled-vs-interpreter layers (lua behavioral,
+rem differential, conformance, fuzz smoke) aotc-compile each test into a PE.
+make -f build/Makefile.luac aotc aot-entry
+if errorlevel 1 (
+    echo [-] aotc build failed
     set RC=1
     goto :done
 )
