@@ -59,8 +59,15 @@ typedef struct {
 } CORO_T, *PCORO_T;
 
 /* MinGW gcc prefers `__thread`; MSVC prefers `__declspec(thread)`. Use the
-   compiler-appropriate keyword so the variable is genuinely thread-local. */
-#if defined( __GNUC__ )
+   compiler-appropriate keyword so the variable is genuinely thread-local.
+   LUAC_AOT_RUNTIME: a plain static instead — the AOT runtime is single-OS-
+   thread by construction (fibers all run on the main thread; the FFI is
+   never opened, so no foreign threads can enter Lua), and gcc's emulated
+   TLS would otherwise drag libgcc emutls + ~23 KB of winpthread into every
+   compiled exe. */
+#if defined( LUAC_AOT_RUNTIME )
+static                           PCORO_T g_CurrentCoroTls = NULL;
+#elif defined( __GNUC__ )
 static __thread                  PCORO_T g_CurrentCoroTls = NULL;
 #else
 static __declspec( thread )      PCORO_T g_CurrentCoroTls = NULL;

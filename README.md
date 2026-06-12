@@ -20,9 +20,12 @@ CLua-compiled closed-world program, the largest fidelity fixture in the tree.
 The pipeline is in-memory, rustc-style: front-end, optimizer, codegen and the
 COFF object (including the serialized ProtoInit blob — no generated C) all
 happen inside `clua.exe`; the only external step is one native link. A
-hello-world builds in ~190 ms and weighs ~260 KB stripped — the emitted exe
-links a dedicated `runtime-aot.a` carrying **no JIT compiler and no Lua
-front-end** (`load`-family symbols are closed-world stubs).
+hello-world builds in ~190 ms and weighs **~194 KB** stripped — the emitted
+exe links a dedicated `runtime-aot.a` carrying **no JIT compiler, no Lua
+front-end** (`load`-family symbols are closed-world stubs), **no FFI** (the
+AOT entry never opens it) and **no winpthread** (no emulated TLS), with
+`--gc-sections` dropping everything unreferenced. What remains is the
+language itself: the Lua core + full stdlib + GC + the AOT runtime helpers.
 
 This is a standalone project, separated from its origin (**LuaVM**, the
 JIT-based v1, which lives in its own repository). The v1 interpreter and JIT

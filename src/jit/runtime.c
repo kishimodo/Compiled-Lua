@@ -189,7 +189,13 @@ int Rt_Call( lua_State *L, int A, int NArgs, int NResults ) {
 
     /* Fast path: callable cdata (typically an FFI CT_FUNC from ffi.C
        lookup). Skip luaD_call → luaT_callTM → __call → Cdata_Call.
-       Call Ffi_GenericCall directly. */
+       Call Ffi_GenericCall directly.
+       LUAC_AOT_RUNTIME: compiled out — aot_entry never opens the FFI, so no
+       cdata can exist and this branch is unreachable; keeping it would chain
+       the whole FFI (~25 KB) into every compiled exe via FfiGetCData/
+       Ffi_GenericCall. Userdata callees (e.g. a __call metamethod) take the
+       generic luaD_call path below, identical semantics. */
+#ifndef LUAC_AOT_RUNTIME
     if ( ttisfulluserdata( s2v( Func ) ) ) {
         /* the callee Func = L->ci->func.p + 1 + A, so its 1-based stack index
            relative to the current call frame is A + 1. */
@@ -221,6 +227,7 @@ int Rt_Call( lua_State *L, int A, int NArgs, int NResults ) {
             return 0;
         }
     }
+#endif /* !LUAC_AOT_RUNTIME */
 
     /* Fallback: upstream call machinery. */
     luaD_call( L, Func, NResults );

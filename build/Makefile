@@ -72,6 +72,12 @@ $(BUILD_DIR)/lua:
 # --- Lua 5.4 -- embedded variant (size-tuned) ----------------------------
 # Same source set as above, compiled with -Os -g0 and hardening defaults
 # so every compiler-emitted PE inherits them.
+# NOTE (2026-06-12, measured): -D__USE_MINGW_ANSI_STDIO=0 would drop MinGW's
+# static printf/float machinery (__mingw_pformat + gdtoa + strtodg, ~36 KB
+# per emitted exe) by resolving printf to the ucrt — but the ucrt renders NaN
+# as "-nan(ind)" where the oracle's MinGW stdio prints "nan", a real fidelity
+# break caught by tests/differential/aot_strformat.lua. Do not flip this
+# without that differential staying green.
 EMBEDDED_LUA_CFLAGS := -std=c99 -Wall -Wextra -Wno-unused-parameter \
     -Os -g0 -ffunction-sections -fdata-sections \
     -fno-asynchronous-unwind-tables -fno-unwind-tables \

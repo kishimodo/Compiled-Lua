@@ -207,11 +207,13 @@ int LuacLink_LinkProgram( const char *userObj, const char *outExe,
     ** BEFORE the archives so the parser/lexer/dump members are never
     ** extracted), runtime-aot.a (pulls protoinit_rt.o via
     ** LuacProgram_BuildEntry), the Lua core, then the Win32 import libs.
-    ** -s strips symbols/debug info (~40% smaller PEs). */
+    ** -s strips symbols/debug info; --gc-sections drops unreferenced
+    ** functions (both archives are -ffunction-sections; lib registration
+    ** tables live in .rdata and keep every reachable lib function alive). */
     snprintf( cmd, sizeof( cmd ),
               "%s -o \"%s\" \"%s\" \"%s\" \"%s\" \"%s\" "
-              "-Wl,--subsystem,console -s "
-              "-lm -lkernel32 -ladvapi32 -liphlpapi -lpsapi",
+              "-Wl,--subsystem,console -Wl,--gc-sections -s "
+              "-lm -lkernel32 -ladvapi32",
               GccCommand( ), outExe, userObj, entry_obj,
               tc.runtime_a, tc.lualib_a );
     rc = run_cmd( cmd );

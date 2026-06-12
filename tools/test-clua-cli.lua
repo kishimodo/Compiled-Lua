@@ -65,6 +65,17 @@ end
 local clua_abs  = ROOT .. "\\" .. CLUA
 local luavm_abs = ROOT .. "\\" .. LUAVM
 
+-- snapshot pre-existing clua_user_*.o (e.g. a developer's --keep-temps
+-- leftovers) so the litter check below only flags files THIS suite created
+local function temp_objs()
+  local f = io.popen(("dir /b \"%s\\clua_user_*.o\" 2>nul"):format(TEMP))
+  local set = {}
+  for line in f:lines() do set[line] = true end
+  f:close()
+  return set
+end
+local baseline_objs = temp_objs()
+
 -- ---- 1. version ----
 do
   local code, out = run(("\"%s\" version"):format(clua_abs))
@@ -106,11 +117,12 @@ print(mt.hello)
      "compiled exe output matches luavm -i",
      ("native=%q oracle=%q"):format(native:sub(1, 80), oracle:sub(1, 80)))
 
-  -- lean-exe canary: hello-class exe must stay far below the pre-streamline
-  -- 547 KB (parser + JIT compiler + symbols would add ~280 KB back)
+  -- lean-exe canary: a hello-class exe is ~194 KB after the diet (no parser,
+  -- no JIT compiler, no FFI, no winpthread, gc-sections, stripped). 250 KB
+  -- headroom catches any of those chunks creeping back into the link.
   local f = io.open(exe, "rb")
   local size = f:seek("end"); f:close()
-  ok(size < 400000, "compiled exe is lean (no parser/JIT/symbols)",
+  ok(size < 250000, "compiled exe is lean (no parser/JIT/FFI/pthread/symbols)",
      ("size=%d"):format(size))
   os.remove(src); os.remove(exe)
 end
@@ -136,12 +148,14 @@ do
   os.remove(src)
 end
 
--- ---- 6. no temp litter: clua_user_*.o cleaned up after builds ----
+-- ---- 6. no temp litter: clua_user_*.o cleaned up after this suite's builds ----
 do
-  local f = io.popen(("dir /b \"%s\\clua_user_*.o\" 2>nul"):format(TEMP))
-  local litter = f:read("*a") or ""
-  f:close()
-  ok(litter == "", "no clua_user_*.o litter in %TEMP%", litter)
+  local litter = {}
+  for name in pairs(temp_objs()) do
+    if not baseline_objs[name] then litter[#litter + 1] = name end
+  end
+  ok(#litter == 0, "no new clua_user_*.o litter in %TEMP%",
+     table.concat(litter, ", "))
 end
 
 -- ---- 7. rover.exe: banner + differential vs the script under -i ----
