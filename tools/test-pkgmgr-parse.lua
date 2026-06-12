@@ -1,5 +1,5 @@
 -- parse_return_table test: the closed-world literal-table parser that replaced
--- the four load() sites in rover (package-manager/src/rover.lua) so the
+-- the four load() sites in rover (rover/src/rover.lua) so the
 -- package manager compiles under aotc.exe (which bans the global `load`).
 -- Pure-logic checks use the $ROVER_PKG_TEST export hook; a final end-to-end
 -- check asserts the rebranded usage banner. Run from the repo root by luavm.exe.
@@ -10,7 +10,7 @@ local function abscwd()
 end
 local ROOT  = abscwd()
 local LUAVM = ROOT .. "\\build\\bin\\luavm.exe"
-local PKG   = ROOT .. "\\package-manager\\src\\rover.lua"
+local PKG   = ROOT .. "\\rover\\src\\rover.lua"
 
 local function slurp(p) local f = io.open(p, "rb"); if not f then return nil end local s = f:read("*a"); f:close(); return s end
 local function spit(p, s) local f = io.open(p, "wb"); if not f then return false end f:write(s); f:close(); return true end
@@ -22,7 +22,7 @@ local function fail(m) print("[-] FAIL test-pkgmgr-parse: " .. m); os.exit(1) en
 do
   local driver = (os.getenv("TEMP") or ".") .. "\\luavm-parsedriver.lua"
   spit(driver, [==[
-dofile("package-manager/src/rover.lua")
+dofile("rover/src/rover.lua")
 local M = _G.ROVER_PKG
 -- the hook must keep its existing exports AND export the parser
 for _, k in ipairs({ "name_ok", "parse_semver", "registry_ok", "semver_cmp",

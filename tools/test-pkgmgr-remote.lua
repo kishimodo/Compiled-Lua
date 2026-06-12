@@ -1,5 +1,5 @@
 -- Remote-registry + outdated/update/gc test. Uses the versioned test registry
--- (package-manager/registry-mv, with index.json + vpkg 1.0.0/2.0.0) as a REMOTE
+-- (rover/registry-mv, with index.json + vpkg 1.0.0/2.0.0) as a REMOTE
 -- registry via a file:// URL (curl supports file://, so the full remote code
 -- path -- index fetch, version resolve, download, install -- runs with no
 -- server). Run from the repo root by luavm.exe.
@@ -10,8 +10,8 @@ local function abscwd()
 end
 local ROOT  = abscwd()
 local LUAVM = ROOT .. "\\build\\bin\\luavm.exe"
-local PKG   = ROOT .. "\\package-manager\\src\\rover.lua"
-local URL   = "file:///" .. ROOT:gsub("\\", "/") .. "/package-manager/registry-mv"
+local PKG   = ROOT .. "\\rover\\src\\rover.lua"
+local URL   = "file:///" .. ROOT:gsub("\\", "/") .. "/rover/registry-mv"
 local PROJ  = (os.getenv("TEMP") or ".") .. "\\luavm-remotetest"
 local STORE = (os.getenv("LOCALAPPDATA") or ".") .. "\\clua\\packages"
 

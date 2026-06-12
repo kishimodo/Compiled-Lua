@@ -10,8 +10,8 @@ local function abscwd()
 end
 local ROOT  = abscwd()
 local LUAVM = ROOT .. "\\build\\bin\\luavm.exe"
-local PKG   = ROOT .. "\\package-manager\\src\\rover.lua"
-local REG   = ROOT .. "\\package-manager\\registry-test"
+local PKG   = ROOT .. "\\rover\\src\\rover.lua"
+local REG   = ROOT .. "\\rover\\registry-test"
 local PROJ  = (os.getenv("TEMP") or ".") .. "\\luavm-semvertest"
 
 local function sh(c) local ok, _, code = os.execute('"' .. c .. '"'); return (ok == true) or (ok == 0) or (code == 0) end
@@ -27,7 +27,7 @@ local function fail(m) print("[-] FAIL test-pkgmgr-semver: " .. m); cleanup(); o
 do
   local driver = (os.getenv("TEMP") or ".") .. "\\luavm-semverdriver.lua"
   spit(driver, [[
-dofile("package-manager/src/rover.lua")
+dofile("rover/src/rover.lua")
 local M = _G.ROVER_PKG
 local function eq(got, want, label)
   if got ~= want then print("FAILCASE:"..label.." got="..tostring(got).." want="..tostring(want)); os.exit(7) end
@@ -77,7 +77,7 @@ eq(M.semver_satisfies("3.0.0", "1.2.3 - 2"),     false, "hyphen-partial<-3.0.0")
 do local okp = pcall(M.semver_satisfies, "1.0.0", ">=garbage"); eq(okp, false, "garbage-constraint-errors") end
 -- registry shell-injection guard
 eq(M.registry_ok("https://example.com/registry"), true,  "registry-ok-url")
-eq(M.registry_ok("package-manager\\registry"),    true,  "registry-ok-path")
+eq(M.registry_ok("rover\\registry"),    true,  "registry-ok-path")
 eq(M.registry_ok('http://x/" & calc & "'),        false, "registry-rejects-quote-amp")
 eq(M.registry_ok("a|b"),                          false, "registry-rejects-pipe")
 eq(M.registry_ok("a%PATH%b"),                     false, "registry-rejects-percent")

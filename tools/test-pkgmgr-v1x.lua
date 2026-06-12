@@ -1,10 +1,10 @@
--- v1.x package-manager test: SHA-256 content integrity. Run by luavm.exe.
+-- v1.x rover test: SHA-256 content integrity. Run by luavm.exe.
 -- Installs greet (records a manifest hash), verifies OK, tampers the installed
 -- copy and asserts `verify` detects it, then reinstalls and asserts recovery.
 -- Uses the default store; cleans up afterwards.
 
 local LUAVM = "build\\bin\\luavm.exe"
-local PKG   = "package-manager\\src\\rover.lua"
+local PKG   = "rover\\src\\rover.lua"
 
 local function run(args)  -- returns (ok, combined output)
   local p = io.popen('"' .. LUAVM .. ' -i ' .. PKG .. ' ' .. args .. '" 2>&1')

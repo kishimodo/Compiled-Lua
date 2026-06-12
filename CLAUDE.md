@@ -12,7 +12,7 @@
 > `-O1` default, output name derived from the input; relocatable — finds its
 > runtime libs next to the exe or via `CLUA_HOME`), plus **`rover.exe`**, the
 > package manager, itself a CLua-compiled closed-world program built from
-> `package-manager/src/rover.lua` (project files: `rover.toml`/`rover.lock`;
+> `rover/src/rover.lua` (project files: `rover.toml`/`rover.lock`;
 > env: `ROVER_REGISTRY`/`ROVER_REGISTRY_KEY`; store under `CLUA_HOME` or
 > `%LOCALAPPDATA%\clua`). `aotc.exe` is the low-level flag-compatible driver
 > the test layers use; both share `lc_drive()`.

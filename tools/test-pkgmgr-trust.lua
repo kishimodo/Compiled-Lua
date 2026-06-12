@@ -12,9 +12,9 @@ local function abscwd()
 end
 local ROOT  = abscwd()
 local LUAVM = ROOT .. "\\build\\bin\\luavm.exe"
-local PKG   = ROOT .. "\\package-manager\\src\\rover.lua"
-local REGD  = ROOT .. "\\package-manager\\registry-test"
-local URL   = "file:///" .. ROOT:gsub("\\", "/") .. "/package-manager/registry-test"
+local PKG   = ROOT .. "\\rover\\src\\rover.lua"
+local REGD  = ROOT .. "\\rover\\registry-test"
+local URL   = "file:///" .. ROOT:gsub("\\", "/") .. "/rover/registry-test"
 local REGINIT = REGD .. "\\leaf\\1.0.0\\init.lua"
 local SIGP    = REGD .. "\\index.json.sig"
 local PROJ  = (os.getenv("TEMP") or ".") .. "\\luavm-trusttest"

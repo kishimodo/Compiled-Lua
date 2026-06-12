@@ -423,7 +423,7 @@ end
 local function run_suites()
   header("Behavioral suites (tools/test-*.lua)")
   -- Auto-discover every self-contained behavioral suite (diagnostics, force-link,
-  -- and the package-manager suites) so new ones are gated automatically.
+  -- and the rover suites) so new ones are gated automatically.
   for _, src in ipairs(glob("tools", "test-*.lua")) do
     local name = basename(src, "%.lua")
     local out, rc = capture(guard('"' .. LUAVM .. '" "tools\\' .. name .. '.lua" 2>&1'))

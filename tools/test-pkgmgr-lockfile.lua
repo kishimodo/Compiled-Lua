@@ -11,8 +11,8 @@ local function abscwd()
 end
 local ROOT  = abscwd()
 local LUAVM = ROOT .. "\\build\\bin\\luavm.exe"
-local PKG   = ROOT .. "\\package-manager\\src\\rover.lua"
-local REG   = ROOT .. "\\package-manager\\registry-mv"
+local PKG   = ROOT .. "\\rover\\src\\rover.lua"
+local REG   = ROOT .. "\\rover\\registry-mv"
 local PROJ  = (os.getenv("TEMP") or ".") .. "\\luavm-locktest"
 
 local function sh(c) local ok, _, code = os.execute('"' .. c .. '"'); return (ok == true) or (ok == 0) or (code == 0) end

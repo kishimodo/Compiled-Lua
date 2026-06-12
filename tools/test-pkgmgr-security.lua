@@ -10,7 +10,7 @@ local function abscwd()
 end
 local ROOT  = abscwd()
 local LUAVM = ROOT .. "\\build\\bin\\luavm.exe"
-local PKG   = ROOT .. "\\package-manager\\src\\rover.lua"
+local PKG   = ROOT .. "\\rover\\src\\rover.lua"
 local MARK  = (os.getenv("TEMP") or ".") .. "\\luavm-pwned-marker.txt"
 
 local function sh(c) local ok, _, code = os.execute('"' .. c .. '"'); return (ok == true) or (ok == 0) or (code == 0) end
@@ -67,7 +67,7 @@ local driver = (os.getenv("TEMP") or ".") .. "\\luavm-secdriver.lua"
 do
   local f = io.open(driver, "wb")
   f:write([[
-dofile("package-manager/src/rover.lua")
+dofile("rover/src/rover.lua")
 local M = _G.ROVER_PKG
 local good = { "greet", "a.b-c_1", "x", string.rep("a",128) }
 local bad  = { "", "a b", 'a"b', "a&b", "a|b", "a/b", "a\\b", "..", "../x", ".hidden", "-flag",

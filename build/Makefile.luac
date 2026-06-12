@@ -97,8 +97,8 @@ clua: $(BUILD_DIR)/clua.exe
 # Dogfood: rover is an AOT-compiled closed-world Lua program (the largest
 # fidelity fixture in the tree). Needs the archives + aot_entry.o + gcc on
 # PATH (build-luac.bat arranges all three).
-$(BUILD_DIR)/rover.exe: $(BUILD_DIR)/clua.exe $(BUILD_DIR)/aot_entry.o $(ROOT)/package-manager/src/rover.lua
-	$(BUILD_DIR)/clua.exe build $(ROOT)/package-manager/src/rover.lua -O1 -o $@
+$(BUILD_DIR)/rover.exe: $(BUILD_DIR)/clua.exe $(BUILD_DIR)/aot_entry.o $(ROOT)/rover/src/rover.lua
+	$(BUILD_DIR)/clua.exe build $(ROOT)/rover/src/rover.lua -O1 -o $@
 
 .PHONY: rover
 rover: $(BUILD_DIR)/rover.exe

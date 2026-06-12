@@ -185,7 +185,7 @@ else
   local c1, o1 = run(("\"%s\""):format(rover_abs))
   ok(o1:find("rover %-%- the CLua package manager") ~= nil,
      "rover.exe prints the rover banner", o1:sub(1, 120))
-  local _, o2 = run(("\"%s\" -i package-manager\\src\\rover.lua"):format(luavm_abs))
+  local _, o2 = run(("\"%s\" -i rover\\src\\rover.lua"):format(luavm_abs))
   ok(o1 == o2, "rover.exe no-arg output matches the script under -i")
   -- one real command through the compiled pm, from the repo root (the test
   -- registry is repo-relative): `rover list` must not crash

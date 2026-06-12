@@ -1,6 +1,6 @@
 -- rover -- the CLua package manager (local-first, R6 + v1.x).
 --
--- Run by luavm.exe:  luavm.exe -i package-manager/src/rover.lua <cmd> ...
+-- Run by luavm.exe:  luavm.exe -i rover/src/rover.lua <cmd> ...
 --
 -- Model: a single GLOBAL content store -- install once, `require` from any
 -- project. The store is %CLUA_HOME%\packages, or %LOCALAPPDATA%\clua\packages.
@@ -752,7 +752,7 @@ local function require_safe_registry(reg)
   return reg
 end
 
-local REPO_REGISTRY = "package-manager\\registry"
+local REPO_REGISTRY = "rover\\registry"
 local repo_registry_present = nil          -- lazily probed once per process
 local function default_registry()
   local r = os.getenv("ROVER_REGISTRY")

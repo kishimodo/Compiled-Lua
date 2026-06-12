@@ -6,8 +6,8 @@
 
 local LUAVM    = "build\\bin\\luavm.exe"
 local COMPILER = "build\\bin\\compiler.exe"
-local PKG      = "package-manager\\src\\rover.lua"
-local USES     = "package-manager\\test\\uses_greet.lua"
+local PKG      = "rover\\src\\rover.lua"
+local USES     = "rover\\test\\uses_greet.lua"
 local EXE      = (os.getenv("TEMP") or ".") .. "\\pkgmgr_uses.exe"
 
 local function sh(cmd) local ok, _, c = os.execute('"' .. cmd .. '"'); return (ok == true) or (ok == 0) or (c == 0) end

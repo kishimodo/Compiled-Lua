@@ -12,8 +12,8 @@ local function abscwd()
 end
 local CWD     = abscwd()                               -- repo root (absolute)
 local LUAVM   = CWD .. "\\build\\bin\\luavm.exe"
-local PKG     = CWD .. "\\package-manager\\src\\rover.lua"
-local REG     = CWD .. "\\package-manager\\registry"
+local PKG     = CWD .. "\\rover\\src\\rover.lua"
+local REG     = CWD .. "\\rover\\registry"
 local PROJ    = (os.getenv("TEMP") or ".") .. "\\luavm-projtest"
 
 local function sh(cmd) local ok, _, c = os.execute('"' .. cmd .. '"'); return (ok == true) or (ok == 0) or (c == 0) end

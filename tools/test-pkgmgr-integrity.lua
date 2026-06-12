@@ -11,8 +11,8 @@ local function abscwd()
 end
 local ROOT  = abscwd()
 local LUAVM = ROOT .. "\\build\\bin\\luavm.exe"
-local PKG   = ROOT .. "\\package-manager\\src\\rover.lua"
-local REG   = ROOT .. "\\package-manager\\registry-test"
+local PKG   = ROOT .. "\\rover\\src\\rover.lua"
+local REG   = ROOT .. "\\rover\\registry-test"
 local STORE = (function()
   local h = os.getenv("CLUA_HOME")
   if h and h ~= "" then return h .. "\\packages" end

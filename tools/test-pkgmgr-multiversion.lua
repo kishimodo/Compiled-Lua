@@ -1,5 +1,5 @@
 -- Multi-version test: two projects can depend on different versions of one
--- package. Uses the versioned test registry (package-manager/registry-mv, with
+-- package. Uses the versioned test registry (rover/registry-mv, with
 -- vpkg 1.0.0 + 2.0.0). Locks a temp project to a version, compiles a program
 -- that `require`s vpkg (the compiler resolves the lock-pinned version), runs it,
 -- and checks which version was bundled -- then re-locks and reconfirms. Also
@@ -13,8 +13,8 @@ end
 local ROOT  = abscwd()
 local LUAVM = ROOT .. "\\build\\bin\\luavm.exe"
 local COMP  = ROOT .. "\\build\\bin\\compiler.exe"
-local PKG   = ROOT .. "\\package-manager\\src\\rover.lua"
-local REG   = ROOT .. "\\package-manager\\registry-mv"
+local PKG   = ROOT .. "\\rover\\src\\rover.lua"
+local REG   = ROOT .. "\\rover\\registry-mv"
 local PROJ  = (os.getenv("TEMP") or ".") .. "\\luavm-mvtest"
 
 local function sh(cmd) local ok, _, c = os.execute('"' .. cmd .. '"'); return (ok == true) or (ok == 0) or (c == 0) end
