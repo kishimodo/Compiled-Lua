@@ -136,7 +136,7 @@ static void PrintLuaError( lua_State *L ) {
     lua_pop( L, 1 );
 }
 
-/* Wrapper bridging luavm_jit_compile_hook's (L, void*proto) -> void*
+/* Wrapper bridging clua_dispatch_hook's (L, void*proto) -> void*
  * signature to Jit_Compile which returns a JIT_FUNC_T pointer. */
 static void *Runtime_JitCompileHook( lua_State *L, void *Proto ) {
     return ( void * )Jit_Compile( L, ( struct Proto * )Proto );
@@ -300,8 +300,8 @@ int RuntimeMain( int Argc, char **Argv ) {
 
     /* install the JIT hook so luaV_execute trampolines into JIT code
      * for all re-entry paths (require, pcall, C→Lua callbacks) */
-    luavm_jit_compile_hook = Runtime_JitCompileHook;
-    luavm_jit_invoke_hook = ( luavm_jit_invoke_t )Jit_TrampolineEntry;
+    clua_dispatch_hook = Runtime_JitCompileHook;
+    clua_invoke_hook = ( clua_invoke_t )Jit_TrampolineEntry;
 
     if ( !Veh_Init( ) ) {
         fprintf( stderr, "[-] Veh_Init failed (GetLastError=%lu)\n",

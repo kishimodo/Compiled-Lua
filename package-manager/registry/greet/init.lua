@@ -1,5 +1,5 @@
 -- Sample third-party package living in the local test registry. Installed via
--- `luavm-pkg install greet`, after which any project can `require "greet"`.
+-- `rover install greet`, after which any project can `require "greet"`.
 local M = {}
 
 function M.hello(name)

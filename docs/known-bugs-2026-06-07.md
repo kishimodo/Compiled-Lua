@@ -421,3 +421,23 @@ Regression test: `tests/differential/aot_errpath_fidelity.lua` (both engines).
   emitted exes link `runtime-aot.a` (LUAC_AOT_RUNTIME), which carries the
   dispatch CACHE but no JIT compiler (codegen/emit_x64/regalloc excluded;
   the tail-call drive loop does lookup-only dispatch).
+
+- **AOT-NODEBUG-001** (2026-06-12) — a compiled program whose chunks never
+  carry the string constant `"debug"` links `lvm_nointerp.o` instead of the
+  archive's full `lvm.o`: the bytecode interpreter loop (`clua_Interpret`,
+  ~15 KB) is compiled out, because debug hooks — the only way the
+  interpreter can become reachable in a closed-world exe — cannot be
+  activated without the debug library. The scan is the SAME conservative
+  constant scan that disables the -O1 type proofs (`lc_module_uses_debug`).
+  Programs that mention debug keep the full interpreter and behave exactly
+  like the oracle under `debug.sethook` (guarded by
+  tests/differential/aot_debughooks.lua at O0/O1). A program that EVADES the
+  scan (`_G["de".."bug"].sethook(...)`) FAILS FAST: the hook closure is the
+  first thing dispatched through luaV_execute, so the exe exits 1 at the
+  sethook site with `clua: runtime error: <src>:<line>: bytecode interpreter
+  unavailable in this compiled CLua program (closed world: no 'debug'
+  reference, so debug hooks cannot run)` — uncatchable by pcall (it fires
+  inside the call-hook machinery), which is the desirable shape for an
+  evader: loud, immediate, attributed. Same accepted class as
+  AOT-DEBUGREFLECT-001/AOT-CLOSEDWORLD-002. Guarded by
+  tools/test-clua-cli.lua (asserts the message + nonzero exit).

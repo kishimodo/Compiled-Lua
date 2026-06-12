@@ -24,7 +24,7 @@
    (harmless), while a debug table assembled dynamically (_G["de".."bug"])
    evades it -- documented residual, the standard optimizing-compiler
    reflection caveat. */
-static bool module_uses_debug(LcModule *m) {
+bool lc_module_uses_debug(LcModule *m) {
   for (uint32_t i = 0; i < m->nfuncs; i++) {
     Proto *p = m->funcs[i] ? m->funcs[i]->source : NULL;
     if (!p) continue;
@@ -54,7 +54,7 @@ bool lc_optimize(LcModule *m, const LcPassConfig *cfg) {
   }
 
   if (cfg->opt_level >= 1) {
-    bool no_proofs = module_uses_debug(m);
+    bool no_proofs = lc_module_uses_debug(m);
     /* M2: interprocedural argument/return type propagation runs the local
        inference in three phases (baseline -> callee param entries -> callers
        with return summaries); the final phase leaves the same per-inst

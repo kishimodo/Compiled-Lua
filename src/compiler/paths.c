@@ -31,7 +31,7 @@ static int FormatInitPath( const char *Base, const char *Module,
 }
 
 /* <Base>/<module-dots-to-slashes>/<version>/init.lua -- the versioned store
-   layout written by `luavm-pkg` for multi-version coexistence. */
+   layout written by `rover` for multi-version coexistence. */
 static int FormatVersionedInitPath( const char *Base, const char *Module,
                                     const char *Version, char *Out, size_t OutSize ) {
     static const char Tail[] = "/init.lua";
@@ -49,8 +49,8 @@ static int FormatVersionedInitPath( const char *Base, const char *Module,
     return 1;
 }
 
-/* Find <ModuleName>'s pinned version in <LockDir>/luavm.lock (the project
-   lockfile, next to the source being compiled). Scans the `luavm-pkg`-generated
+/* Find <ModuleName>'s pinned version in <LockDir>/rover.lock (the project
+   lockfile, next to the source being compiled). Scans the `rover`-generated
    `["<name>"] = { version = "X", ... }` format with a targeted string search
    (the lockfile is small and machine-written). Returns 1 + version on hit. */
 static int Paths_LockedVersion( const char *LockDir, const char *ModuleName,
@@ -63,7 +63,7 @@ static int Paths_LockedVersion( const char *LockDir, const char *ModuleName,
     char *P, *V, *Q1, *Q2;
     size_t N, Len;
 
-    if ( snprintf( LockPath, sizeof( LockPath ), "%s/luavm.lock", Dir ) >= ( int )sizeof( LockPath ) ) { return 0; }
+    if ( snprintf( LockPath, sizeof( LockPath ), "%s/rover.lock", Dir ) >= ( int )sizeof( LockPath ) ) { return 0; }
     F = fopen( LockPath, "rb" );
     if ( F == NULL ) { return 0; }
     N = fread( Buf, 1, sizeof( Buf ) - 1, F );
@@ -88,17 +88,17 @@ static int Paths_LockedVersion( const char *LockDir, const char *ModuleName,
     return 1;
 }
 
-/* Installed-package store: $LUAVM_HOME/packages, else %LOCALAPPDATA%/luavm/
+/* Installed-package store: $CLUA_HOME/packages, else %LOCALAPPDATA%/clua/
    packages. Returns 1 with a forward-slash path in Out. Lets compiler.exe
    resolve `require "thirdparty"` against packages installed once, globally
    (the NuGet/Go "install once, require anywhere" model). */
 static int Paths_StoreBase( char *Out, size_t OutSize ) {
-    const char *Home = getenv( "LUAVM_HOME" );
+    const char *Home = getenv( "CLUA_HOME" );
     char Tmp[ 400 ];
     if ( Home == NULL || Home[ 0 ] == '\0' ) {
         const char *Local = getenv( "LOCALAPPDATA" );
         if ( Local == NULL || Local[ 0 ] == '\0' ) { return 0; }
-        if ( snprintf( Tmp, sizeof( Tmp ), "%s/luavm", Local ) >= ( int )sizeof( Tmp ) ) { return 0; }
+        if ( snprintf( Tmp, sizeof( Tmp ), "%s/clua", Local ) >= ( int )sizeof( Tmp ) ) { return 0; }
         Home = Tmp;
     }
     if ( snprintf( Out, OutSize, "%s/packages", Home ) >= ( int )OutSize ) { return 0; }
@@ -106,7 +106,7 @@ static int Paths_StoreBase( char *Out, size_t OutSize ) {
     return 1;
 }
 
-/* 1 if Path lies under the global package store (the luavm-pkg install root).
+/* 1 if Path lies under the global package store (the rover install root).
    Lets the diagnostics pass skip linting third-party installed packages -- the
    user can't act on warnings in code they didn't write -- while still linting
    their own project source. Comparison is case-insensitive and slash-agnostic
@@ -168,14 +168,14 @@ int Paths_ModuleNameToFilePath( const char    *ModuleName,
             if ( FileExists( OutBuf ) ) { return 1; }
         }
     }
-    /* Installed third-party packages from the global store (luavm-pkg
+    /* Installed third-party packages from the global store (rover
        install). Checked before the BasePath fallback (which returns even a
        non-existent path). Try the <name>/init.lua layout then a flat
        <name>.lua single-file package. */
     {
         char Store[ 400 ];
         if ( Paths_StoreBase( Store, sizeof( Store ) ) ) {
-            /* Lock-pinned version first: a project's luavm.lock maps this
+            /* Lock-pinned version first: a project's rover.lock maps this
                package to an exact version -> <store>/<name>/<version>/init.lua.
                Lets two projects depend on different versions of one package. */
             char Ver[ 64 ];

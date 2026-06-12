@@ -34,7 +34,7 @@ int main(void) {
 
     lua_State *L = luaL_newstate();
     luaL_openlibs(L);
-    luavm_jit_compile_hook = TestJitHook;
+    clua_dispatch_hook = TestJitHook;
     Ctype_Init();
     Ffi_RegisterWindowsTypes();
     Ffi_OpenLib(L);

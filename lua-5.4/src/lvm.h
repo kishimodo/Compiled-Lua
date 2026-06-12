@@ -117,18 +117,20 @@ typedef enum {
 
 
 
-/* JIT hook — set by the runtime to compile Protos on demand.
- * Returns the JIT entry point as void*, or NULL if not compilable.
- * luaV_execute uses this to avoid running the interpreter loop. */
-typedef void *(*luavm_jit_compile_t)(lua_State *L, void *proto);
-extern luavm_jit_compile_t luavm_jit_compile_hook;
+/* CLua native-dispatch hook — set by the runtime to resolve a Proto to its
+ * native body (AOT: a lookup in the registered-body cache; v1 JIT: compile
+ * on demand). Returns the entry point as void*, or NULL when there is no
+ * native body (then luaV_execute falls back to the bytecode interpreter).
+ * NULL hook = pure interpreter (luavm.exe -i, the differential oracle). */
+typedef void *(*clua_dispatch_t)(lua_State *L, void *proto);
+extern clua_dispatch_t clua_dispatch_hook;
 
-/* Invocation hook: called by luaV_execute to invoke a JIT-compiled
- * body. Default implementation calls the function directly; runtime_init
- * overrides this with Jit_TrampolineEntry (which wraps the call in a
- * setjmp boundary so VEH-recovered faults raise as Lua errors). */
-typedef int ( *luavm_jit_invoke_t )( lua_State *L, int ( *Fn )( lua_State * ) );
-extern luavm_jit_invoke_t luavm_jit_invoke_hook;
+/* Invocation hook: called by luaV_execute to invoke a native body. The
+ * default calls the function directly; runtime_init overrides this with
+ * Jit_TrampolineEntry (which wraps the call in a setjmp boundary so
+ * VEH-recovered faults raise as Lua errors). */
+typedef int ( *clua_invoke_t )( lua_State *L, int ( *Fn )( lua_State * ) );
+extern clua_invoke_t clua_invoke_hook;
 
 LUAI_FUNC int luaV_equalobj (lua_State *L, const TValue *t1, const TValue *t2);
 LUAI_FUNC int luaV_lessthan (lua_State *L, const TValue *l, const TValue *r);

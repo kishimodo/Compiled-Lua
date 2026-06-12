@@ -1,11 +1,11 @@
--- tools/run-tests.lua : LuaVM's universal, auto-discovering test runner.
+-- tools/run-tests.lua : CLua's universal, auto-discovering test runner.
 --
 -- Run it via  build\run-tests.bat  (which sets the MinGW/make PATH so gcc/ar are
 -- found, builds the products, then calls  build\bin\luavm.exe tools\run-tests.lua).
 --
 -- It discovers and runs four test layers with ZERO per-test wiring -- drop a file
 -- in the matching folder and it runs; delete one and nothing breaks:
---   tests/unit/test_*.c        C unit tests, compiled against build/bin/libluavmtest.a
+--   tests/unit/test_*.c        C unit tests, compiled against build/bin/libcluatest.a
 --   tests/lua/*.lua            behavioral, run under luavm.exe (assert + exit non-zero)
 --   tests/packages/test_*.lua  package tests, compiled with compiler.exe then run
 --   tests/differential/*.lua   same script under JIT and -i; stdout must match
@@ -18,13 +18,13 @@
 local BIN      = "build\\bin"
 local LUAVM    = BIN .. "\\luavm.exe"
 local COMPILER = BIN .. "\\compiler.exe"
-local ARCHIVE  = BIN .. "\\libluavmtest.a"
+local ARCHIVE  = BIN .. "\\libcluatest.a"
 local LUALIB   = BIN .. "\\liblua54.a"
 local TESTBIN  = BIN .. "\\tests"
 local CC       = "x86_64-w64-mingw32-gcc"
 local AR       = "ar"
 local CFLAGS   = "-std=c99 -Wall -Wextra -Wno-unused-parameter -O2 -g "
-              .. "-I./src -I./lua-5.4/src -I./build/gen -DLUAVM_TARGET_WINDOWS_X64=1 -Itests/unit"
+              .. "-I./src -I./lua-5.4/src -I./build/gen -DCLUA_TARGET_WINDOWS_X64=1 -Itests/unit"
 -- Broad but standard import libs; gcc ignores any a given test doesn't reference.
 local LDLIBS   = "-lm -lkernel32 -lbcrypt -lws2_32 -lntdll -ladvapi32 -luser32 -lole32 -lstdc++"
 
@@ -58,10 +58,10 @@ end
 -- the same gcc as the unit tests): a kill-on-close Job Object enforces a hard
 -- wall-clock deadline on the whole child process tree, so one hung JIT loop
 -- cannot wedge the suite. Exit 124 = deadline fired (GNU timeout convention).
--- Override the budget with LUAVM_TEST_TIMEOUT_MS; if the watchdog fails to
+-- Override the budget with CLUA_TEST_TIMEOUT_MS; if the watchdog fails to
 -- build we warn and run unguarded rather than refusing to test.
 local WATCHDOG    = TESTBIN .. "\\timeout-run.exe"
-local TIMEOUT_MS  = tonumber(os.getenv("LUAVM_TEST_TIMEOUT_MS") or "") or 120000
+local TIMEOUT_MS  = tonumber(os.getenv("CLUA_TEST_TIMEOUT_MS") or "") or 120000
 local have_watchdog = false
 
 local function build_watchdog()
@@ -448,8 +448,8 @@ end
 
 -- ---- drive -----------------------------------------------------------------
 
-print("LuaVM test runner -- auto-discovering all of tests/ + tools/ suites")
-header("Building core archive (build/bin/libluavmtest.a)")
+print("CLua test runner -- auto-discovering all of tests/ + tools/ suites")
+header("Building core archive (build/bin/libcluatest.a)")
 if not build_archive() then
   print("\n[-] could not build the test archive; aborting.")
   os.exit(1)

@@ -284,19 +284,19 @@ static int LuaVm_Repl( lua_State *L ) {
     return 0;
 }
 
-/* Prepend the luavm-pkg global package store to package.path so the host /
+/* Prepend the rover global package store to package.path so the host /
    interpreter can `require` installed third-party packages from disk. Mirrors
    the store location the compiler's Paths_StoreBase resolves at compile time:
-   %LUAVM_HOME%\packages or %LOCALAPPDATA%\luavm\packages. Best-effort. */
+   %CLUA_HOME%\packages or %LOCALAPPDATA%\clua\packages. Best-effort. */
 static void LuaVm_SetupModulePath( lua_State *L ) {
     static const char *Code =
-        "local home = os.getenv('LUAVM_HOME')\n"
-        "if not home or home == '' then home = (os.getenv('LOCALAPPDATA') or '.') .. '\\\\luavm' end\n"
+        "local home = os.getenv('CLUA_HOME')\n"
+        "if not home or home == '' then home = (os.getenv('LOCALAPPDATA') or '.') .. '\\\\clua' end\n"
         "local store = home .. '\\\\packages'\n"
         /* lock-pinned version searcher (multi-version store). Inserted before the
-           flat-path searcher so a project's luavm.lock pin wins over `latest`. */
+           flat-path searcher so a project's rover.lock pin wins over `latest`. */
         "local function locked_version(name)\n"
-        "  local f = io.open('luavm.lock', 'rb'); if not f then return nil end\n"
+        "  local f = io.open('rover.lock', 'rb'); if not f then return nil end\n"
         "  local c = f:read('*a') or ''; f:close()\n"
         "  local esc = name:gsub('(%W)', '%%%1')\n"
         "  return c:match('%[\"' .. esc .. '\"%]%s*=%s*{[^}]-version%s*=%s*\"([^\"]+)\"')\n"
@@ -328,8 +328,8 @@ int main( int Argc, char **Argv ) {
         ArgBase   = 2;
     }
     if ( !Interpret ) {
-        luavm_jit_compile_hook = LuaVm_JitCompileHook;
-        luavm_jit_invoke_hook  = ( luavm_jit_invoke_t )Jit_TrampolineEntry;
+        clua_dispatch_hook = LuaVm_JitCompileHook;
+        clua_invoke_hook  = ( clua_invoke_t )Jit_TrampolineEntry;
     }
 
     if ( !Veh_Init( ) ) {

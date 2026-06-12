@@ -21,10 +21,14 @@
 #include <stddef.h>
 
 /* Link the program. Returns 1 on success, 0 + message in `err`.
-**   userObj — the codegen COFF .o (luac_fn_<i> bodies + .rdata$L blob)
-**   outExe  — output PE path
+**   userObj   — the codegen COFF .o (luac_fn_<i> bodies + .rdata$L blob)
+**   outExe    — output PE path
+**   no_interp — nonzero when the closed-world scan proved the program never
+**               references "debug": the link substitutes lvm_nointerp.o for
+**               the Lua archive's lvm.o, dropping the unreachable bytecode
+**               interpreter loop (~15 KB) from the exe.
 */
 int LuacLink_LinkProgram( const char *userObj, const char *outExe,
-                          char *err, size_t errlen );
+                          int no_interp, char *err, size_t errlen );
 
 #endif /* LUAC_LINK_PE_LINK_V2_H */

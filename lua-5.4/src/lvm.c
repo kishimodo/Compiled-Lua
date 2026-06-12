@@ -1167,64 +1167,82 @@ void luaV_finishOp (lua_State *L) {
 #define vmbreak		break
 
 
-/* JIT trampoline hook — set by the runtime before the first Lua call.
- * NULL means no JIT is loaded (compiler, runluac tool paths). */
-luavm_jit_compile_t luavm_jit_compile_hook = NULL;
+/* CLua native-dispatch hook — set by the runtime before the first Lua call.
+ * NULL means no native backend is loaded (compiler, luavm -i oracle paths). */
+clua_dispatch_t clua_dispatch_hook = NULL;
 
-static int LuaVM_DefaultJitInvoke( lua_State *L, int ( *Fn )( lua_State * ) ) {
+static int Clua_DefaultInvoke( lua_State *L, int ( *Fn )( lua_State * ) ) {
     return Fn( L );
 }
 
-luavm_jit_invoke_t luavm_jit_invoke_hook = LuaVM_DefaultJitInvoke;
+clua_invoke_t clua_invoke_hook = Clua_DefaultInvoke;
 
+#ifndef CLUA_NO_INTERP
 /* Revived upstream bytecode interpreter (see below). Used as a true
- * no-codegen execution backend when no JIT compile hook is registered
+ * no-codegen execution backend when no dispatch hook is registered
  * (luavm.exe -i, and the differential-test oracle). */
-static void luaVM_Interpret (lua_State *L, CallInfo *ci);
+static void clua_Interpret (lua_State *L, CallInfo *ci);
+#endif
 
 void luaV_execute (lua_State *L, CallInfo *ci) {
-  /* JIT trampoline: if the runtime registered a JIT compiler, compile this
-   * Proto on demand and jump into the generated code. The interpreter loop
-   * never runs — this function contains no bytecode dispatch.
+  /* Native dispatch: if the runtime registered a dispatch hook, resolve this
+   * Proto to its native body and jump into it. The interpreter loop never
+   * runs — this function contains no bytecode dispatch.
    *
    * Called for re-entry paths where the upstream call machinery routes
-   * through luaV_execute rather than our Rt_Call JIT dispatch (e.g.
-   * require, pcall, any C→Lua callback via luaD_call). We compile the
+   * through luaV_execute rather than our Rt_Call native dispatch (e.g.
+   * require, pcall, any C→Lua callback via luaD_call). We resolve the
    * Proto, invoke it, then call luaD_poscall to restore CI and place
    * results just as OP_RETURN would have. */
-  /* Skip the JIT when a debug hook is active: generated code emits no call/
-   * line/count hook checks, so a hooked program (profiler, coverage, debugger,
-   * the testes db.lua) must run in the hook-aware bytecode interpreter. The
-   * non-hooked path (hookmask == 0) is unchanged. */
-  if (luavm_jit_compile_hook != NULL && L->hookmask == 0) {
+  /* Skip native code when a debug hook is active: generated code emits no
+   * call/line/count hook checks, so a hooked program (profiler, coverage,
+   * debugger, the testes db.lua) must run in the hook-aware bytecode
+   * interpreter. The non-hooked path (hookmask == 0) is unchanged. */
+  if (clua_dispatch_hook != NULL && L->hookmask == 0) {
     LClosure *cl = ci_func(ci);
     int (*jitted)(lua_State *) = (int (*)(lua_State *))
-      luavm_jit_compile_hook(L, (void *)cl->p);
+      clua_dispatch_hook(L, (void *)cl->p);
     if (jitted != NULL) {
-      int nres = luavm_jit_invoke_hook(L, jitted);
+      int nres = clua_invoke_hook(L, jitted);
       /* Rt_PrepReturn placed results at L->ci->func.p and set L->top.
        * luaD_poscall moves them to the caller's expected position and
        * restores L->ci to the caller (mirrors OP_RETURN's path). */
       luaD_poscall(L, ci, nres);
       return;
     }
-    /* The JIT DECLINED this Proto (hit a codegen limit -- too many forward
-     * jumps / opcodes / exec-mem -- or an unsupported op). Do NOT abort: fall
-     * through to the bytecode interpreter below, a transparent slow path. It
-     * runs this Proto in `ci` and handles its own poscall, exactly like the
-     * no-hook path. This unifies luavm.exe (the differential oracle) with the
-     * baked runtime and turns every "JIT can't do this" case into correct,
-     * slower execution instead of a fatal crash. */
+    /* The backend DECLINED this Proto (v1 JIT: codegen limit or unsupported
+     * op; AOT closed world: cannot happen — every reachable Proto has a
+     * registered body). Do NOT abort: fall through to the bytecode
+     * interpreter below, a transparent slow path. It runs this Proto in `ci`
+     * and handles its own poscall, exactly like the no-hook path. This
+     * unifies luavm.exe (the differential oracle) with the baked runtime and
+     * turns every "backend can't do this" case into correct, slower
+     * execution instead of a fatal crash. */
   }
-  /* No JIT hook registered, OR the JIT declined this Proto: run the bytecode
-   * interpreter directly (the -i backend / differential oracle / JIT fallback). */
-  luaVM_Interpret(L, ci);
+#ifdef CLUA_NO_INTERP
+  /* AOT no-interpreter variant (lvm_nointerp.o, linked into compiled exes
+   * whose closed-world scan proves the chunk never references "debug"):
+   * hooks can never be activated and every reachable Proto has a registered
+   * native body, so this path is unreachable for legal programs. A program
+   * that EVADES the scan (e.g. _G["de".."bug"].sethook) lands here —
+   * a documented bounded divergence (AOT-CLOSEDWORLD-002 family) instead of
+   * carrying the ~15 KB interpreter loop in every such exe. */
+  luaG_runerror(L, "bytecode interpreter unavailable in this compiled CLua "
+                   "program (closed world: no 'debug' reference, so debug "
+                   "hooks cannot run)");
+#else
+  /* No dispatch hook registered, OR the backend declined this Proto: run the
+   * bytecode interpreter directly (the -i backend / differential oracle /
+   * fallback). */
+  clua_Interpret(L, ci);
+#endif
 }
 
+#ifndef CLUA_NO_INTERP
 /* Revived original Lua 5.4 bytecode interpreter loop. Selected at runtime by
- * luaV_execute when no JIT compile hook is registered (the -i interpreter
- * backend / differential oracle). The JIT remains the default executor. */
-static void luaVM_Interpret (lua_State *L, CallInfo *ci) {
+ * luaV_execute when no dispatch hook is registered (the -i interpreter
+ * backend / differential oracle). Compiled out of lvm_nointerp.o. */
+static void clua_Interpret (lua_State *L, CallInfo *ci) {
   LClosure *cl;
   TValue *k;
   StkId base;
@@ -1975,5 +1993,6 @@ static void luaVM_Interpret (lua_State *L, CallInfo *ci) {
     }
   }
 }
+#endif /* !CLUA_NO_INTERP */
 
 /* }================================================================== */

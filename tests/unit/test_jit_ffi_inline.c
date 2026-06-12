@@ -40,7 +40,7 @@ int main( void ) {
     lua_State *L = luaL_newstate();
     CHECK_NOT_NULL( L );
     luaL_openlibs( L );
-    luavm_jit_compile_hook = JitHook;
+    clua_dispatch_hook = JitHook;
     Ctype_Init();
     Ffi_RegisterWindowsTypes();
     Ffi_OpenLib( L );

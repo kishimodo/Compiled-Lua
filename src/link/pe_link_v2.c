@@ -38,7 +38,7 @@ static void set_errv( char *err, size_t errlen, const char *fmt, ... ) {
 ** the base Makefile's archive objects where it matters: the include dirs +
 ** the Windows-x64 target define govern the Lua struct layouts. (NB: do NOT
 ** pass -DLUA_USE_WINDOWS — luaconf.h already defines it on a Windows target.) */
-#define LUAC_DEFINES "-DLUAVM_TARGET_WINDOWS_X64=1 -DLUA_COMPAT_5_3 -DLUAC_AOT_RUNTIME=1"
+#define LUAC_DEFINES "-DCLUA_TARGET_WINDOWS_X64=1 -DLUA_COMPAT_5_3 -DLUAC_AOT_RUNTIME=1"
 
 #define LC_PATH_MAX 1024
 
@@ -46,6 +46,7 @@ typedef struct {
     char runtime_a[ LC_PATH_MAX ];    /* runtime-aot.a                        */
     char lualib_a[ LC_PATH_MAX ];     /* liblua54-embedded.a                  */
     char aot_entry_o[ LC_PATH_MAX ];  /* precompiled entry ("" if not found)  */
+    char lvm_nointerp_o[ LC_PATH_MAX ]; /* interpreter-free lvm ("" if absent)*/
     char inc_src[ LC_PATH_MAX ];      /* -I dir containing jit/, runtime/     */
     char inc_lua[ LC_PATH_MAX ];      /* -I dir containing lua.h              */
     char aot_entry_c[ LC_PATH_MAX ];  /* fallback source ("" if not found)    */
@@ -79,6 +80,9 @@ static int TryRoot( LcToolchain *tc, const char *root, const char *lib,
     snprintf( tc->aot_entry_o, sizeof( tc->aot_entry_o ),
               "%s\\%s%saot_entry.o", root, lib, sep );
     if ( !FileExists( tc->aot_entry_o ) ) tc->aot_entry_o[0] = '\0';
+    snprintf( tc->lvm_nointerp_o, sizeof( tc->lvm_nointerp_o ),
+              "%s\\%s%slvm_nointerp.o", root, lib, sep );
+    if ( !FileExists( tc->lvm_nointerp_o ) ) tc->lvm_nointerp_o[0] = '\0';
 
     /* cold-tree fallback inputs (optional — only needed when aot_entry.o is
     ** absent): include dirs + the entry source, given relative to root. */
@@ -157,9 +161,10 @@ static const char *GccCommand( void ) {
 }
 
 int LuacLink_LinkProgram( const char *userObj, const char *outExe,
-                          char *err, size_t errlen ) {
+                          int no_interp, char *err, size_t errlen ) {
     char        cmd[ 4096 ];
     char        entry_obj[ LC_PATH_MAX ];
+    char        lvm_obj[ LC_PATH_MAX + 4 ];
     LcToolchain tc;
     int         rc;
 
@@ -202,19 +207,33 @@ int LuacLink_LinkProgram( const char *userObj, const char *outExe,
         }
     }
 
+    /* Interpreter selection: a program whose closed-world scan proves it
+    ** never references "debug" can never activate a debug hook, so the
+    ** bytecode interpreter loop is unreachable — link lvm_nointerp.o (the
+    ** CLUA_NO_INTERP build of lvm.c, defining every luaV_* helper but no
+    ** clua_Interpret) BEFORE the Lua archive so its full lvm.o member is
+    ** never extracted (~15 KB). Programs that mention debug keep the full
+    ** interpreter: debug.sethook routes them through it, matching the
+    ** oracle exactly. Falls back silently when the object isn't shipped. */
+    lvm_obj[0] = '\0';
+    if ( no_interp && tc.lvm_nointerp_o[0] ) {
+        snprintf( lvm_obj, sizeof( lvm_obj ), "\"%s\" ", tc.lvm_nointerp_o );
+    }
+
     /* ---- the single link ----
     ** Order: user bodies+blob, aot_entry (main + closed-world stubs, defined
     ** BEFORE the archives so the parser/lexer/dump members are never
-    ** extracted), runtime-aot.a (pulls protoinit_rt.o via
-    ** LuacProgram_BuildEntry), the Lua core, then the Win32 import libs.
-    ** -s strips symbols/debug info; --gc-sections drops unreferenced
-    ** functions (both archives are -ffunction-sections; lib registration
-    ** tables live in .rdata and keep every reachable lib function alive). */
+    ** extracted), optional lvm_nointerp.o, runtime-aot.a (pulls
+    ** protoinit_rt.o via LuacProgram_BuildEntry), the Lua core, then the
+    ** Win32 import libs. -s strips symbols/debug info; --gc-sections drops
+    ** unreferenced functions (both archives are -ffunction-sections; lib
+    ** registration tables live in .rdata and keep every reachable lib
+    ** function alive). */
     snprintf( cmd, sizeof( cmd ),
-              "%s -o \"%s\" \"%s\" \"%s\" \"%s\" \"%s\" "
+              "%s -o \"%s\" \"%s\" \"%s\" %s\"%s\" \"%s\" "
               "-Wl,--subsystem,console -Wl,--gc-sections -s "
               "-lm -lkernel32 -ladvapi32",
-              GccCommand( ), outExe, userObj, entry_obj,
+              GccCommand( ), outExe, userObj, entry_obj, lvm_obj,
               tc.runtime_a, tc.lualib_a );
     rc = run_cmd( cmd );
     if ( rc != 0 ) {

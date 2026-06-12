@@ -42,7 +42,7 @@ static int RunLua(lua_State *L, const char *Src) {
 int main(void) {
     TEST_BEGIN("ffi_lib_cast");
 
-    luavm_jit_compile_hook = TestJitHook;
+    clua_dispatch_hook = TestJitHook;
     lua_State *L = luaL_newstate();
     luaL_openlibs(L);
     Ctype_Init();

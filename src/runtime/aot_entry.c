@@ -33,7 +33,7 @@
 #include "lfunc.h"
 #include "lgc.h"
 #include "ldo.h"
-#include "lvm.h"        /* luavm_jit_compile_hook + luavm_jit_compile_t typedef */
+#include "lvm.h"        /* clua_dispatch_hook + clua_dispatch_t typedef */
 
 #include "jit/dispatch.h"
 #include "runtime/coro.h"   /* fiber-based coroutines so native code can yield */
@@ -53,14 +53,14 @@ extern Proto *LuacProgram_BuildEntry( lua_State *L );
 
 /*!
  * @brief
- *  Lookup-only dispatch hook installed into luavm_jit_compile_hook.
+ *  Lookup-only dispatch hook installed into clua_dispatch_hook.
  *
  *  luaV_execute (lvm.c:1199) calls this with the callee closure's Proto*; we
  *  return the pre-registered AOT body for that Proto (or NULL). We use
  *  Jit_LookupCached -- NEVER Jit_Compile -- because AOT bodies are registered
  *  up front by LuacProgram_BuildEntry and there is no JIT in an AOT program.
  *
- *  Signature matches luavm_jit_compile_t == void *(*)(lua_State *, void *).
+ *  Signature matches clua_dispatch_t == void *(*)(lua_State *, void *).
  */
 static void *AotLookupHook( lua_State *L, void *proto ) {
     ( void )L;
@@ -141,7 +141,7 @@ int main( int argc, char **argv ) {
                                                  fiber-based lib (native code can
                                                  yield across call frames), as v1's
                                                  RuntimeMain does (runtime_init.c) */
-    luavm_jit_compile_hook = AotLookupHook;   /* AOT dispatch (lookup-only)   */
+    clua_dispatch_hook = AotLookupHook;   /* AOT dispatch (lookup-only)   */
 
     /* Build every Proto + register each luac_fn_* body; returns the entry. */
     Proto *entry = LuacProgram_BuildEntry( L );

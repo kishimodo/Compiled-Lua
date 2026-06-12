@@ -1,7 +1,7 @@
 -- Polish test (Feature 6): caret semver on 0.x (^0.2.3 pins the MINOR when
 -- major==0, per node-semver), prerelease handling, `remove` dropping the entry
--- from BOTH luavm.toml and luavm.lock, the `--registry` flag, and `publish`
--- index.json generation. Pure-logic checks use the $LUAVM_PKG_TEST export hook;
+-- from BOTH rover.toml and rover.lock, the `--registry` flag, and `publish`
+-- index.json generation. Pure-logic checks use the $ROVER_PKG_TEST export hook;
 -- end-to-end checks use registry-test. Run from the repo root by luavm.exe.
 
 local function abscwd()
@@ -10,7 +10,7 @@ local function abscwd()
 end
 local ROOT  = abscwd()
 local LUAVM = ROOT .. "\\build\\bin\\luavm.exe"
-local PKG   = ROOT .. "\\package-manager\\src\\luavm-pkg.lua"
+local PKG   = ROOT .. "\\package-manager\\src\\rover.lua"
 local REG   = ROOT .. "\\package-manager\\registry-test"
 local PROJ  = (os.getenv("TEMP") or ".") .. "\\luavm-semvertest"
 
@@ -27,8 +27,8 @@ local function fail(m) print("[-] FAIL test-pkgmgr-semver: " .. m); cleanup(); o
 do
   local driver = (os.getenv("TEMP") or ".") .. "\\luavm-semverdriver.lua"
   spit(driver, [[
-dofile("package-manager/src/luavm-pkg.lua")
-local M = _G.LUAVM_PKG
+dofile("package-manager/src/rover.lua")
+local M = _G.ROVER_PKG
 local function eq(got, want, label)
   if got ~= want then print("FAILCASE:"..label.." got="..tostring(got).." want="..tostring(want)); os.exit(7) end
 end
@@ -83,7 +83,7 @@ eq(M.registry_ok("a|b"),                          false, "registry-rejects-pipe"
 eq(M.registry_ok("a%PATH%b"),                     false, "registry-rejects-percent")
 print("SEMVER_OK")
 ]])
-  local p = io.popen('set "LUAVM_PKG_TEST=1" && "' .. LUAVM .. '" -i "' .. driver .. '" 2>&1')
+  local p = io.popen('set "ROVER_PKG_TEST=1" && "' .. LUAVM .. '" -i "' .. driver .. '" 2>&1')
   local out = p and p:read("*a") or ""; if p then p:close() end
   os.remove(driver)
   if not out:match("SEMVER_OK") then fail("semver logic check failed: " .. (out:gsub("%s+", " "))) end
@@ -119,23 +119,23 @@ end
 ----------------------------------------------------------------------
 sh('rmdir /S /Q "' .. PROJ .. '" >nul 2>&1'); sh('mkdir "' .. PROJ .. '" >nul 2>&1')
 cleanup()
-spit(PROJ .. "\\luavm.toml", '[dependencies]\nleaf = "^1.0.0"\n')
+spit(PROJ .. "\\rover.toml", '[dependencies]\nleaf = "^1.0.0"\n')
 if not pk('install --registry "' .. REG .. '" >nul 2>&1') then fail("install with --registry flag") end
-local lock = slurp(PROJ .. "\\luavm.lock") or ""
+local lock = slurp(PROJ .. "\\rover.lock") or ""
 if not lock:match('%["leaf"%].-version%s*=%s*"1%.0%.0"') then fail("--registry install did not lock leaf 1.0.0") end
 
 ----------------------------------------------------------------------
--- D) `remove` drops the dependency from BOTH luavm.toml AND luavm.lock.
+-- D) `remove` drops the dependency from BOTH rover.toml AND rover.lock.
 ----------------------------------------------------------------------
 -- add a second dep so the toml/lock are non-trivial
 if not pk('add mid "' .. REG .. '" >nul 2>&1') then fail("add mid for remove test") end
 if not pk('remove leaf >nul 2>&1') then fail("remove leaf") end
-local toml2 = slurp(PROJ .. "\\luavm.toml") or ""
-local lock2 = slurp(PROJ .. "\\luavm.lock") or ""
-if toml2:match("\n%s*leaf%s*=") then fail("remove did not drop leaf from luavm.toml") end
+local toml2 = slurp(PROJ .. "\\rover.toml") or ""
+local lock2 = slurp(PROJ .. "\\rover.lock") or ""
+if toml2:match("\n%s*leaf%s*=") then fail("remove did not drop leaf from rover.toml") end
 -- check the TOP-LEVEL lock entry (`["leaf"] = {`) is gone -- note that mid's
 -- `deps = { ["leaf"] = ... }` edge legitimately still mentions leaf as a name.
-if lock2:match('%["leaf"%]%s*=%s*{%s*version') then fail("remove did not drop the leaf entry from luavm.lock") end
+if lock2:match('%["leaf"%]%s*=%s*{%s*version') then fail("remove did not drop the leaf entry from rover.lock") end
 -- mid must still be present (remove only targets the named package)
 if not lock2:match('%["mid"%]%s*=%s*{%s*version') then fail("remove leaf should not have removed mid from the lock") end
 

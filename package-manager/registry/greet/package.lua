@@ -1,4 +1,4 @@
--- Package manifest for `greet` (read by luavm-pkg without executing init.lua).
+-- Package manifest for `greet` (read by rover without executing init.lua).
 return {
   name        = "greet",
   version     = "1.0.0",

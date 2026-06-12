@@ -1,6 +1,6 @@
--- Project-workflow test: luavm.toml (deps) + luavm.lock (resolved versions +
+-- Project-workflow test: rover.toml (deps) + rover.lock (resolved versions +
 -- hashes). Run by luavm.exe from the repo root. Operates in a temp project dir
--- so it never writes luavm.toml/luavm.lock into the repo. Cleans up afterwards.
+-- so it never writes rover.toml/rover.lock into the repo. Cleans up afterwards.
 
 -- Absolute repo root: cmd's `cd` with no args prints the current directory.
 -- (os.getenv("CD") isn't reliably set when launched by make.) We need an
@@ -12,7 +12,7 @@ local function abscwd()
 end
 local CWD     = abscwd()                               -- repo root (absolute)
 local LUAVM   = CWD .. "\\build\\bin\\luavm.exe"
-local PKG     = CWD .. "\\package-manager\\src\\luavm-pkg.lua"
+local PKG     = CWD .. "\\package-manager\\src\\rover.lua"
 local REG     = CWD .. "\\package-manager\\registry"
 local PROJ    = (os.getenv("TEMP") or ".") .. "\\luavm-projtest"
 
@@ -32,16 +32,16 @@ sh('rmdir /S /Q "' .. PROJ .. '" >nul 2>&1')
 sh('mkdir "' .. PROJ .. '" >nul 2>&1')
 sh(LUAVM .. ' -i ' .. PKG .. ' remove greet >nul 2>&1')
 
--- 1) add a dependency: installs it AND records luavm.toml + luavm.lock
+-- 1) add a dependency: installs it AND records rover.toml + rover.lock
 if not pk('add greet "' .. REG .. '"') then fail("add greet") end
 
-local toml = slurp(PROJ .. "\\luavm.toml")
-if not toml then fail("luavm.toml not created") end
-if not toml:match("%[dependencies%]") or not toml:match("greet%s*=") then fail("luavm.toml missing greet dependency") end
+local toml = slurp(PROJ .. "\\rover.toml")
+if not toml then fail("rover.toml not created") end
+if not toml:match("%[dependencies%]") or not toml:match("greet%s*=") then fail("rover.toml missing greet dependency") end
 
-local lock = slurp(PROJ .. "\\luavm.lock")
-if not lock then fail("luavm.lock not created") end
-if not lock:match('%["greet"%]') or not lock:match('hash%s*=%s*"%x%x%x') then fail("luavm.lock missing greet version/hash") end
+local lock = slurp(PROJ .. "\\rover.lock")
+if not lock then fail("rover.lock not created") end
+if not lock:match('%["greet"%]') or not lock:match('hash%s*=%s*"%x%x%x') then fail("rover.lock missing greet version/hash") end
 
 -- 2) project verify passes on a clean install
 if not pk('verify >nul 2>&1') then fail("project verify should pass on clean install") end
@@ -75,5 +75,5 @@ if not pk('verify >nul 2>&1') then fail("project verify should pass after reinst
 -- cleanup
 sh(LUAVM .. ' -i ' .. PKG .. ' remove greet >nul 2>&1')
 sh('rmdir /S /Q "' .. PROJ .. '" >nul 2>&1')
-print("[+] PASS test-pkgmgr-project (luavm.toml + luavm.lock: add/install/verify + tamper detection)")
+print("[+] PASS test-pkgmgr-project (rover.toml + rover.lock: add/install/verify + tamper detection)")
 os.exit(0)

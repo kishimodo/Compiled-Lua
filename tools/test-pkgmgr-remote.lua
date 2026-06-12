@@ -10,10 +10,10 @@ local function abscwd()
 end
 local ROOT  = abscwd()
 local LUAVM = ROOT .. "\\build\\bin\\luavm.exe"
-local PKG   = ROOT .. "\\package-manager\\src\\luavm-pkg.lua"
+local PKG   = ROOT .. "\\package-manager\\src\\rover.lua"
 local URL   = "file:///" .. ROOT:gsub("\\", "/") .. "/package-manager/registry-mv"
 local PROJ  = (os.getenv("TEMP") or ".") .. "\\luavm-remotetest"
-local STORE = (os.getenv("LOCALAPPDATA") or ".") .. "\\luavm\\packages"
+local STORE = (os.getenv("LOCALAPPDATA") or ".") .. "\\clua\\packages"
 
 local function sh(cmd) local ok, _, c = os.execute('"' .. cmd .. '"'); return (ok == true) or (ok == 0) or (c == 0) end
 local function pk(args) local ok, _, c = os.execute('cd /d "' .. PROJ .. '" && "' .. LUAVM .. '" -i "' .. PKG .. '" ' .. args); return (ok == true) or (ok == 0) or (c == 0) end
@@ -27,7 +27,7 @@ sh(LUAVM .. ' -i ' .. PKG .. ' remove vpkg >nul 2>&1')
 
 -- 1) add from the REMOTE (file://) registry, exact 1.0.0 -> downloaded + locked
 if not pk('add vpkg "' .. URL .. '" "1.0.0" >nul 2>&1') then fail("remote add vpkg 1.0.0") end
-local lock = slurp(PROJ .. "\\luavm.lock") or ""
+local lock = slurp(PROJ .. "\\rover.lock") or ""
 if not lock:match('%["vpkg"%].-version%s*=%s*"1%.0%.0"') then fail("lock should pin 1.0.0, got: " .. lock:gsub("%s+", " ")) end
 if not slurp(STORE .. "\\vpkg\\1.0.0\\init.lua") then fail("vpkg 1.0.0 not downloaded into the store") end
 
@@ -37,9 +37,9 @@ if not od:match("2%.0%.0") then fail("outdated should report 2.0.0 available, go
 
 -- 3) widen the constraint, then update bumps the lock to 2.0.0 (also pulls 2.0.0
 --    from the remote so the store now holds both versions)
-spit(PROJ .. "\\luavm.toml", "[dependencies]\nvpkg = \">=1.0.0\"\n")
+spit(PROJ .. "\\rover.toml", "[dependencies]\nvpkg = \">=1.0.0\"\n")
 if not pk('update vpkg "' .. URL .. '" >nul 2>&1') then fail("update vpkg") end
-lock = slurp(PROJ .. "\\luavm.lock") or ""
+lock = slurp(PROJ .. "\\rover.lock") or ""
 if not lock:match('%["vpkg"%].-version%s*=%s*"2%.0%.0"') then fail("update should bump lock to 2.0.0, got: " .. lock:gsub("%s+", " ")) end
 
 -- 4) gc prunes the now-unreferenced 1.0.0 (lock pins 2.0.0, which is also latest)

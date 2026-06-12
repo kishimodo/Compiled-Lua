@@ -1,7 +1,7 @@
 /* test_jit_smoke.c -- compile + run a trivial Proto: arithmetic / return.
  *
  * Loads the inner function from a luaL_loadstring chunk, JIT-compiles it,
- * hooks luavm_jit_compile_hook so that lua_pcall drives it through the JIT,
+ * hooks clua_dispatch_hook so that lua_pcall drives it through the JIT,
  * and verifies the returned value.
  */
 #include "test_harness.h"
@@ -37,7 +37,7 @@ int main( void ) {
     lua_State *L = luaL_newstate();
     CHECK_NOT_NULL( L );
     luaL_openlibs( L );
-    luavm_jit_compile_hook = JitHook;
+    clua_dispatch_hook = JitHook;
 
     /* -----------------------------------------------------------------
      * Test 1: simple integer arithmetic.

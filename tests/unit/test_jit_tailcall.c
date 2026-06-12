@@ -115,7 +115,7 @@ int main( void ) {
     lua_State *L = luaL_newstate();
     CHECK_NOT_NULL( L );
     luaL_openlibs( L );
-    luavm_jit_compile_hook = JitHook;
+    clua_dispatch_hook = JitHook;
 
     /* 1. Deep tail recursion -> integer */
     CHECK( RunLua( L, kDeepTailInt ) );

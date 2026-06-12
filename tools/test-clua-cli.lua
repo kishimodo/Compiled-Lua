@@ -117,12 +117,13 @@ print(mt.hello)
      "compiled exe output matches luavm -i",
      ("native=%q oracle=%q"):format(native:sub(1, 80), oracle:sub(1, 80)))
 
-  -- lean-exe canary: a hello-class exe is ~194 KB after the diet (no parser,
-  -- no JIT compiler, no FFI, no winpthread, gc-sections, stripped). 250 KB
-  -- headroom catches any of those chunks creeping back into the link.
+  -- lean-exe canary: a hello-class exe is ~182 KB after the diet (no parser,
+  -- no JIT compiler, no FFI, no winpthread, no bytecode interpreter for
+  -- debug-free programs, gc-sections, stripped). 230 KB headroom catches any
+  -- of those chunks creeping back into the link.
   local f = io.open(exe, "rb")
   local size = f:seek("end"); f:close()
-  ok(size < 250000, "compiled exe is lean (no parser/JIT/FFI/pthread/symbols)",
+  ok(size < 230000, "compiled exe is lean (no parser/JIT/FFI/pthread/interp)",
      ("size=%d"):format(size))
   os.remove(src); os.remove(exe)
 end
@@ -148,6 +149,24 @@ do
   os.remove(src)
 end
 
+-- ---- 5b. interpreter strip: a debug-EVADING program gets the bounded
+-- divergence error instead of silently lacking hooks (AOT-NODEBUG-001).
+-- The error fires inside the call-hook machinery (the hook closure is the
+-- first thing dispatched through luaV_execute), so it is UNCAUGHT: the exe
+-- fails fast at the sethook site with exit 1 + the clua error banner. ----
+do
+  local src = TEMP .. "\\clua_t_evade.lua"
+  writefile(src, [[
+local d = _G["de" .. "bug"]
+d.sethook(function() end, "c")
+print(pcall(function() return 1 end))
+]])
+  local code, out = run(("\"%s\" run \"%s\""):format(clua_abs, src))
+  ok(code ~= 0 and out:find("bytecode interpreter unavailable", 1, true) ~= nil,
+     "no-interp exe answers evading debug.sethook (fail-fast, exit~=0)", out)
+  os.remove(src)
+end
+
 -- ---- 6. no temp litter: clua_user_*.o cleaned up after this suite's builds ----
 do
   local litter = {}
@@ -166,7 +185,7 @@ else
   local c1, o1 = run(("\"%s\""):format(rover_abs))
   ok(o1:find("rover %-%- the CLua package manager") ~= nil,
      "rover.exe prints the rover banner", o1:sub(1, 120))
-  local _, o2 = run(("\"%s\" -i package-manager\\src\\luavm-pkg.lua"):format(luavm_abs))
+  local _, o2 = run(("\"%s\" -i package-manager\\src\\rover.lua"):format(luavm_abs))
   ok(o1 == o2, "rover.exe no-arg output matches the script under -i")
   -- one real command through the compiled pm, from the repo root (the test
   -- registry is repo-relative): `rover list` must not crash

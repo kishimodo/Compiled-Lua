@@ -1,7 +1,7 @@
 -- Transitive dependency resolution test (Feature 4). A package declares
 -- `dependencies` (name -> range) in package.lua; the manager recursively
 -- resolves + installs them with semver, records the full resolved graph in
--- luavm.lock, and detects conflicts (two incompatible ranges for one package).
+-- rover.lock, and detects conflicts (two incompatible ranges for one package).
 -- Fixtures live in registry-test:
 --   app@1.0.0 -> mid ^1.0.0 -> leaf ^1.0.0   (2-level graph)
 --   conflictdep@1.0.0 -> leaf ^2.0.0          (to clash with leaf ^1.0.0)
@@ -13,7 +13,7 @@ local function abscwd()
 end
 local ROOT  = abscwd()
 local LUAVM = ROOT .. "\\build\\bin\\luavm.exe"
-local PKG   = ROOT .. "\\package-manager\\src\\luavm-pkg.lua"
+local PKG   = ROOT .. "\\package-manager\\src\\rover.lua"
 local REG   = ROOT .. "\\package-manager\\registry-test"
 local PROJ  = (os.getenv("TEMP") or ".") .. "\\luavm-depstest"
 
@@ -30,7 +30,7 @@ cleanup()
 
 -- 1) add app -> the manager must transitively install app, mid AND leaf.
 if not pk('add app "' .. REG .. '" >nul 2>&1') then fail("add app (transitive)") end
-local lock = slurp(PROJ .. "\\luavm.lock") or ""
+local lock = slurp(PROJ .. "\\rover.lock") or ""
 if not lock:match('%["app"%].-version%s*=%s*"1%.0%.0"') then fail("lock missing app 1.0.0") end
 if not lock:match('%["mid"%].-version%s*=%s*"1%.0%.0"') then fail("lock missing transitive dep mid 1.0.0") end
 if not lock:match('%["leaf"%].-version%s*=%s*"1%.0%.0"') then fail("lock missing transitive dep leaf 1.0.0") end
@@ -54,7 +54,7 @@ end
 --    leaf ^2.0.0) has no single leaf satisfying both -> a clear error, no lock.
 sh('rmdir /S /Q "' .. PROJ .. '" >nul 2>&1'); sh('mkdir "' .. PROJ .. '" >nul 2>&1')
 cleanup()
-spit(PROJ .. "\\luavm.toml", '[dependencies]\nleaf = "^1.0.0"\nconflictdep = "^1.0.0"\n')
+spit(PROJ .. "\\rover.toml", '[dependencies]\nleaf = "^1.0.0"\nconflictdep = "^1.0.0"\n')
 local cout = pkout('install --registry "' .. REG .. '"')
 if not cout:match("[Cc]onflict") then fail("expected a dependency conflict error, got: " .. cout:gsub("%s+", " ")) end
 if pk('install --registry "' .. REG .. '" >nul 2>&1') then fail("conflicting install should exit non-zero") end

@@ -1,7 +1,7 @@
 -- Remote-registry trust test (Feature 5). index.json carries per-version
 -- sha256 (the whole-tree root from Feature 3); downloaded content is verified
 -- against it BEFORE install, and a tampered download is rejected. Also tests the
--- optional detached signature: with $LUAVM_REGISTRY_KEY set, the manager fetches
+-- optional detached signature: with $ROVER_REGISTRY_KEY set, the manager fetches
 -- index.json.sig and verifies HMAC-SHA256(index.json, key); a missing/bad
 -- signature is rejected. file:// keeps working throughout. Uses registry-test
 -- via a file:// URL. Run from the repo root by luavm.exe.
@@ -12,7 +12,7 @@ local function abscwd()
 end
 local ROOT  = abscwd()
 local LUAVM = ROOT .. "\\build\\bin\\luavm.exe"
-local PKG   = ROOT .. "\\package-manager\\src\\luavm-pkg.lua"
+local PKG   = ROOT .. "\\package-manager\\src\\rover.lua"
 local REGD  = ROOT .. "\\package-manager\\registry-test"
 local URL   = "file:///" .. ROOT:gsub("\\", "/") .. "/package-manager/registry-test"
 local REGINIT = REGD .. "\\leaf\\1.0.0\\init.lua"
@@ -58,23 +58,23 @@ sh(LUAVM .. ' -i ' .. PKG .. ' remove leaf >nul 2>&1')
 -- 3) SIGNATURE: publish WITH a key -> writes index.json.sig; with the same key
 --    configured, a remote add verifies the signature and succeeds.
 local KEY = "test-secret-key-123"
-if not sh('set "LUAVM_REGISTRY_KEY=' .. KEY .. '" && "' .. LUAVM .. '" -i "' .. PKG .. '" publish "' .. REGD .. '" >nul 2>&1') then
+if not sh('set "ROVER_REGISTRY_KEY=' .. KEY .. '" && "' .. LUAVM .. '" -i "' .. PKG .. '" publish "' .. REGD .. '" >nul 2>&1') then
   fail("publish with key")
 end
 if not slurp(SIGP) then fail("publish did not write index.json.sig when a key was set") end
-if not pk_env('LUAVM_REGISTRY_KEY=' .. KEY, 'add leaf "' .. URL .. '" "1.0.0" >nul 2>&1') then
+if not pk_env('ROVER_REGISTRY_KEY=' .. KEY, 'add leaf "' .. URL .. '" "1.0.0" >nul 2>&1') then
   fail("signed add with the correct key should succeed")
 end
 sh(LUAVM .. ' -i ' .. PKG .. ' remove leaf >nul 2>&1')
 
 -- 4) a WRONG key must reject (signature mismatch).
-if pk_env('LUAVM_REGISTRY_KEY=wrong-key', 'add leaf "' .. URL .. '" "1.0.0" >nul 2>&1') then
+if pk_env('ROVER_REGISTRY_KEY=wrong-key', 'add leaf "' .. URL .. '" "1.0.0" >nul 2>&1') then
   fail("add with the wrong signing key should be rejected")
 end
 
 -- 5) a MISSING signature with a key configured must reject.
 os.remove(SIGP)
-if pk_env('LUAVM_REGISTRY_KEY=' .. KEY, 'add leaf "' .. URL .. '" "1.0.0" >nul 2>&1') then
+if pk_env('ROVER_REGISTRY_KEY=' .. KEY, 'add leaf "' .. URL .. '" "1.0.0" >nul 2>&1') then
   fail("add should reject when a key is set but index.json.sig is absent")
 end
 

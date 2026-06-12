@@ -1,12 +1,12 @@
 -- R6 end-to-end test: install a package once into the global store, then both
 -- compiler.exe (bundle into a standalone exe) and luavm.exe -i (require at
 -- runtime) must use it -- the "install once, require anywhere" contract. Run
--- by luavm.exe. Uses the default store (%LOCALAPPDATA%\luavm\packages) and
+-- by luavm.exe. Uses the default store (%LOCALAPPDATA%\clua\packages) and
 -- removes the test package afterwards.
 
 local LUAVM    = "build\\bin\\luavm.exe"
 local COMPILER = "build\\bin\\compiler.exe"
-local PKG      = "package-manager\\src\\luavm-pkg.lua"
+local PKG      = "package-manager\\src\\rover.lua"
 local USES     = "package-manager\\test\\uses_greet.lua"
 local EXE      = (os.getenv("TEMP") or ".") .. "\\pkgmgr_uses.exe"
 

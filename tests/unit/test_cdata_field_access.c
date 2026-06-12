@@ -34,7 +34,7 @@ static int RunLua( lua_State *L, const char *Src ) {
 int main( void ) {
     TEST_BEGIN( "cdata_field_access" );
 
-    luavm_jit_compile_hook = TestJitHook;
+    clua_dispatch_hook = TestJitHook;
 
     lua_State *L = luaL_newstate( );
     CHECK_NOT_NULL( L );

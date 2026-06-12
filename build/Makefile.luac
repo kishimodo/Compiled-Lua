@@ -23,7 +23,7 @@ LUA_DIR     := $(ROOT)/lua-5.4/src
 
 CFLAGS      := -std=c99 -Wall -Wextra -Wno-unused-parameter -O2 -g
 CFLAGS      += -I$(SRC_DIR) -I$(LUA_DIR) -I$(ROOT)/build/gen
-CFLAGS      += -DLUAVM_TARGET_WINDOWS_X64=1
+CFLAGS      += -DCLUA_TARGET_WINDOWS_X64=1
 
 # Backend objects produced by the base Makefile's `luac-objs` target. We link
 # all of them EXCEPT the plain driver/main.o (its lc_drive is also compiled into
@@ -67,11 +67,11 @@ aotc: $(BUILD_DIR)/aotc.exe
 # program. Built ONCE here so user builds skip the per-program gcc compile;
 # pe_link_v2.c resolves it next to the archives (and falls back to compiling
 # the source in a cold tree). Flags must match the embedded archives' ABI
-# surface: include dirs + LUAVM_TARGET_WINDOWS_X64 (+ LUA_COMPAT_5_3) govern
+# surface: include dirs + CLUA_TARGET_WINDOWS_X64 (+ LUA_COMPAT_5_3) govern
 # the Lua struct layouts.
 $(BUILD_DIR)/aot_entry.o: $(SRC_DIR)/runtime/aot_entry.c
 	$(CC) -std=c99 -I$(SRC_DIR) -I$(LUA_DIR) \
-	    -DLUAVM_TARGET_WINDOWS_X64=1 -DLUA_COMPAT_5_3 -DLUAC_AOT_RUNTIME=1 \
+	    -DCLUA_TARGET_WINDOWS_X64=1 -DLUA_COMPAT_5_3 -DLUAC_AOT_RUNTIME=1 \
 	    -c $< -o $@
 
 .PHONY: aot-entry
@@ -97,8 +97,8 @@ clua: $(BUILD_DIR)/clua.exe
 # Dogfood: rover is an AOT-compiled closed-world Lua program (the largest
 # fidelity fixture in the tree). Needs the archives + aot_entry.o + gcc on
 # PATH (build-luac.bat arranges all three).
-$(BUILD_DIR)/rover.exe: $(BUILD_DIR)/clua.exe $(BUILD_DIR)/aot_entry.o $(ROOT)/package-manager/src/luavm-pkg.lua
-	$(BUILD_DIR)/clua.exe build $(ROOT)/package-manager/src/luavm-pkg.lua -O1 -o $@
+$(BUILD_DIR)/rover.exe: $(BUILD_DIR)/clua.exe $(BUILD_DIR)/aot_entry.o $(ROOT)/package-manager/src/rover.lua
+	$(BUILD_DIR)/clua.exe build $(ROOT)/package-manager/src/rover.lua -O1 -o $@
 
 .PHONY: rover
 rover: $(BUILD_DIR)/rover.exe
@@ -116,6 +116,7 @@ dist: $(BUILD_DIR)/clua.exe $(BUILD_DIR)/rover.exe $(BUILD_DIR)/aot_entry.o
 	copy /Y "$(BUILD_DIR)\runtime-aot.a"       "$(ROOT)\dist\lib\runtime-aot.a" >nul
 	copy /Y "$(BUILD_DIR)\liblua54-embedded.a" "$(ROOT)\dist\lib\liblua54-embedded.a" >nul
 	copy /Y "$(BUILD_DIR)\aot_entry.o"         "$(ROOT)\dist\lib\aot_entry.o" >nul
+	copy /Y "$(BUILD_DIR)\lvm_nointerp.o"      "$(ROOT)\dist\lib\lvm_nointerp.o" >nul
 	copy /Y "$(ROOT)\build\dist-README.txt"    "$(ROOT)\dist\README.txt" >nul
 	strip "$(ROOT)\dist\clua.exe"
 	@echo [+] dist\ ready (clua.exe + rover.exe + lib\)

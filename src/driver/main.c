@@ -294,7 +294,11 @@ int lc_drive( const LcDriverOptions *opt ) {
             goto cleanup;
         }
 
+        /* Programs that never mention "debug" can't activate debug hooks, so
+        ** their exes drop the bytecode interpreter (same conservative scan
+        ** that gates the -O1 type proofs). */
         if ( !LuacLink_LinkProgram( obj_path, opt->output,
+                                    !lc_module_uses_debug( m ),
                                     err, sizeof( err ) ) ) {
             fprintf( stderr, "aotc: error: link failed: %s\n",
                      err[0] ? err : "(unknown)" );

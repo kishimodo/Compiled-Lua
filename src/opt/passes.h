@@ -25,6 +25,14 @@ typedef struct LcPassConfig {
 /* Run the whole pipeline. Returns false on an internal invariant failure. */
 bool lc_optimize(LcModule *m, const LcPassConfig *cfg);
 
+/* TRUE iff any function carries the string constant "debug" (conservative
+** constant scan). Two consumers: -O1+ disables the type-inference proofs
+** (reflection can falsify them), and the driver links the full bytecode
+** interpreter only for such programs (debug hooks need it; a debug-free
+** closed-world program can never activate a hook, so its exe links
+** lvm_nointerp.o instead — see pe_link_v2.c). */
+bool lc_module_uses_debug(LcModule *m);
+
 /* ---- Analyses (no IR mutation; populate side tables) ---- */
 void lc_analyze_dominators(LcFunc *f);
 void lc_analyze_liveness(LcFunc *f);

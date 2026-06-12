@@ -21,7 +21,7 @@ LUA_DIR     := $(ROOT)/lua-5.4/src
 
 CFLAGS      := -std=c99 -Wall -Wextra -Wno-unused-parameter -O2 -g
 CFLAGS      += -I$(SRC_DIR) -I$(LUA_DIR) -I$(ROOT)/build/gen
-CFLAGS      += -DLUAVM_TARGET_WINDOWS_X64=1
+CFLAGS      += -DCLUA_TARGET_WINDOWS_X64=1
 
 .PHONY: all clean help
 all: help
@@ -84,7 +84,7 @@ EMBEDDED_LUA_CFLAGS := -std=c99 -Wall -Wextra -Wno-unused-parameter \
     -fmerge-all-constants -fmerge-constants \
     -fstack-protector-strong -fcf-protection=full \
     -I$(SRC_DIR) -I$(LUA_DIR) -I$(ROOT)/build/gen \
-    -DLUAVM_TARGET_WINDOWS_X64=1 \
+    -DCLUA_TARGET_WINDOWS_X64=1 \
     -DLUA_USE_WINDOWS -DLUA_COMPAT_5_3
 
 LUA_EMB_OBJS := $(patsubst $(LUA_DIR)/%.c,$(BUILD_DIR)/lua-emb/%.o,$(LUA_CORE_SRCS) $(LUA_LIB_SRCS))
@@ -98,8 +98,15 @@ $(BUILD_DIR)/lua-emb/%.o: $(LUA_DIR)/%.c | $(BUILD_DIR)/lua-emb
 $(BUILD_DIR)/liblua54-embedded.a: $(LUA_EMB_OBJS)
 	$(AR) rcs $@ $^
 
+# Interpreter-free lvm for AOT exes whose closed-world scan proves no "debug"
+# reference: CLUA_NO_INTERP compiles out the bytecode interpreter loop
+# (clua_Interpret) while keeping every luaV_* helper. pe_link_v2.c places
+# this object before liblua54-embedded.a so its lvm.o is never extracted.
+$(BUILD_DIR)/lvm_nointerp.o: $(LUA_DIR)/lvm.c
+	$(CC) $(EMBEDDED_LUA_CFLAGS) -DCLUA_NO_INTERP=1 -c $< -o $@
+
 .PHONY: lua-embedded
-lua-embedded: $(BUILD_DIR)/lua-emb $(BUILD_DIR)/liblua54-embedded.a
+lua-embedded: $(BUILD_DIR)/lua-emb $(BUILD_DIR)/liblua54-embedded.a $(BUILD_DIR)/lvm_nointerp.o
 
 # --- compiler --------------------------------------------------------------
 
@@ -115,7 +122,7 @@ COMPILER_OBJS := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/obj/%.o,$(COMPILER_SRCS)
 
 # --- LuaC AOT backend objects (src/{ir,opt,codegen,link,driver}) -----------
 # Compiled into build/bin/obj/<subdir>/*.o by the generic pattern rule below
-# and scanned into libluavmtest.a by tools/run-tests.lua so C-unit tests can
+# and scanned into libcluatest.a by tools/run-tests.lua so C-unit tests can
 # link against backend code. Built as a side effect of `make test`.
 LUAC_SRCS := $(wildcard $(SRC_DIR)/ir/*.c) $(wildcard $(SRC_DIR)/opt/*.c) \
              $(wildcard $(SRC_DIR)/codegen/*.c) $(wildcard $(SRC_DIR)/link/*.c) \
@@ -209,7 +216,7 @@ EMBEDDED_RT_CFLAGS := -std=c99 -Wall -Wextra -Wno-unused-parameter \
     -fmerge-all-constants -fmerge-constants \
     -fstack-protector-strong -fcf-protection=full \
     -I$(SRC_DIR) -I$(LUA_DIR) -I$(ROOT)/build/gen \
-    -DLUAVM_TARGET_WINDOWS_X64=1
+    -DCLUA_TARGET_WINDOWS_X64=1
 
 RUNTIME_EMB_OBJS := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/obj-emb/%.o,$(RUNTIME_SRCS))
 

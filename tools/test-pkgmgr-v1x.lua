@@ -4,7 +4,7 @@
 -- Uses the default store; cleans up afterwards.
 
 local LUAVM = "build\\bin\\luavm.exe"
-local PKG   = "package-manager\\src\\luavm-pkg.lua"
+local PKG   = "package-manager\\src\\rover.lua"
 
 local function run(args)  -- returns (ok, combined output)
   local p = io.popen('"' .. LUAVM .. ' -i ' .. PKG .. ' ' .. args .. '" 2>&1')

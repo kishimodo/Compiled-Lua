@@ -1,5 +1,5 @@
 -- Security test (Bug 1): command-injection hardening. A package `name` is
--- attacker-controlled (CLI, luavm.toml, AND a remote registry's index.json) and
+-- attacker-controlled (CLI, rover.toml, AND a remote registry's index.json) and
 -- ends up inside shell command strings (io.popen/os.execute). A name containing
 -- a quote/`&`/`|`/path-separator must be REJECTED before any command runs --
 -- otherwise a compromised registry => local code execution. Run by luavm.exe.
@@ -10,7 +10,7 @@ local function abscwd()
 end
 local ROOT  = abscwd()
 local LUAVM = ROOT .. "\\build\\bin\\luavm.exe"
-local PKG   = ROOT .. "\\package-manager\\src\\luavm-pkg.lua"
+local PKG   = ROOT .. "\\package-manager\\src\\rover.lua"
 local MARK  = (os.getenv("TEMP") or ".") .. "\\luavm-pwned-marker.txt"
 
 local function sh(c) local ok, _, code = os.execute('"' .. c .. '"'); return (ok == true) or (ok == 0) or (code == 0) end
@@ -62,13 +62,13 @@ do
 end
 
 -- 4) name_ok unit table via the test hook (covers the data-sourced boundary too).
-sh('set LUAVM_PKG_TEST=1')   -- noop on this shell; we set it via the child env below
+sh('set ROVER_PKG_TEST=1')   -- noop on this shell; we set it via the child env below
 local driver = (os.getenv("TEMP") or ".") .. "\\luavm-secdriver.lua"
 do
   local f = io.open(driver, "wb")
   f:write([[
-dofile("package-manager/src/luavm-pkg.lua")
-local M = _G.LUAVM_PKG
+dofile("package-manager/src/rover.lua")
+local M = _G.ROVER_PKG
 local good = { "greet", "a.b-c_1", "x", string.rep("a",128) }
 local bad  = { "", "a b", 'a"b', "a&b", "a|b", "a/b", "a\\b", "..", "../x", ".hidden", "-flag",
                "a;b", "a$b", "a`b", "a\nb", "a..b", string.rep("a",129) }
@@ -78,7 +78,7 @@ print("UNIT_OK")
 ]])
   f:close()
 end
-local p = io.popen('set "LUAVM_PKG_TEST=1" && "' .. LUAVM .. '" -i "' .. driver .. '" 2>nul')
+local p = io.popen('set "ROVER_PKG_TEST=1" && "' .. LUAVM .. '" -i "' .. driver .. '" 2>nul')
 local out = p and p:read("*a") or ""
 if p then p:close() end
 os.remove(driver)

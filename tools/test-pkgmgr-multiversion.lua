@@ -13,7 +13,7 @@ end
 local ROOT  = abscwd()
 local LUAVM = ROOT .. "\\build\\bin\\luavm.exe"
 local COMP  = ROOT .. "\\build\\bin\\compiler.exe"
-local PKG   = ROOT .. "\\package-manager\\src\\luavm-pkg.lua"
+local PKG   = ROOT .. "\\package-manager\\src\\rover.lua"
 local REG   = ROOT .. "\\package-manager\\registry-mv"
 local PROJ  = (os.getenv("TEMP") or ".") .. "\\luavm-mvtest"
 

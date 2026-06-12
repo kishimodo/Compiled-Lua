@@ -28,10 +28,10 @@
  *          -> luaD_precall: for a Lua closure, sets up the callee CallInfo
  *             (func/top/savedpc/nresults) and calls luaV_execute(L, ci).
  *          -> luaV_execute checks:
- *                 if (luavm_jit_compile_hook != NULL && L->hookmask == 0) {
- *                     jitted = luavm_jit_compile_hook(L, cl->p);   // <-- cache lookup
+ *                 if (clua_dispatch_hook != NULL && L->hookmask == 0) {
+ *                     jitted = clua_dispatch_hook(L, cl->p);   // <-- cache lookup
  *                     if (jitted != NULL) {
- *                         nres = luavm_jit_invoke_hook(L, jitted); // <-- runs body
+ *                         nres = clua_invoke_hook(L, jitted); // <-- runs body
  *                         luaD_poscall(L, ci, nres);
  *                         return;
  *                     }
@@ -39,7 +39,7 @@
  *                 luaVM_Interpret(L, ci);  // fallback: bytecode interpreter
  *
  * Therefore, for a REGISTERED entry to be invoked, ALL of these must hold:
- *   (A) luavm_jit_compile_hook must be set to a function that consults the
+ *   (A) clua_dispatch_hook must be set to a function that consults the
  *       cache for cl->p and returns its JIT_FUNC_T (e.g. Jit_LookupCached, or
  *       Jit_Compile which calls CacheFind first). If the hook is NULL, the
  *       call ALWAYS runs the bytecode interpreter -- the registered entry is
@@ -53,7 +53,7 @@
  *   (D) The callee must be a Lua closure (ttisLclosure) so luaD_precall routes
  *       it through luaV_execute (C closures / callable cdata take other paths).
  *
- * The invoke hook (luavm_jit_invoke_hook) defaults to a direct Fn(L) call; the
+ * The invoke hook (clua_invoke_hook) defaults to a direct Fn(L) call; the
  * real runtime overrides it with Jit_TrampolineEntry for VEH fault recovery.
  * Either works for dispatch; the body still runs.
  *
@@ -150,7 +150,7 @@ int main( void ) {
      * the interpreter and returns no values.) This proves the spike's PASS
      * below is caused by the dispatch wiring, not by some artificial path.
      * --------------------------------------------------------------------- */
-    luavm_jit_compile_hook = NULL;          /* condition (A) deliberately unmet */
+    clua_dispatch_hook = NULL;          /* condition (A) deliberately unmet */
     g_BodyRan = 0;
     luaL_checkstack( L, 4, "spike push" );
     setclLvalue2s( L, L->top.p, Cl );
@@ -164,7 +164,7 @@ int main( void ) {
      * normal call path now routes through luaV_execute -> hook -> registered
      * entry, with NO JIT compilation. Assert the native body ran.
      * --------------------------------------------------------------------- */
-    luavm_jit_compile_hook = LookupHook;    /* hookmask is already 0 -> (B) holds */
+    clua_dispatch_hook = LookupHook;    /* hookmask is already 0 -> (B) holds */
     g_BodyRan = 0;
     luaL_checkstack( L, 4, "spike push" );
     setclLvalue2s( L, L->top.p, Cl );
@@ -173,7 +173,7 @@ int main( void ) {
     CHECK_EQ_INT( g_BodyRan, 1 );           /* the registered AOT body ran */
     lua_settop( L, 0 );
 
-    luavm_jit_compile_hook = NULL;          /* leave global state clean */
+    clua_dispatch_hook = NULL;          /* leave global state clean */
     lua_close( L );
     TEST_END();
 }

@@ -20,12 +20,15 @@ CLua-compiled closed-world program, the largest fidelity fixture in the tree.
 The pipeline is in-memory, rustc-style: front-end, optimizer, codegen and the
 COFF object (including the serialized ProtoInit blob — no generated C) all
 happen inside `clua.exe`; the only external step is one native link. A
-hello-world builds in ~190 ms and weighs **~194 KB** stripped — the emitted
+hello-world builds in ~190 ms and weighs **~182 KB** stripped — the emitted
 exe links a dedicated `runtime-aot.a` carrying **no JIT compiler, no Lua
 front-end** (`load`-family symbols are closed-world stubs), **no FFI** (the
-AOT entry never opens it) and **no winpthread** (no emulated TLS), with
-`--gc-sections` dropping everything unreferenced. What remains is the
-language itself: the Lua core + full stdlib + GC + the AOT runtime helpers.
+AOT entry never opens it), **no winpthread** (no emulated TLS), and — for
+programs that never mention `debug` — **no bytecode interpreter** (debug
+hooks are the only thing that can reach it; programs that use the debug
+library keep it and behave exactly like the oracle under `debug.sethook`).
+`--gc-sections` drops everything unreferenced. What remains is the language
+itself: the Lua core + full stdlib + GC + the AOT runtime helpers.
 
 This is a standalone project, separated from its origin (**LuaVM**, the
 JIT-based v1, which lives in its own repository). The v1 interpreter and JIT
@@ -111,10 +114,11 @@ machine is a MinGW-w64 gcc on PATH (or `CLUA_GCC`) for the final link.
 
 ## Roadmap
 
-- **M4**: builtin-package bundling for compiled exes, shipped-runtime
-  `lvm.c` strip (the `luaV_execute` interpreter loop, ~15 KB, is still the
-  AOT dispatch trampoline), self-contained PE writer (drop the MinGW `ld`
-  dependency — the last external step).
+- **M4**: builtin-package bundling for compiled exes, self-contained PE
+  writer (drop the MinGW `ld` dependency — the last external step). The
+  interpreter strip is DONE for debug-free programs (`lvm_nointerp.o`,
+  AOT-NODEBUG-001); `luaV_execute` itself is now a thin native-dispatch
+  entry (`clua_dispatch_hook`), not an interpreter.
 - **Toolchain slimming**: emitted exes already exclude the JIT compiler
   (`runtime-aot.a`) and the Lua front-end (closed-world stubs). The v1 JIT
   inside this repo is oracle infrastructure only; once the behavioral test

@@ -60,7 +60,7 @@
 	try { a } catch(...) { if ((c)->status == 0) (c)->status = -1; }
 #define luai_jmpbuf		int  /* dummy variable */
 
-#elif defined(LUAVM_TARGET_WINDOWS_X64) && defined(__GNUC__)	/* }{ */
+#elif defined(CLUA_TARGET_WINDOWS_X64) && defined(__GNUC__)	/* }{ */
 
 /* LuaVM: Windows x64 with GCC. Use __builtin_setjmp/__builtin_longjmp,
    which do NOT trigger Windows SEH stack unwinding. Standard setjmp on

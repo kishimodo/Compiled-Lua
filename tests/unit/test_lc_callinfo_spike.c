@@ -125,7 +125,7 @@ int main( void ) {
     /* Install the cache-consulting hook (condition (A)); hookmask is already 0
      * for a fresh state (condition (B)). Now a normal lua_call routes through
      * luaD_precall -> luaV_execute -> hook -> our native Body, with no JIT. */
-    luavm_jit_compile_hook = LookupHook;
+    clua_dispatch_hook = LookupHook;
 
     /* --- Call 1: arg 1 -> expect 1 + 41 == 42 --------------------------------
      * Push the closure, then push integer 1 as its single argument, then call
@@ -151,7 +151,7 @@ int main( void ) {
     CHECK_EQ_INT( lua_tointeger( L, -1 ), 141 );
     lua_settop( L, 0 );
 
-    luavm_jit_compile_hook = NULL;              /* leave global state clean */
+    clua_dispatch_hook = NULL;              /* leave global state clean */
     lua_close( L );
     TEST_END();
 }

@@ -12,8 +12,10 @@
 > `-O1` default, output name derived from the input; relocatable — finds its
 > runtime libs next to the exe or via `CLUA_HOME`), plus **`rover.exe`**, the
 > package manager, itself a CLua-compiled closed-world program built from
-> `package-manager/src/luavm-pkg.lua`. `aotc.exe` is the low-level
-> flag-compatible driver the test layers use; both share `lc_drive()`.
+> `package-manager/src/rover.lua` (project files: `rover.toml`/`rover.lock`;
+> env: `ROVER_REGISTRY`/`ROVER_REGISTRY_KEY`; store under `CLUA_HOME` or
+> `%LOCALAPPDATA%\clua`). `aotc.exe` is the low-level flag-compatible driver
+> the test layers use; both share `lc_drive()`.
 > CLua compiles Lua 5.4 to **native x64 machine code at compile time** and
 > emits an ordinary PE (standard sections, no bytecode blob, no in-binary VM,
 > no JIT). The pipeline is in-memory: ProtoInit data rides as a serialized
@@ -22,7 +24,11 @@
 > the only external step is ONE native link against `runtime-aot.a` (the
 > AOT runtime variant: dispatch cache but **no JIT compiler**) + the Lua
 > core (**no front-end** — `aot_entry.c` stubs `luaY_parser`/`luaU_undump`/
-> `luaU_dump`/`luaX_init`; see AOT-CLOSEDWORLD-002). The runtime
+> `luaU_dump`/`luaX_init`; see AOT-CLOSEDWORLD-002 — and **no bytecode
+> interpreter** for programs that never mention `debug`: `lvm_nointerp.o`
+> replaces lvm.o via the `lc_module_uses_debug` scan, AOT-NODEBUG-001; the
+> native-dispatch entry is `clua_dispatch_hook` in the patched lvm.c).
+> The runtime
 > (GC/tables/strings/metatables/coroutines/FFI) is a statically-linked
 > *library*, like libc. The backend lives in `src/{ir,opt,codegen,link,driver}`.
 > **Closed world:** `load`/`loadstring`/`dofile`/`string.dump`/dynamic
@@ -89,7 +95,7 @@ test file. **Just drop a file in the right folder**; deleting one breaks nothing
 
 | Layer | Folder | What it is | How to add one |
 |---|---|---|---|
-| C unit | `tests/unit/test_*.c` | internals (FFI/JIT/compiler) | standalone C program using `tests/unit/test_harness.h` (`TEST_BEGIN`/`CHECK*`/`TEST_END`); links against the auto-built `libluavmtest.a` |
+| C unit | `tests/unit/test_*.c` | internals (FFI/JIT/compiler) | standalone C program using `tests/unit/test_harness.h` (`TEST_BEGIN`/`CHECK*`/`TEST_END`); links against the auto-built `libcluatest.a` |
 | Lua behavioral | `tests/lua/*.lua` | language/runtime behavior under the JIT | assert with a local helper; `print("[+] PASS <name>")` + `os.exit(0)`, or `os.exit(1)` on failure |
 | Package | `tests/packages/test_*.lua` | a builtin package round-trip | `require` the package + assert; the runner compiles it with `compiler.exe` then runs it. Absent external DLL → `print("[~] SKIP …") os.exit(0)` |
 | Differential | `tests/differential/*.lua` | JIT-vs-interpreter equivalence | a deterministic script that *prints*; the runner runs it under JIT and `-i` and diffs stdout (catches silent JIT miscompiles) |

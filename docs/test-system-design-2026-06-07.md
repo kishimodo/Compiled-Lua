@@ -31,14 +31,14 @@ tests/
 
 1. **Core archive.** Globs `build/bin/obj/{ffi,jit,compiler,runtime}/*.o`,
    **excluding** the two objects that define `main` (`compiler/main.o`,
-   `runtime/luavm_main.o`), and runs `ar rcs build/bin/libluavmtest.a <objs>`.
+   `runtime/luavm_main.o`), and runs `ar rcs build/bin/libcluatest.a <objs>`.
    (Archive members are only pulled in when a test references their symbols, so
    this is safe and per-test link lists are unnecessary.)
 2. **C unit tests.** Globs `tests/unit/test_*.c`; for each, runs
    `gcc <CFLAGS> -Itests/unit -o build/bin/tests/<name>.exe <test.c>
-   build/bin/libluavmtest.a build/bin/liblua54.a -lm -lkernel32 …`, then runs the
+   build/bin/libcluatest.a build/bin/liblua54.a -lm -lkernel32 …`, then runs the
    exe. CFLAGS mirror the Makefile: `-std=c99 -Wall -Wextra -Wno-unused-parameter
-   -O2 -g -I src -I lua-5.4/src -I build/gen -DLUAVM_TARGET_WINDOWS_X64=1`.
+   -O2 -g -I src -I lua-5.4/src -I build/gen -DCLUA_TARGET_WINDOWS_X64=1`.
 3. **Lua behavioral.** Globs `tests/lua/*.lua`; runs each under `luavm.exe`.
    Pass = exit 0 and no `FAIL` line.
 4. **Package tests.** Globs `tests/packages/test_*.lua`; compiles each with

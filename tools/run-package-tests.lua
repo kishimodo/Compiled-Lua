@@ -14,7 +14,7 @@
 -- treats '/' as a switch separator, so "build/bin/compiler.exe" misparses.
 -- (Forward slashes are fine for path *arguments* passed to compiler.exe.)
 local COMPILER = "build\\bin\\compiler.exe"
-local TMPDIR   = (os.getenv("TEMP") or os.getenv("TMP") or ".") .. "\\luavm-pkgtest"
+local TMPDIR   = (os.getenv("TEMP") or os.getenv("TMP") or ".") .. "\\clua-pkgtest"
 
 os.execute('if not exist "' .. TMPDIR .. '" mkdir "' .. TMPDIR .. '" >nul 2>&1')
 
