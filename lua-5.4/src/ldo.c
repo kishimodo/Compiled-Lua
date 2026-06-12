@@ -647,8 +647,32 @@ l_sinline void ccall (lua_State *L, StkId func, int nResults, l_uint32 inc) {
     luaE_checkcstack(L);
   }
   if ((ci = luaD_precall(L, func, nResults)) != NULL) {  /* Lua function? */
+    int dispatched = 0;
     ci->callstatus = CIST_FRESH;  /* mark that it is a "fresh" execute */
-    luaV_execute(L, ci);  /* call it */
+    /* CLua patch: direct native dispatch at the call boundary. This mirrors
+     * the hook-gated prologue of luaV_execute (lvm.c) exactly — same
+     * hookmask gate, same NULL-body fallthrough, same luaD_poscall — but
+     * dispatches here, skipping the luaV_execute C frame on every C→Lua
+     * entry. With no hook registered (luavm -i oracle) behavior is
+     * untouched. luaV_execute keeps its own prologue: other re-entry
+     * routes (and a declined Proto below) still go through it. */
+    if (clua_dispatch_hook != NULL && L->hookmask == 0) {
+      LClosure *cl = ci_func(ci);
+      int (*jitted)(lua_State *) = (int (*)(lua_State *))
+        clua_dispatch_hook(L, (void *)cl->p);
+      if (jitted != NULL) {
+        int nres = clua_invoke_hook(L, jitted);
+        /* Results sit at L->ci->func.p; luaD_poscall moves them to the
+         * caller's expected position and restores L->ci (mirrors the
+         * lvm.c prologue / OP_RETURN path). */
+        luaD_poscall(L, ci, nres);
+        dispatched = 1;
+      }
+      /* NULL body: backend declined this Proto — fall through into
+       * luaV_execute, whose own prologue is the fallback slow path. */
+    }
+    if (!dispatched)
+      luaV_execute(L, ci);  /* call it */
   }
   L->nCcalls -= inc;
 }
