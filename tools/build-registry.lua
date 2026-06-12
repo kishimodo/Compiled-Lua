@@ -11,7 +11,9 @@
 -- Then run `rover publish <out-dir>` to generate index.json (hashes computed
 -- over the STRIPPED bytes — what installs verify against).
 
+_G.STRIP_AS_MODULE = true
 local strip = dofile("tools/strip-comments.lua")
+_G.STRIP_AS_MODULE = nil
 
 local SRC = "clua\\src\\runtime\\packages"
 local out = ({ ... })[1] or (arg and arg[1])

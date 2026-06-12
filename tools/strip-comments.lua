@@ -80,8 +80,8 @@ function M.strip_c(src)
       end
       i = (j <= n) and j or (n + 1)                    -- keep the newline
     elseif c2 == "/*" then
-      local s, e = src:find("*/", i + 2, true)
-      e = e and (e + 1) or n
+      local s, e = src:find("*/", i + 2, true)   -- e = index of the closing '/'
+      e = e or n
       local kept = src:sub(i, e):gsub("[^\n]", "")     -- preserve line count
       out[#out + 1] = (kept == "") and " " or kept     -- never join tokens
       i = e + 1
@@ -190,7 +190,10 @@ end
 
 -- ---- CLI --------------------------------------------------------------------
 
+if _G.STRIP_AS_MODULE then return M end   -- dofile'd by build-registry.lua
+
 local args = { ... }
+if #args == 0 and arg then args = { arg[1], arg[2] } end  -- luavm host passes argv via `arg`
 if args[1] == "--tree" and args[2] then
   local root = args[2]
   local p = io.popen('dir /b /s /a-d "' .. root .. '" 2>nul')
