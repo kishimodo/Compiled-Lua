@@ -6,71 +6,129 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* TODO(M0): arena-allocate modules/funcs/blocks/insts; dense id assignment. */
+/* ------------------------------------------------------------------ */
+/* Arena (resolves the old TODO(M0))                                   */
+/*                                                                     */
+/* A grow-only chunked bump allocator owned by the LcModule. Every IR  */
+/* node (LcFunc/LcBlock/LcInst) and every builder-grown pointer array  */
+/* (m->funcs, f->blocks, in->args) is carved out of it, so building    */
+/* the IR is a pointer bump and lc_module_free is one walk over the    */
+/* chunk chain instead of a walk over every node. Returned memory is   */
+/* zero-filled (the constructors used to calloc) and 8-byte aligned    */
+/* (sufficient for every IR struct on x64: max member alignment is 8). */
+/*                                                                     */
+/* Growable arrays use grow-by-arena-copy: capacity is implicitly      */
+/* 4 << k derived from the element count (grow exactly when count is   */
+/* 0 or a power of two >= 4), so no capacity field is stored and the   */
+/* abandoned old copies simply stay in the arena (bounded ~1x waste).  */
+/* Analysis scratch that genuinely reallocs (opt/passes.c worklists,   */
+/* blk->live_in/out, m->callees) stays on plain malloc/free.           */
+/* ------------------------------------------------------------------ */
+
+#define LC_ARENA_CHUNK_PAYLOAD (64u * 1024u)   /* default chunk data size */
+
+typedef struct LcArenaChunk {
+  struct LcArenaChunk *next;     /* chain, newest first */
+  size_t used, cap;
+  /* payload follows the header; header is 24 bytes, so data is 8-aligned */
+  unsigned char data[];
+} LcArenaChunk;
+
+struct LcArena {
+  LcArenaChunk *chunks;          /* newest chunk first; bump into chunks[0] */
+};
+
+static void *lc_arena_alloc(LcArena *a, size_t n) {
+  LcArenaChunk *c = a->chunks;
+  void *p;
+  n = (n + 7u) & ~(size_t)7u;    /* keep every object 8-byte aligned */
+  if (!c || c->cap - c->used < n) {
+    size_t cap = n > LC_ARENA_CHUNK_PAYLOAD ? n : LC_ARENA_CHUNK_PAYLOAD;
+    LcArenaChunk *nc = (LcArenaChunk *)malloc(sizeof(LcArenaChunk) + cap);
+    if (!nc) return NULL;
+    nc->next = a->chunks;
+    nc->used = 0;
+    nc->cap = cap;
+    a->chunks = nc;
+    c = nc;
+  }
+  p = c->data + c->used;
+  c->used += n;
+  memset(p, 0, n);
+  return p;
+}
+
+/* Grow `arr` (count elements of elemsz bytes) for one more element under the
+** implicit 4<<k capacity rule above. Returns the (possibly moved) array, or
+** NULL on OOM. The old copy, if any, stays in the arena. */
+static void *lc_arena_grow(LcArena *a, void *arr, uint32_t count, size_t elemsz) {
+  if (count == 0 || (count >= 4 && (count & (count - 1)) == 0)) {
+    size_t newcap = count ? (size_t)count * 2u : 4u;
+    void *na = lc_arena_alloc(a, newcap * elemsz);
+    if (!na) return NULL;
+    if (count) memcpy(na, arr, (size_t)count * elemsz);
+    return na;
+  }
+  return arr;
+}
 
 LcModule *lc_module_new(void) {
   LcModule *m = (LcModule *)calloc(1, sizeof(LcModule));
+  if (!m) return NULL;
+  m->arena = (LcArena *)calloc(1, sizeof(LcArena));
+  if (!m->arena) { free(m); return NULL; }
   return m;
 }
 
 void lc_module_free(LcModule *m) {
   if (!m) return;
-  /* Free every func, its blocks, and each block's instruction list. */
-  for (uint32_t i = 0; i < m->nfuncs; i++) {
-    LcFunc *f = m->funcs[i];
-    if (!f) continue;
-    for (uint32_t j = 0; j < f->nblocks; j++) {
-      LcBlock *blk = f->blocks[j];
-      if (!blk) continue;
-      LcInst *in = blk->first;
-      while (in) {
-        LcInst *next = in->next;
-        free(in->args);
-        free(in);
-        in = next;
-      }
-      free(blk->preds);
-      free(blk->succs);
-      free(blk);
-    }
-    free(f->blocks);
-    free(f->args);
-    free(f);
-  }
-  free(m->funcs);
-  /* call-graph arrays, if any */
+  /* call-graph arrays, if any (still plain malloc — they realloc-grow) */
   if (m->callees) {
     for (uint32_t i = 0; i < m->nfuncs; i++) free(m->callees[i]);
   }
   free(m->callees);
   free(m->ncallees);
+  /* every func/block/inst and their builder arrays live in the arena:
+  ** releasing the chunk chain releases the whole IR. */
+  if (m->arena) {
+    LcArenaChunk *c = m->arena->chunks;
+    while (c) {
+      LcArenaChunk *next = c->next;
+      free(c);
+      c = next;
+    }
+    free(m->arena);
+  }
   free(m);
 }
 
 LcFunc *lc_func_new(LcModule *m, Proto *p) {
-  LcFunc *f = (LcFunc *)calloc(1, sizeof(LcFunc));
+  LcFunc *f;
+  LcFunc **grown;
+  if (!m) return NULL;  /* funcs are arena-owned, so a module is required */
+  f = (LcFunc *)lc_arena_alloc(m->arena, sizeof(LcFunc));
   if (!f) return NULL;
   f->source = p;
   f->is_ssa = false;   /* M0 memory form until M1 mem2reg lifts to SSA */
-  if (m) {
-    LcFunc **grown = (LcFunc **)realloc(m->funcs,
-                                        (m->nfuncs + 1) * sizeof(LcFunc *));
-    if (!grown) { free(f); return NULL; }
-    m->funcs = grown;
-    m->funcs[m->nfuncs] = f;
-    m->nfuncs++;
-  }
+  f->arena  = m->arena;
+  grown = (LcFunc **)lc_arena_grow(m->arena, m->funcs, m->nfuncs,
+                                   sizeof(LcFunc *));
+  if (!grown) return NULL;  /* f stays in the arena; freed with the module */
+  m->funcs = grown;
+  m->funcs[m->nfuncs] = f;
+  m->nfuncs++;
   return f;
 }
 
 LcBlock *lc_block_new(LcFunc *f) {
   if (!f) return NULL;
-  LcBlock *blk = (LcBlock *)calloc(1, sizeof(LcBlock));
+  LcBlock *blk = (LcBlock *)lc_arena_alloc(f->arena, sizeof(LcBlock));
   if (!blk) return NULL;
-  blk->id = f->nblocks;
-  LcBlock **grown = (LcBlock **)realloc(f->blocks,
-                                        (f->nblocks + 1) * sizeof(LcBlock *));
-  if (!grown) { free(blk); return NULL; }
+  blk->id    = f->nblocks;
+  blk->arena = f->arena;
+  LcBlock **grown = (LcBlock **)lc_arena_grow(f->arena, f->blocks, f->nblocks,
+                                              sizeof(LcBlock *));
+  if (!grown) return NULL;  /* blk stays in the arena; freed with the module */
   f->blocks = grown;
   f->blocks[f->nblocks] = blk;
   f->nblocks++;
@@ -79,9 +137,10 @@ LcBlock *lc_block_new(LcFunc *f) {
 
 LcInst *lc_emit(LcBlock *b, LcOpcode op) {
   if (!b) return NULL;
-  LcInst *in = (LcInst *)calloc(1, sizeof(LcInst));
+  LcInst *in = (LcInst *)lc_arena_alloc(b->arena, sizeof(LcInst));
   if (!in) return NULL;
-  in->op = op;
+  in->op    = op;
+  in->arena = b->arena;
   /* Append to the block's doubly-linked instruction list. */
   in->prev = b->last;
   in->next = NULL;
@@ -103,8 +162,8 @@ LcInst *lc_emit_bc(LcBlock *blk, LcOpcode op, int a, int b, int c, int bc_pc) {
 
 void lc_inst_add_arg(LcInst *in, LcValue *v) {
   if (!in) return;
-  LcValue **grown = (LcValue **)realloc(in->args,
-                                        (in->nargs + 1) * sizeof(LcValue *));
+  LcValue **grown = (LcValue **)lc_arena_grow(in->arena, in->args, in->nargs,
+                                              sizeof(LcValue *));
   if (!grown) return;
   in->args = grown;
   in->args[in->nargs] = v;

@@ -163,6 +163,12 @@ typedef struct LcBlock LcBlock;
 typedef struct LcFunc LcFunc;
 typedef struct LcModule LcModule;
 
+/* Grow-only bump allocator owned by the LcModule (defined in ir.c). All IR
+** node objects (LcFunc/LcBlock/LcInst) and the builder-grown pointer arrays
+** (m->funcs, f->blocks, in->args) live in it; lc_module_free releases the
+** whole IR by walking the chunk chain instead of every node. */
+typedef struct LcArena LcArena;
+
 /* An SSA value is produced by exactly one instruction (or is an ARG). */
 typedef struct LcValue {
   LcInst *def;        /* defining instruction (NULL for ARG/const-pool)   */
@@ -214,6 +220,8 @@ struct LcInst {
                       /* of call_ret_ti aliased fn65 onto fn1 and retagged a   */
                       /* float return as the bits of an integer.               */
   LcInst  *next, *prev;
+  LcArena *arena;     /* owning module's arena (set by lc_emit); lets       */
+                      /* lc_inst_add_arg grow `args` by arena-copy.         */
 };
 
 /* lc_pass_local_typeinfer proof bits stored in LcInst.known. */
@@ -230,6 +238,7 @@ struct LcBlock {
   /* dominator-tree + liveness scratch filled by analyses */
   LcBlock *idom;
   void    *live_in, *live_out; /* bitsets, owned by liveness pass         */
+  LcArena *arena;              /* owning module's arena (set by lc_block_new) */
 };
 
 struct LcFunc {
@@ -248,6 +257,7 @@ struct LcFunc {
   LcType   ret_type;           /* joined return type                      */
   uint32_t effect_summary;     /* LcEffect bitset for the whole function  */
   bool     escapes;            /* address/closure escapes the module      */
+  LcArena *arena;              /* owning module's arena (set by lc_func_new) */
 };
 
 struct LcModule {
@@ -261,6 +271,7 @@ struct LcModule {
   int        opt_level;        /* -O level (driver sets it); codegen uses it */
                                /* to choose M1 typed fastpaths over boxed     */
                                /* helpers. 0 = faithful boxed baseline.       */
+  LcArena   *arena;            /* owns every IR node; freed by lc_module_free */
 };
 
 /* ------------------------------------------------------------------ */
