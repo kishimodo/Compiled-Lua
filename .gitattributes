@@ -1,0 +1,7 @@
+# Package-manager registry fixtures are hash-material: the publish/integrity
+# tests SHA-256 the on-disk bytes and compare against index.json. Store them
+# byte-exact (no EOL conversion) so every checkout reproduces the committed
+# hashes and test runs leave the working tree clean.
+package-manager/registry/** -text
+package-manager/registry-mv/** -text
+package-manager/registry-test/** -text
