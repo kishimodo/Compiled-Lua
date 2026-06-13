@@ -15,6 +15,10 @@
 #include "lopcodes.h"  /* GETARG_sB/C/k — decode the trailing MMBINI in Rt_ShiftI */
 
 #include <stdio.h>
+#if defined( LUAC_AOT_RUNTIME )
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>   /* Win32 TLS for the per-thread tail-call drive flag */
+#endif
 
 int Rt_AddSlow( lua_State *L, int A, int B, int C ) {
     /* Defer to upstream's arith handler. luaO_arith handles metamethods,
@@ -701,11 +705,30 @@ extern int luaD_pretailcall( lua_State *L, CallInfo *ci, StkId func,
    inside an active drive loop signals the loop via g_TailRepeat and returns,
    instead of re-entering the JIT. The marker lives on the CallInfo (per
    coroutine), so concurrent coroutines never see each other's drive state.
-   g_TailRepeat is set and consumed synchronously within one fiber between a
-   tail call and the function's immediate return (no yield/error in that window),
-   so a plain file-scope flag is safe. */
+   the flag is set and consumed synchronously within one fiber between a tail
+   call and the function's immediate return (no yield/error in that window), so
+   it is safe per fiber; it is THREAD-LOCAL so concurrent native worker threads
+   each drive their own tail-call chain without racing on it. In the AOT runtime
+   the storage is a Win32 TLS slot (a `__thread` would pull gcc's emutls, which
+   the lean internal linker cannot resolve); the interpreter uses `__thread`. */
 #define CIST_JITTAILDRIVE ( 1u << 14 )
-static int g_TailRepeat = 0;
+#if defined( LUAC_AOT_RUNTIME )
+#include "jit/tls_slot.h"
+static volatile LONG g_TailRepeatSlot = ( LONG )TLS_OUT_OF_INDEXES;
+static int  TailRepeat_Get( void ) {
+    DWORD slot = ( DWORD )g_TailRepeatSlot;
+    if ( slot == TLS_OUT_OF_INDEXES ) return 0;
+    return ( int )( intptr_t )TlsGetValue( slot );
+}
+static void TailRepeat_Set( int V ) {
+    DWORD slot = CluaTls_Ensure( &g_TailRepeatSlot );
+    if ( slot != TLS_OUT_OF_INDEXES ) TlsSetValue( slot, ( void * )( intptr_t )V );
+}
+#else
+static __thread int g_TailRepeatTls = 0;
+static int  TailRepeat_Get( void )  { return g_TailRepeatTls; }
+static void TailRepeat_Set( int V ) { g_TailRepeatTls = V; }
+#endif
 
 /*!
  * @brief
@@ -757,7 +780,7 @@ int Rt_TailCall( lua_State *L, int A, int NArgs ) {
     if ( N < 0 ) {
         /* Lua callee — CallInfo reused (the Lua frame stays flat). */
         if ( Nested ) {
-            g_TailRepeat = 1;          /* enclosing drive loop runs the callee */
+            TailRepeat_Set( 1 );       /* enclosing drive loop runs the callee */
             return 0;
         }
         /* Top-level tail call: drive the reused-CI chain ITERATIVELY so a run of
@@ -786,13 +809,13 @@ int Rt_TailCall( lua_State *L, int A, int NArgs ) {
                 break;
             }
             L->ci->callstatus |= CIST_JITTAILDRIVE;   /* re-assert (pretailcall cleared it) */
-            g_TailRepeat = 0;
+            TailRepeat_Set( 0 );
             NRes = Jitted( L );
-            if ( !g_TailRepeat ) { break; }           /* real return ends the chain */
+            if ( !TailRepeat_Get( ) ) { break; }      /* real return ends the chain */
             /* else: the callee tail-called; L->ci was reused for the next callee */
         }
         L->ci->callstatus &= ( unsigned short )~CIST_JITTAILDRIVE;
-        g_TailRepeat = 0;
+        TailRepeat_Set( 0 );
         return NRes;
     }
     /* C function path: precallC placed N results at the (relocated) Func

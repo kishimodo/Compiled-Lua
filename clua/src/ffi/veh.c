@@ -25,7 +25,29 @@ typedef struct {
 static REGION_T  g_Regions[ VEH_REGION_MAX ];
 static int       g_NumRegions = { 0 };
 
-PJIT_FRAME_T g_CurrentJitFrame = NULL;
+/* THREAD-LOCAL: per-OS-thread JIT recovery frame (see veh.h). In the AOT
+   runtime, storage is a Win32 TLS slot -- `__thread` would drag in gcc's
+   emutls (and its pthread/winpthread tail) which the lean internal linker
+   cannot resolve. The interpreter (GCC link) uses a plain `__thread`. The slot
+   is allocated lazily on the first SET, which always happens on the main thread
+   at startup before any worker can spawn, so no race. */
+#if defined( LUAC_AOT_RUNTIME )
+#include "jit/tls_slot.h"
+static volatile LONG g_JitFrameSlot = ( LONG )TLS_OUT_OF_INDEXES;
+PJIT_FRAME_T Veh_GetJitFrame( void ) {
+    DWORD slot = ( DWORD )g_JitFrameSlot;
+    if ( slot == TLS_OUT_OF_INDEXES ) return NULL;
+    return ( PJIT_FRAME_T )TlsGetValue( slot );
+}
+void Veh_SetJitFrame( PJIT_FRAME_T Frame ) {
+    DWORD slot = CluaTls_Ensure( &g_JitFrameSlot );
+    if ( slot != TLS_OUT_OF_INDEXES ) TlsSetValue( slot, Frame );
+}
+#else
+static __thread PJIT_FRAME_T g_JitFrameTls = NULL;
+PJIT_FRAME_T Veh_GetJitFrame( void )           { return g_JitFrameTls; }
+void         Veh_SetJitFrame( PJIT_FRAME_T F ) { g_JitFrameTls = F; }
+#endif
 
 /* Weak forward decl so tests that link veh.o without dispatch.o still resolve.
    When dispatch.o is linked, this binds to the real implementation; otherwise
@@ -125,18 +147,19 @@ int Veh_ClassifyFault( PEXCEPTION_POINTERS Pointers ) {
 }
 
 void Veh_TriggerRecovery( const char *Message ) {
-    if ( g_CurrentJitFrame == NULL ) {
+    PJIT_FRAME_T Frame = Veh_GetJitFrame( );
+    if ( Frame == NULL ) {
         /* No JIT frame to recover into — print and abort. */
         fprintf( stderr, "[-] Veh_TriggerRecovery without JIT frame: %s\n",
                  Message ? Message : "(no message)" );
         abort( );
     }
     if ( Message != NULL ) {
-        strncpy( g_CurrentJitFrame->FaultMessage, Message,
-                 sizeof( g_CurrentJitFrame->FaultMessage ) - 1 );
-        g_CurrentJitFrame->FaultMessage[ sizeof( g_CurrentJitFrame->FaultMessage ) - 1 ] = '\0';
+        strncpy( Frame->FaultMessage, Message,
+                 sizeof( Frame->FaultMessage ) - 1 );
+        Frame->FaultMessage[ sizeof( Frame->FaultMessage ) - 1 ] = '\0';
     }
-    longjmp( g_CurrentJitFrame->RecoveryJmp, 1 );
+    longjmp( Frame->RecoveryJmp, 1 );
 }
 
 /*!
@@ -168,8 +191,10 @@ void Veh_TriggerRecovery( const char *Message ) {
 __attribute__( ( naked ) )
 static void Veh_RecoveryTrampoline( void ) {
     __asm__ volatile (
-        /* R11 = g_CurrentJitFrame = &RecoveryJmp (jmp_buf, first field) */
-        "movq  g_CurrentJitFrame(%%rip), %%r11\n"
+        /* R11 = g_CurrentJitFrame = &RecoveryJmp (jmp_buf, first field). The VEH
+         * handler set R11 in ContextRecord before redirecting here, because
+         * g_CurrentJitFrame is now thread-local and cannot be read RIP-relative
+         * from this thread-agnostic stub. */
 
         /* Restore callee-saved integer registers from the jmp_buf. */
         "movq   8(%%r11), %%rbx\n"   /* Rbx */
@@ -275,10 +300,11 @@ static LONG WINAPI Runtime_VehHandler( PEXCEPTION_POINTERS Pointers ) {
         }
     }
 
-    /* Store the message in the JIT frame. */
-    strncpy( g_CurrentJitFrame->FaultMessage, Msg,
-             sizeof( g_CurrentJitFrame->FaultMessage ) - 1 );
-    g_CurrentJitFrame->FaultMessage[ sizeof( g_CurrentJitFrame->FaultMessage ) - 1 ] = '\0';
+    /* Store the message in this thread's JIT frame. */
+    PJIT_FRAME_T Frame = Veh_GetJitFrame( );
+    strncpy( Frame->FaultMessage, Msg,
+             sizeof( Frame->FaultMessage ) - 1 );
+    Frame->FaultMessage[ sizeof( Frame->FaultMessage ) - 1 ] = '\0';
 
     /* Redirect execution to the recovery trampoline so that longjmp runs
      * outside of Windows exception dispatch. Calling longjmp directly from
@@ -287,7 +313,14 @@ static LONG WINAPI Runtime_VehHandler( PEXCEPTION_POINTERS Pointers ) {
      *
      * Only RIP is modified; longjmp in the trampoline restores RSP and all
      * other registers from the saved jmp_buf, so the fault-time RSP is fine.
+     *
+     * R11 carries the per-thread g_CurrentJitFrame to the trampoline: we read
+     * the thread-local here (in the faulting thread's context) where C can,
+     * rather than from the naked stub which has no thread-local addressing. R11
+     * is volatile in the Win64 ABI, so commandeering it across the redirect is
+     * safe.
      */
+    Pointers->ContextRecord->R11 = ( DWORD64 )( uintptr_t )Frame;
     Pointers->ContextRecord->Rip = ( DWORD64 )( uintptr_t )Veh_RecoveryTrampoline;
     return EXCEPTION_CONTINUE_EXECUTION;
 }
@@ -305,5 +338,5 @@ void Veh_Shutdown( void ) {
     }
     g_NumRegions = 0;
     memset( g_Regions, 0, sizeof( g_Regions ) );
-    g_CurrentJitFrame = NULL;
+    Veh_SetJitFrame( NULL );
 }

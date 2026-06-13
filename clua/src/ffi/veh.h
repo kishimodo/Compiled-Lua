@@ -26,10 +26,18 @@ typedef struct _JIT_FRAME_T {
     char                     FaultMessage[ 192 ];
 } JIT_FRAME_T, *PJIT_FRAME_T;
 
-/* Currently-innermost JIT frame. Modified only by Jit_TrampolineEntry
-   (push/pop) and read by Veh_TriggerRecovery. V1 single-threaded — plain
-   global. Future multi-thread: __declspec(thread). */
-extern PJIT_FRAME_T g_CurrentJitFrame;
+/* Currently-innermost JIT frame -- THREAD-LOCAL. Each OS thread owns its own
+   recovery frame, so a native worker thread's fault recovers to its own setjmp
+   boundary rather than the main thread's (which lives on a different stack).
+   Accessed only through these accessors: in the AOT runtime the storage is a
+   Win32 TLS slot (the lean internal linker cannot pull gcc's emutls, which
+   `__thread` would require); in the GCC-linked interpreter it is a real
+   `__thread`. The asm recovery trampoline never reads the storage directly --
+   the VEH handler, running in the faulting thread, hands the per-thread frame
+   to the trampoline via ContextRecord->R11. In a single-threaded program the
+   main thread's copy behaves exactly like the old global. */
+PJIT_FRAME_T Veh_GetJitFrame( void );
+void         Veh_SetJitFrame( PJIT_FRAME_T Frame );
 
 /*!
  * @brief

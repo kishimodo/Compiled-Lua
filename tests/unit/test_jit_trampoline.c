@@ -2,7 +2,7 @@
  *
  * Verifies:
  *  1. Jit_TrampolineEntry with a normal-returning body propagates the return.
- *  2. g_CurrentJitFrame is NULL after a normal return.
+ *  2. The current JIT frame is NULL after a normal return.
  *  3. Manual setjmp/longjmp recovery via Veh_TriggerRecovery carries the
  *     fault message through the JIT_FRAME_T and returns nonzero.
  *  4. Frame stack is empty at the end.
@@ -37,12 +37,12 @@ int main( void ) {
     /* 1. Normal path: returns 0. */
     int Rc = Jit_TrampolineEntry( L, Body_Zero );
     CHECK_EQ_INT( Rc, 0 );
-    CHECK_NULL( g_CurrentJitFrame );
+    CHECK_NULL( Veh_GetJitFrame( ) );
 
     /* 2. Normal path: returns 3. */
     Rc = Jit_TrampolineEntry( L, Body_Three );
     CHECK_EQ_INT( Rc, 3 );
-    CHECK_NULL( g_CurrentJitFrame );
+    CHECK_NULL( Veh_GetJitFrame( ) );
 
     /* 3. Manual setjmp/longjmp recovery round-trip via a raw JIT_FRAME_T.
      *    We push a frame ourselves, call Veh_TriggerRecovery, verify:
@@ -53,9 +53,9 @@ int main( void ) {
     {
         JIT_FRAME_T Frame;
         memset( &Frame, 0, sizeof( Frame ) );
-        Frame.Prev       = g_CurrentJitFrame;
+        Frame.Prev       = Veh_GetJitFrame( );
         Frame.PrevLuaTop = L->top.p;
-        g_CurrentJitFrame = &Frame;
+        Veh_SetJitFrame( &Frame );
 
         if ( setjmp( Frame.RecoveryJmp ) == 0 ) {
             Veh_TriggerRecovery( "test_fault_42" );
@@ -66,11 +66,11 @@ int main( void ) {
             CHECK_MSG( strstr( Frame.FaultMessage, "test_fault_42" ) != NULL,
                        "FaultMessage contains test_fault_42" );
         }
-        g_CurrentJitFrame = Frame.Prev;
+        Veh_SetJitFrame( Frame.Prev );
     }
 
     /* 4. Frame stack is clean. */
-    CHECK_NULL( g_CurrentJitFrame );
+    CHECK_NULL( Veh_GetJitFrame( ) );
 
     lua_close( L );
     TEST_END();

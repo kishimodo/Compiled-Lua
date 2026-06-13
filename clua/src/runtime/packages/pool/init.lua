@@ -5,11 +5,12 @@
 --   pool.parallel(fn, items, opts?) -> { future, future, ... }
 --
 -- opts table:
---   workers     = thread.cpu_count()    pool size (>= 1)
+--   workers     = thread.cpu_count()    pool size (>= 1), validated
 --   queue_size  = 1000                  bounded task channel capacity
---   on_panic    = nil                   fn(err, task_index) called when a
---                                       worker function raises
---   thread_name = "pool-worker"         prefix; each worker is "<prefix>-N"
+--
+-- Tasks currently run INLINE (synchronously on the caller's thread); a future
+-- revision can dispatch them to native OS threads via thread.spawn once the
+-- task channel is shareable across lua_States.
 --
 -- Pool methods:
 --   :submit(fn, args?)              -> future
@@ -25,20 +26,10 @@
 --
 -- ===== Implementation ===========================================
 --
--- Workers pull task descriptors from a bounded channel. Each task carries
--- a serialized function reference (string.dump bytecode) + args + the
--- future's result slot. The worker loads the bytecode, calls it, and
--- writes the result into the future via a channel.send to a dedicated
--- per-future result channel (capacity 1 so the producer never blocks).
---
--- A cancelled task is rejected at dispatch time: when a worker pulls a
--- task whose future is already in the "cancelled" state, it skips the
--- function call and reports cancellation as the result.
---
--- The pool degrades gracefully when the `thread` package falls back to
--- the cooperative mode: every submit just runs the fn synchronously on
--- the calling thread and the future is born already-resolved. This keeps
--- the API identical and lets test programs run without real threads.
+-- submit() runs the task INLINE on the calling thread and resolves the future
+-- immediately; :result() then returns it on the first call. A cancelled task
+-- (future already in the "cancelled" state) reports cancellation instead of
+-- running.
 
 local thread  = require "thread"
 local channel = require "channel"
@@ -137,28 +128,19 @@ end
 
 function M.new(opts)
     opts = opts or {}
-    local workers     = opts.workers or thread.cpu_count() or 4
-    local queue_size  = opts.queue_size or 1000
-    local on_panic    = opts.on_panic
-    local name_prefix = opts.thread_name or "pool-worker"
-
+    local workers    = opts.workers or thread.cpu_count() or 4
+    local queue_size = opts.queue_size or 1000
     if workers < 1 then error("pool.new: workers must be >= 1") end
 
-    local self = setmetatable({
-        workers     = {},
-        on_panic    = on_panic,
-        name_prefix = name_prefix,
-        task_ch     = channel.make(queue_size),
-        closed      = atomic.flag(),
-        inflight    = atomic.int(0),
-        worker_count = workers,
-        -- Tasks run inline (synchronously on the caller's thread). Real OS
-        -- worker threads need a native bootstrap + a cross-lua_State function
-        -- handoff that no current build ships; see the note in submit().
-        inline      = true,
+    -- Tasks run inline (synchronously on the caller's thread); futures are born
+    -- resolved. A real bounded pool over native OS threads -- thread.spawn now
+    -- provides those -- needs a task channel shareable across lua_States, which
+    -- is the documented next step; until then submit() is synchronous.
+    return setmetatable({
+        task_ch  = channel.make(queue_size),
+        closed   = atomic.flag(),
+        inflight = atomic.int(0),
     }, pool_mt)
-
-    return self
 end
 
 function pool_methods:submit(fn, args)
@@ -174,12 +156,10 @@ function pool_methods:submit(fn, args)
     local fut = new_future()
     self.inflight:inc()
     -- Tasks execute inline on the calling thread; the future is born
-    -- resolved. A real cross-thread worker pool needs a native thread
-    -- bootstrap plus a way to hand a function to another lua_State -- which
-    -- in a closed-world AOT build cannot go through string.dump/load, so it
-    -- is gated on the compile-time function-id proto registry (see the notes
-    -- in thread/init.lua). Until that lands, submit() is synchronous, which
-    -- is exactly what every supported build does today.
+    -- resolved. thread.spawn can already place a shippable function on a real
+    -- OS thread (resolved by its compile-time function-id); a real bounded pool
+    -- additionally needs the task channel to be shareable across lua_States, the
+    -- documented next step. Until then submit() is synchronous.
     exec_inline(fn, args, fut)
     self.inflight:dec()
     return fut

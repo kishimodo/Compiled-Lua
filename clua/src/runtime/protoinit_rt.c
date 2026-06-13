@@ -269,7 +269,9 @@ static Proto *BuildOne( lua_State *L, Ctx *cx, uint32_t idx ) {
     }
     if ( !r.ok ) return NULL;
 
-    if ( !Jit_RegisterCompiled( P, luac_fn_table[ idx ] ) ) return NULL;
+    /* Register with the function-id (the blob index) so a native worker thread
+       can resolve a function shipped to it by id (thread.spawn native path). */
+    if ( !Jit_RegisterCompiledId( P, luac_fn_table[ idx ], ( int )idx ) ) return NULL;
 
     cx->built[ idx ] = P;
     cx->state[ idx ] = LCPB_BUILT;

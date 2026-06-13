@@ -65,8 +65,15 @@ typedef struct {
    never opened, so no foreign threads can enter Lua), and gcc's emulated
    TLS would otherwise drag libgcc emutls + ~23 KB of winpthread into every
    compiled exe. */
+/* AOT runtime: a native worker thread (thread.spawn native path) runs its own
+   fibers, so "current coroutine" must be genuinely per-OS-thread -- but
+   `__thread` would drag in gcc's emutls, which the lean internal linker cannot
+   resolve. Use a Win32 TLS slot instead (allocated lazily on the first set,
+   which happens on the main thread before any worker). The interpreter (GCC
+   link, single OS thread) keeps a real `__thread`. */
 #if defined( LUAC_AOT_RUNTIME )
-static                           PCORO_T g_CurrentCoroTls = NULL;
+#include "jit/tls_slot.h"
+static volatile LONG g_CoroSlot = ( LONG )TLS_OUT_OF_INDEXES;
 #elif defined( __GNUC__ )
 static __thread                  PCORO_T g_CurrentCoroTls = NULL;
 #else
@@ -83,13 +90,24 @@ static const char *StatusName( int S ) {
     }
 }
 
+#if defined( LUAC_AOT_RUNTIME )
+static PCORO_T CurrentCoro( void ) {
+    DWORD slot = ( DWORD )g_CoroSlot;
+    if ( slot == TLS_OUT_OF_INDEXES ) return NULL;
+    return ( PCORO_T )TlsGetValue( slot );
+}
+static void SetCurrentCoro( PCORO_T Co ) {
+    DWORD slot = CluaTls_Ensure( &g_CoroSlot );
+    if ( slot != TLS_OUT_OF_INDEXES ) TlsSetValue( slot, Co );
+}
+#else
 static PCORO_T CurrentCoro( void ) {
     return g_CurrentCoroTls;
 }
-
 static void SetCurrentCoro( PCORO_T Co ) {
     g_CurrentCoroTls = Co;
 }
+#endif
 
 void Coro_InitProcess( void ) {
     /* TLS storage allocated by the linker; no per-process init needed. */
@@ -206,13 +224,13 @@ static int LuaFn_Resume( lua_State *L ) {
        fault inside a coroutine's JIT code would longjmp into the resumer's
        recovery frame -- a jmp_buf captured on a different (suspended) fiber
        stack -- and corrupt both stacks. */
-    PJIT_FRAME_T SavedJitFrame = g_CurrentJitFrame;
-    g_CurrentJitFrame          = Co->JitFrame;
+    PJIT_FRAME_T SavedJitFrame = Veh_GetJitFrame( );
+    Veh_SetJitFrame( Co->JitFrame );
 
     SwitchToFiber( Co->Fiber );
 
-    Co->JitFrame      = g_CurrentJitFrame;   /* save whatever the coroutine left */
-    g_CurrentJitFrame = SavedJitFrame;       /* restore our own fiber's frame */
+    Co->JitFrame = Veh_GetJitFrame( );   /* save whatever the coroutine left */
+    Veh_SetJitFrame( SavedJitFrame );    /* restore our own fiber's frame */
 
     SetCurrentCoro( Prev );
     if ( Prev != NULL ) Prev->Status = STATUS_RUNNING;

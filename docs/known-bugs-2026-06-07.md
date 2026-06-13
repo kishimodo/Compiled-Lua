@@ -369,9 +369,49 @@ The new coverage surfaced a batch of real bugs.
   it: `thread.spawn` drives the worker on a coroutine (keeping the closure, so
   upvalues survive), `pool` dispatches inline. Both compile AOT and match the
   interpreter — pinned by `tests/differential/aot_pool_thread.lua` at O0+O1.
-  Native OS threads remain a documented future step (resolve the worker through
-  its compile-time function-id, then bring the worker state up from the proto
-  registry). `clua/src/runtime/packages/{pool,thread}/init.lua`.
+  Native OS threads then landed (see below); `thread.spawn` now runs shippable
+  workers on real OS threads. `clua/src/runtime/packages/{pool,thread}/init.lua`.
+
+## Native OS threads (2026-06-13): thread.spawn runs on real OS threads
+
+`thread.spawn` now places a "shippable" worker function (one that captures no
+upvalues) on a real OS thread in its own `lua_State`, running at native speed.
+The function is shipped by its compile-time function-id (the protoblob index,
+stable across states) -- not as bytecode -- so it works in the closed world with
+no `string.dump`/`load`. Args/results cross via a small C serializer in `_clua`.
+A function with captured upvalues, or any non-AOT build, runs cooperatively
+instead; results are identical, pinned by `tests/differential/aot_native_thread.lua`
+at O0+O1. Making the AOT runtime reentrant (it was single-OS-thread by design)
+required a per-worker-thread dispatch cache (TLS), and thread-local JIT-recovery
+frame / tail-call flag / coroutine pointer -- via Win32 TLS, because `__thread`
+pulls gcc emutls (+ winpthread) that the lean internal linker can't resolve
+(`clua/src/jit/tls_slot.h`). Worker entry point: `Clua_ThreadBootstrap` /
+`_clua` in `clua/src/runtime/aot_entry.c`; registry: `Jit_RegisterCompiledId` /
+`Jit_ResolveFuncId` in `clua/src/jit/dispatch.c`.
+
+Three concurrency bugs were found by a 300-worker stress test and fixed:
+
+- **THREAD-NATIVE-CRT-001** -- workers were created with `CreateThread`, which
+  does NOT initialize the CRT's per-thread state; Lua leans on the CRT
+  (malloc/free/errno/locale), so the heap corrupted intermittently under load.
+  Fixed by `_beginthreadex` (sets the state up; `_endthreadex` on return).
+- **THREAD-NATIVE-GCROOT-002** -- the worker built the proto tree but never
+  rooted the ENTRY proto, which holds the user's worker functions (BuildEntry
+  roots only required *modules*, via package.preload). A GC cycle then swept the
+  user functions, so `resolve_fn` returned a freed Proto -> corrupt CallInfo
+  (`L->ci->func.p == NULL`, the diagnostic was `Base == 0x10`). Fixed by rooting
+  a closure over the entry proto for the worker's life. (Same class as
+  AOT-MULTIMOD-001 below.)
+- **THREAD-NATIVE-REENTRANCY-003** -- the dispatch cache, JIT-recovery frame,
+  tail-call flag, and coroutine pointer were process-global; concurrent workers
+  raced on them. Fixed by making each per-thread (see above).
+
+Known limitations (documented, not bugs): native workers do NOT open the FFI
+(its callback dispatch is one shared `lua_State`), so a native worker must be
+ffi-free -- ffi-using functions should run cooperatively. Worker construction
+(fresh state + full proto rebuild) is serialized by a process lock; only the
+construction is serial, the work runs fully in parallel. `pool` still dispatches
+inline (a bounded native pool needs a cross-`lua_State` task channel).
 
 ## FIXED — AOT-MULTIMOD-001 (2026-06-12): GC swept Protos during startup build
 

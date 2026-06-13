@@ -41,7 +41,7 @@ $changelog     = Join-Path $root 'CHANGELOG.md'
 if (-not (Test-Path $versionHeader)) { throw "bump-version: missing $versionHeader" }
 
 # ----- parse the current version -------------------------------------------
-$text = Get-Content $versionHeader -Raw
+$text = Get-Content $versionHeader -Raw -Encoding UTF8
 function Read-Macro([string] $name) {
     # Capture only the first token after the macro name -- a "quoted" value or a
     # bare integer -- so a trailing /* comment */ is never swept into the value.
@@ -93,17 +93,21 @@ $text = [regex]::Replace($text, '(#define\s+CLUA_VERSION_MINOR\s+)\d+',         
 $text = [regex]::Replace($text, '(#define\s+CLUA_VERSION_PATCH\s+)\d+',                "`${1}$patch")
 $text = [regex]::Replace($text, '(#define\s+CLUA_VERSION_PRERELEASE\s+)"[^"]*"',       "`${1}""$pre""")
 $text = [regex]::Replace($text, '(#define\s+CLUA_VERSION_STRING\s+)"[^"]*"',           "`${1}""$newVer""")
-Set-Content -Path $versionHeader -Value $text -NoNewline -Encoding ascii
+# UTF-8 without BOM -- '-Encoding ascii' would mangle any non-ASCII already in
+# the file (em-dashes, arrows) into '?'.
+$utf8NoBom = New-Object System.Text.UTF8Encoding $false
+[System.IO.File]::WriteAllText($versionHeader, $text, $utf8NoBom)
 Write-Host "  updated $versionHeader"
 
 # ----- promote the CHANGELOG Unreleased section -----------------------------
 if (-not $NoChangelog -and (Test-Path $changelog)) {
     $today = (Get-Date).ToString('yyyy-MM-dd')
-    $cl = Get-Content $changelog -Raw
+    $cl = Get-Content $changelog -Raw -Encoding UTF8
     if ($cl -match '(?m)^##\s+\[Unreleased\]') {
         $cl = [regex]::Replace($cl, '(?m)^##\s+\[Unreleased\].*$',
             "## [Unreleased]`n`n## [$newVer] - $today", 1)
-        Set-Content -Path $changelog -Value $cl -Encoding ascii
+        $utf8NoBomCl = New-Object System.Text.UTF8Encoding $false
+        [System.IO.File]::WriteAllText($changelog, $cl, $utf8NoBomCl)
         Write-Host "  promoted CHANGELOG Unreleased -> [$newVer] - $today"
     }
     else {

@@ -20,11 +20,41 @@ typedef int ( *JIT_FUNC_T )( lua_State *L );
  * Idempotent per Proto. */
 int Jit_RegisterCompiled( Proto *P, JIT_FUNC_T Entry );
 
+/* As Jit_RegisterCompiled, but also records the function-id (the protoblob
+ * record index, stable across lua_States) so a worker thread can resolve a
+ * function shipped to it by id. ProtoInit uses this; FuncId < 0 means unknown
+ * (the plain Jit_RegisterCompiled path). */
+int Jit_RegisterCompiledId( Proto *P, JIT_FUNC_T Entry, int FuncId );
+
 /*!
  * @brief
  *  Look up the cached entry for P (returns NULL if not registered).
  */
 JIT_FUNC_T Jit_LookupCached( Proto *P );
+
+/* function-id <-> Proto, within the CURRENT thread's cache (the global cache on
+ * the main thread, the worker's own cache on a worker thread). Jit_ProtoFuncId
+ * returns -1 if P is not registered; Jit_ResolveFuncId returns NULL if no entry
+ * carries that id. The id is the protoblob index, identical across states. */
+int    Jit_ProtoFuncId( Proto *P );
+Proto *Jit_ResolveFuncId( int FuncId );
+
+/* Per-thread dispatch-cache isolation for native OS-thread workers.
+ *
+ * The cache is process-global by default (one shared table, populated once by
+ * the main thread at startup). A worker OS thread builds its OWN Proto set in
+ * its OWN lua_State, so it installs a private thread-local cache for the span of
+ * its life: Jit_WorkerCacheBegin() at bootstrap, Jit_WorkerCacheEnd() before it
+ * exits. While a worker cache is installed, register/lookup on that thread hit
+ * it instead of the global table -- no locks (each thread touches only its own
+ * cache), no overflow (freed on worker exit), and ZERO cost on the main thread
+ * until the first worker ever spawns.
+ *
+ * Jit_InitWorkerTls() allocates the TLS slot; call it once on the main thread at
+ * startup before any worker can spawn. */
+void  Jit_InitWorkerTls( void );
+void *Jit_WorkerCacheBegin( void );   /* returns the cache, or NULL on failure */
+void  Jit_WorkerCacheEnd( void );
 
 /* Forward declaration to avoid pulling veh.h into dispatch.h. */
 typedef struct _JIT_FRAME_T JIT_FRAME_T, *PJIT_FRAME_T;
