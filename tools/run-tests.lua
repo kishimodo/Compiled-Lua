@@ -470,12 +470,23 @@ end
 -- programs, each aotc-compiled at -O1 and run, stdout diffed against -i. Fixed
 -- seeds keep CI deterministic; long campaigns live in build\run-fuzz.bat.
 local function run_fuzz_smoke()
-  header("Differential fuzz smoke (tools/fuzz-differential.lua, seeds 1-25)")
-  local out, rc = capture(guard('"' .. CLUA .. '" tools\\fuzz-differential.lua 1 25 2>&1'))
-  record("fuzz", "seeds-1-25", out, rc)
-  -- surface the fuzzer's own summary line for context
-  local summary = out:match("%[fuzz%][^\r\n]*")
-  if summary then print("            " .. summary) end
+  header("Differential fuzz smoke (tools/fuzz-differential.lua, O1/O2/O3)")
+  -- A small FIXED-seed slice of the differential fuzzer at each non-trivial -O
+  -- level, with DISTINCT seed ranges so the three passes cover different
+  -- programs (the aggressive whole-program / memory passes only engage at
+  -- O2/O3). Long campaigns live in build\run-fuzz.bat.
+  local passes = {
+    { lvl = "-O1", lo = 1,  n = 25, tag = "O1-seeds-1-25" },
+    { lvl = "-O2", lo = 26, n = 15, tag = "O2-seeds-26-40" },
+    { lvl = "-O3", lo = 41, n = 15, tag = "O3-seeds-41-55" },
+  }
+  for _, p in ipairs(passes) do
+    local out, rc = capture(guard('"' .. CLUA .. '" tools\\fuzz-differential.lua '
+                                  .. p.lo .. ' ' .. p.n .. ' ' .. p.lvl .. ' 2>&1'))
+    record("fuzz", p.tag, out, rc)
+    local summary = out:match("%[fuzz%][^\r\n]*")
+    if summary then print("            " .. summary) end
+  end
 end
 
 -- ---- drive -----------------------------------------------------------------

@@ -30,7 +30,15 @@
 local args  = arg or { ... }
 local START = tonumber(args[1] or "1")  or 1
 local COUNT = tonumber(args[2] or "100") or 100
-local KEEP  = (args[3] == "--keep")
+-- Remaining args (any order): "--keep" retains generated cases; "-O<n>" sets the
+-- compile level (default -O1, as run-tests uses). Fuzzing at -O2/-O3 stresses
+-- the whole-program / memory passes the suite's seeds 1-25 also cover.
+local KEEP  = false
+local OLEVEL = "-O1"
+for i = 3, #args do
+  if args[i] == "--keep" then KEEP = true
+  elseif type(args[i]) == "string" and args[i]:match("^%-O%d$") then OLEVEL = args[i] end
+end
 
 local BIN      = "build\\bin"
 local CLUA    = BIN .. "\\clua-interp.exe"
@@ -463,7 +471,7 @@ end
 -- diverges loudly (a generated program must always compile -- the generator
 -- emits no closed-world-banned constructs).
 local function run_case()
-  local _, rc = capture(guard('"' .. AOTC .. '" -O1 "' .. CASE
+  local _, rc = capture(guard('"' .. AOTC .. '" ' .. OLEVEL .. ' "' .. CASE
                               .. '" -o "' .. CASEEXE .. '" 2>&1'))
   local oa, ra
   if rc ~= 0 then
