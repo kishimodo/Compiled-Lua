@@ -40,7 +40,7 @@
 -- to ASCII text) are all valid keys/values. LMDB itself is agnostic.
 --
 -- DLL load order (first hit wins):
---   1. $LUAVM_LMDB_DLL env var
+--   1. $CLUA_LMDB_DLL env var
 --   2. "lmdb"
 --   3. "lmdb.dll"
 --   4. "liblmdb.dll"
@@ -188,7 +188,7 @@ local _lib_state
 local function probe()
     if _lib_state ~= nil then return _lib_state end
     local names = {}
-    local override = os.getenv("LUAVM_LMDB_DLL")
+    local override = os.getenv("CLUA_LMDB_DLL")
     if override and #override > 0 then names[#names + 1] = override end
     names[#names + 1] = "lmdb"
     names[#names + 1] = "lmdb.dll"
@@ -208,7 +208,7 @@ local function require_lib()
     local st = probe()
     if st == false then
         error("lmdb: lmdb.dll not found on the search path. "
-            .. "Set LUAVM_LMDB_DLL, drop lmdb.dll next to LuaVM, or install LMDB.")
+            .. "Set CLUA_LMDB_DLL, drop lmdb.dll next to CLua, or install LMDB.")
     end
     return st.lib
 end

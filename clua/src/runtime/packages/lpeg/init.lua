@@ -39,7 +39,7 @@ if ok_native and type(native) == "table" and native ~= M and native.match then
 end
 
 -- Try ffi-loading a known DLL and then re-requiring "lpeg". This covers
--- the case where the DLL is shipped via LuaVM's native package loader
+-- the case where the DLL is shipped via CLua's native package loader
 -- but Lua's package.loaded["lpeg"] isn't pre-populated.
 local function try_ffi_load()
     local ok_ffi, ffi = pcall(require, "ffi")
@@ -131,7 +131,7 @@ end
 
 function M.R(a, b, c, d, e, f, g, h)
     -- R("AZ") = bytes 'A'..'Z'; R("AZ","az") = union of both ranges.
-    -- Explicit arity avoids LuaVM JIT's OP_SETLIST(B=0) limitation.
+    -- Explicit arity avoids CLua JIT's OP_SETLIST(B=0) limitation.
     local pairs_ = {}
     local args = { a, b, c, d, e, f, g, h }
     for i = 1, 8 do
@@ -178,7 +178,7 @@ function M.Cg(p, name)
 end
 
 function M.Cc(...)
-    -- Avoid `{n = ..., ...}` (LuaVM JIT doesn't yet support OP_SETLIST(B=0)).
+    -- Avoid `{n = ..., ...}` (CLua JIT doesn't yet support OP_SETLIST(B=0)).
     local n = select("#", ...)
     local values = { ... }
     values.n = n
@@ -613,7 +613,7 @@ function M.type(x)
 end
 
 function M.version()
-    return "1.0 (LuaVM pure-Lua fallback)"
+    return "1.0 (CLua pure-Lua fallback)"
 end
 
 function M.locale(t)

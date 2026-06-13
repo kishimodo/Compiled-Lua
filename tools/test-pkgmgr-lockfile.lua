@@ -3,26 +3,26 @@
 -- arg) must install the EXACTLY pinned version even when the toml constraint has
 -- been widened -- it must NOT silently re-resolve/upgrade. Only `update`/`add`
 -- may move a pin. Uses the versioned registry (registry-mv: vpkg 1.0.0 + 2.0.0).
--- Run from the repo root by luavm.exe.
+-- Run from the repo root by clua-interp.exe.
 
 local function abscwd()
   local p = io.popen("cd"); if not p then return "." end
   local d = p:read("*a") or ""; p:close(); return (d:gsub("%s+$", ""))
 end
 local ROOT  = abscwd()
-local LUAVM = ROOT .. "\\build\\bin\\luavm.exe"
+local CLUA = ROOT .. "\\build\\bin\\clua-interp.exe"
 local PKG   = ROOT .. "\\rover\\src\\rover.lua"
 local REG   = ROOT .. "\\rover\\registry-mv"
-local PROJ  = (os.getenv("TEMP") or ".") .. "\\luavm-locktest"
+local PROJ  = (os.getenv("TEMP") or ".") .. "\\clua-interp-locktest"
 
 local function sh(c) local ok, _, code = os.execute('"' .. c .. '"'); return (ok == true) or (ok == 0) or (code == 0) end
-local function pk(a) local ok, _, c = os.execute('cd /d "' .. PROJ .. '" && "' .. LUAVM .. '" -i "' .. PKG .. '" ' .. a); return (ok == true) or (ok == 0) or (c == 0) end
+local function pk(a) local ok, _, c = os.execute('cd /d "' .. PROJ .. '" && "' .. CLUA .. '" -i "' .. PKG .. '" ' .. a); return (ok == true) or (ok == 0) or (c == 0) end
 local function slurp(p) local f = io.open(p, "rb"); if not f then return nil end local s = f:read("*a"); f:close(); return s end
 local function spit(p, s) local f = io.open(p, "wb"); if not f then return false end f:write(s); f:close(); return true end
-local function fail(m) print("[-] FAIL test-pkgmgr-lockfile: " .. m); sh(LUAVM .. ' -i ' .. PKG .. ' remove vpkg >nul 2>&1'); os.exit(1) end
+local function fail(m) print("[-] FAIL test-pkgmgr-lockfile: " .. m); sh(CLUA .. ' -i ' .. PKG .. ' remove vpkg >nul 2>&1'); os.exit(1) end
 
 sh('rmdir /S /Q "' .. PROJ .. '" >nul 2>&1'); sh('mkdir "' .. PROJ .. '" >nul 2>&1')
-sh(LUAVM .. ' -i ' .. PKG .. ' remove vpkg >nul 2>&1')
+sh(CLUA .. ' -i ' .. PKG .. ' remove vpkg >nul 2>&1')
 
 -- 1) Pin to exactly 1.0.0 via add (writes rover.toml + rover.lock).
 if not pk('add vpkg "' .. REG .. '" "1.0.0" >nul 2>&1') then fail("add vpkg 1.0.0") end
@@ -58,7 +58,7 @@ if not pk('update vpkg "' .. REG .. '" >nul 2>&1') then fail("update vpkg") end
 lock = slurp(PROJ .. "\\rover.lock") or ""
 if not lock:match('%["vpkg"%].-version%s*=%s*"2%.0%.0"') then fail("update should move the pin to 2.0.0") end
 
-sh(LUAVM .. ' -i ' .. PKG .. ' remove vpkg >nul 2>&1')
+sh(CLUA .. ' -i ' .. PKG .. ' remove vpkg >nul 2>&1')
 sh('rmdir /S /Q "' .. PROJ .. '" >nul 2>&1')
 print("[+] PASS test-pkgmgr-lockfile (lock honored on install; widened toml does not upgrade; update can)")
 os.exit(0)

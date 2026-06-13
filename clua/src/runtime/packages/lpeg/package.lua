@@ -9,6 +9,6 @@ return {
     },
     requires        = {},
     requires_native = {
-        { dll = "lpeg54.dll", mode_default = "embed", env_var = "LUAVM_LPEG_DLL", optional = true },
+        { dll = "lpeg54.dll", mode_default = "embed", env_var = "CLUA_LPEG_DLL", optional = true },
     },
 }

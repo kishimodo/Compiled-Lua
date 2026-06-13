@@ -1,4 +1,4 @@
--- LuaVM tray package manifest.
+-- CLua tray package manifest.
 return {
     name        = "tray",
     version     = "0.1",

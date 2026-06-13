@@ -141,7 +141,7 @@ static const char *DefaultOutputName( PE_OUTPUT_TYPE_T Type ) {
         case PE_OUT_DLL:  return "out.dll";
         case PE_OUT_OBJ:  return "out.o";
         case PE_OUT_LIB:  return "out.a";
-        case PE_OUT_BLOB: return "out.luavm";
+        case PE_OUT_BLOB: return "out.clua-interp";
         case PE_OUT_EXE:
         default:          return "out.exe";
     }
@@ -154,7 +154,7 @@ static int ParseArgv( int Argc, char **Argv, PCLI_T Cli ) {
     /* Defaults: point at the embedded (size-optimized + hardened)
        variants of runtime.a and liblua54.a + the matching per-package
        _pkg_gen.o directory. The host variants (no `-embedded` suffix)
-       stay available for luavm.exe + the unit tests, and can be
+       stay available for clua-interp.exe + the unit tests, and can be
        requested explicitly via --runtime / --lualib. */
     Cli->RuntimeArchive = "build/bin/runtime-embedded.a";
     Cli->LuaArchive     = "build/bin/liblua54-embedded.a";
@@ -298,7 +298,7 @@ int main( int Argc, char **Argv ) {
     PE_LINK_OPTS_T LinkOpts = { 0 };
     size_t I = { 0 };
 
-    printf( "[*] LuaVM compiler v%s\n", LUAVM_VERSION_STRING );
+    printf( "[*] CLua compiler v%s\n", CLUA_VERSION_STRING );
     if ( !ParseArgv( Argc, Argv, &Cli ) ) {
         printf( "[_] usage: compiler.exe <main.lua> [-o output] "
                 "[-I include_dir]... [--runtime path] [--lualib path] "
@@ -411,14 +411,14 @@ int main( int Argc, char **Argv ) {
     /* Stamp hardening flag bits into the built header. The runtime
        reads these to decide which decode / verification pass to run
        at startup. Each --flag is independent and composes. */
-    PLUAVM_BLOB_HEADER_T Hdr = ( PLUAVM_BLOB_HEADER_T )Built.Bytes;
+    PCLUA_BLOB_HEADER_T Hdr = ( PCLUA_BLOB_HEADER_T )Built.Bytes;
     if ( Cli.Strip ) {
-        Hdr->Flags |= LUAVM_BLOB_FLAG_STRIPPED;
+        Hdr->Flags |= CLUA_BLOB_FLAG_STRIPPED;
         printf( "[_] --strip: debug info dropped from bytecode\n" );
     }
 
     /* --compress-blob: XPRESS_HUFF compress the payload region (everything
-       after the LUAVM_BLOB_HEADER). The compressed payload is prefixed
+       after the CLUA_BLOB_HEADER). The compressed payload is prefixed
        inside the blob with magic "LVCB" + uint32 original size + the
        compressed bytes. The runtime detects the magic and runs
        RtlDecompressBufferEx (Cabinet.dll-equivalent ntdll path) before
@@ -435,17 +435,17 @@ int main( int Argc, char **Argv ) {
         PRtlCompressBuffer              Comp   = ( PRtlCompressBuffer )( void * )
             GetProcAddress( Nt, "RtlCompressBuffer" );
         if ( GetWss && Comp ) {
-            #define LUAVM_PAYLOAD_COMPRESS_FORMAT 4   /* XPRESS_HUFF */
+            #define CLUA_PAYLOAD_COMPRESS_FORMAT 4   /* XPRESS_HUFF */
             ULONG WssMain = 0, WssFrag = 0;
-            if ( GetWss( LUAVM_PAYLOAD_COMPRESS_FORMAT, &WssMain, &WssFrag ) == 0 ) {
+            if ( GetWss( CLUA_PAYLOAD_COMPRESS_FORMAT, &WssMain, &WssFrag ) == 0 ) {
                 void          *Ws       = malloc( WssMain );
-                size_t         HdrSize  = sizeof( LUAVM_BLOB_HEADER_T );
+                size_t         HdrSize  = sizeof( CLUA_BLOB_HEADER_T );
                 size_t         OldPay   = Built.BytesLen - HdrSize;
                 /* worst-case + magic + size prefix */
                 size_t         OutCap   = OldPay + ( OldPay / 16 ) + 1024 + 8;
                 unsigned char *OutBuf   = ( unsigned char * )malloc( OutCap );
                 ULONG          Written  = 0;
-                LONG St = Comp( LUAVM_PAYLOAD_COMPRESS_FORMAT,
+                LONG St = Comp( CLUA_PAYLOAD_COMPRESS_FORMAT,
                                 Built.Bytes + HdrSize, ( ULONG )OldPay,
                                 OutBuf + 8, ( ULONG )( OutCap - 8 ),
                                 4096, &Written, Ws );
@@ -463,9 +463,9 @@ int main( int Argc, char **Argv ) {
                     Built.Bytes   = NewBuf;
                     Built.BytesLen = NewSize;
                     /* Re-point Hdr; rewrite TotalSize. */
-                    Hdr = ( PLUAVM_BLOB_HEADER_T )Built.Bytes;
+                    Hdr = ( PCLUA_BLOB_HEADER_T )Built.Bytes;
                     Hdr->TotalSize = ( uint32_t )NewSize;
-                    Hdr->Flags    |= LUAVM_BLOB_FLAG_COMPRESS_PAYLOAD;
+                    Hdr->Flags    |= CLUA_BLOB_FLAG_COMPRESS_PAYLOAD;
                     printf( "[_] --compress-blob: payload %zu -> %u bytes (%.1f%%)\n",
                             OldPay, ( unsigned )Written,
                             ( double )Written * 100.0 / ( double )OldPay );
@@ -475,7 +475,7 @@ int main( int Argc, char **Argv ) {
                 }
                 free( OutBuf );
             }
-            #undef LUAVM_PAYLOAD_COMPRESS_FORMAT
+            #undef CLUA_PAYLOAD_COMPRESS_FORMAT
         } else {
             fprintf( stderr, "[-] --compress-blob: ntdll.RtlCompressBuffer not available\n" );
         }
@@ -488,17 +488,17 @@ int main( int Argc, char **Argv ) {
        before BlobReader_Open sees it. */
     if ( Cli.Encrypt ) {
         FillRandom( Hdr->EncryptionKey, 32 );
-        size_t HdrSize     = sizeof( LUAVM_BLOB_HEADER_T );
+        size_t HdrSize     = sizeof( CLUA_BLOB_HEADER_T );
         size_t PayloadSize = Built.BytesLen - HdrSize;
         StreamCipher_Apply( Hdr->EncryptionKey,
                             Built.Bytes + HdrSize,
                             PayloadSize );
-        Hdr->Flags |= LUAVM_BLOB_FLAG_ENCRYPTED;
+        Hdr->Flags |= CLUA_BLOB_FLAG_ENCRYPTED;
         printf( "[_] --encrypt: %zu payload bytes ciphered\n", PayloadSize );
     }
 
     if ( Cli.LuaVersionStrip ) {
-        Hdr->Flags |= LUAVM_BLOB_FLAG_LUA_VERSION_STRIP;
+        Hdr->Flags |= CLUA_BLOB_FLAG_LUA_VERSION_STRIP;
         printf( "[_] --lua-version-strip: _VERSION + copyright strings will be nil'd at startup\n" );
     }
 
@@ -507,14 +507,14 @@ int main( int Argc, char **Argv ) {
        tmpfile, loadfile / dofile / load with file mode, package.loadlib,
        debug.*) after luaL_openlibs() and before user code runs. */
     if ( Cli.LuaSandbox ) {
-        Hdr->Flags |= LUAVM_BLOB_FLAG_LUA_SANDBOX;
+        Hdr->Flags |= CLUA_BLOB_FLAG_LUA_SANDBOX;
         printf( "[_] --lua-sandbox: dangerous globals nil'd at startup\n" );
     }
 
     /* --bytecode-only: stamp the flag; the actual link-side drop is
        wired via PE_LINK_OPTS_T below. */
     if ( Cli.BytecodeOnly ) {
-        Hdr->Flags |= LUAVM_BLOB_FLAG_BYTECODE_ONLY;
+        Hdr->Flags |= CLUA_BLOB_FLAG_BYTECODE_ONLY;
         printf( "[_] --bytecode-only: lparser+lcode excluded from link; source loads will abort at runtime\n" );
     }
 
@@ -522,7 +522,7 @@ int main( int Argc, char **Argv ) {
        dropped. Every Lua function path must JIT successfully; an
        unjittable proto aborts the program at first call. */
     if ( Cli.JitOnly ) {
-        Hdr->Flags |= LUAVM_BLOB_FLAG_JIT_ONLY;
+        Hdr->Flags |= CLUA_BLOB_FLAG_JIT_ONLY;
         printf( "[_] --jit-only: lvm.c interpreter excluded; non-JIT-compilable funcs will abort at runtime\n" );
     }
 
@@ -584,9 +584,9 @@ int main( int Argc, char **Argv ) {
     LinkOpts.NativeDir            = Cli.NativeDir;
     /* Default to the embedded (-Os -g0 + hardened) package .o files
        to match the embedded runtime/lualib defaults. Override via the
-       LUAVM_PKG_OBJ_DIR env var when needed. */
+       CLUA_PKG_OBJ_DIR env var when needed. */
     {
-        const char *Env = getenv( "LUAVM_PKG_OBJ_DIR" );
+        const char *Env = getenv( "CLUA_PKG_OBJ_DIR" );
         LinkOpts.PackagesObjDir = ( Env != NULL && Env[ 0 ] != '\0' )
                                   ? Env
                                   : "build/bin/obj-emb/runtime/packages";

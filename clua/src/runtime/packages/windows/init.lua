@@ -1,4 +1,4 @@
--- LuaVM bundled Windows API cdefs.
+-- CLua bundled Windows API cdefs.
 -- Provides ffi.cdef'd APIs from kernel32, user32, advapi32, ntdll, msvcrt,
 -- plus the most-used struct typedefs and named constants.
 -- Usage:

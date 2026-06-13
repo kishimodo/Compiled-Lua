@@ -2,7 +2,7 @@ return {
     name        = "imgui",
     version     = "0.1",
     description = "Dear ImGui (via cimgui) + Win32/D3D11 host backend",
-    license     = "MIT (LuaVM glue), MIT (Dear ImGui), MIT (cimgui)",
+    license     = "MIT (CLua glue), MIT (Dear ImGui), MIT (cimgui)",
     main        = "init.lua",
     modules     = {
         -- public surface

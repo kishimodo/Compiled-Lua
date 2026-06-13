@@ -4,8 +4,8 @@
  *  recovery for faults inside JIT / FFI / runtime-helper code regions.
  */
 
-#ifndef LUAVM_FFI_VEH_H
-#define LUAVM_FFI_VEH_H
+#ifndef CLUA_FFI_VEH_H
+#define CLUA_FFI_VEH_H
 
 #include "lua.h"
 
@@ -74,4 +74,4 @@ int Veh_IsCodeRegion( void *Addr );
  */
 void Veh_TriggerRecovery( const char *Message );
 
-#endif /* LUAVM_FFI_VEH_H */
+#endif /* CLUA_FFI_VEH_H */

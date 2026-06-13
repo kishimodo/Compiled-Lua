@@ -1,7 +1,7 @@
 -- tests/packages/test_semaphore.lua : counting semaphore via CreateSemaphoreW.
 --
 -- KNOWN BUG (FFI-HANDLE-ARRAY-INIT-001): every semaphore constructor goes
--- through wrap(), which does ffi.new("HANDLE[1]", handle). In this LuaVM FFI,
+-- through wrap(), which does ffi.new("HANDLE[1]", handle). In this CLua FFI,
 -- initializing a pointer-array from a pointer cdata raises
 -- "ffi.new init: ffi: cdata kind 4 does not match target kind 5", so even
 -- semaphore.new(2,5) fails. (Workaround in the FFI: ffi.new("HANDLE[1]") then

@@ -229,7 +229,7 @@ end
 function M.new(opts)
     opts = opts or {}
     local parent = opts.root or opts.dir or default_temp_dir()
-    local p, err = unique_path(parent, opts.prefix or "luavm_", opts.suffix or "")
+    local p, err = unique_path(parent, opts.prefix or "clua_", opts.suffix or "")
     if not p then return nil, err end
     local ok, werr = fs.mkdir(p)
     if not ok then return nil, werr end

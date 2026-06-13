@@ -15,8 +15,8 @@
  *  is a no-op.
  */
 
-#ifndef LUAVM_NATIVE_LOADER_H
-#define LUAVM_NATIVE_LOADER_H
+#ifndef CLUA_NATIVE_LOADER_H
+#define CLUA_NATIVE_LOADER_H
 
 #include <stddef.h>
 
@@ -44,4 +44,4 @@ void Native_Bootstrap( void );
 }
 #endif
 
-#endif /* LUAVM_NATIVE_LOADER_H */
+#endif /* CLUA_NATIVE_LOADER_H */

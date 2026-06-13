@@ -380,7 +380,7 @@ local function inject_defaults(headers, u, opts, body_len, body_is_stream)
         end
     end
     if not lh["user-agent"] then
-        out["User-Agent"] = "LuaVM-http/0.1"
+        out["User-Agent"] = "CLua-http/0.1"
     end
     if not lh["accept"] then
         out["Accept"] = "*/*"
@@ -659,7 +659,7 @@ local function write_response(conn, resp, head_only)
             hdr["Content-Length"] = tostring(head_only and 0 or #body)
         end
     end
-    if not lh["server"] then hdr["Server"] = "LuaVM-http/0.1" end
+    if not lh["server"] then hdr["Server"] = "CLua-http/0.1" end
     local status_line = string.format("HTTP/1.1 %d %s\r\n",
         status, _status_text[status] or "")
     local ok, err = conn:write(status_line .. format_headers(hdr) .. "\r\n")

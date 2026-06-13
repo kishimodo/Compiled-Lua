@@ -5,8 +5,8 @@
  *  to an internal buffer accessible via Cdecl_LastError().
  */
 
-#ifndef LUAVM_FFI_CDECL_PARSER_H
-#define LUAVM_FFI_CDECL_PARSER_H
+#ifndef CLUA_FFI_CDECL_PARSER_H
+#define CLUA_FFI_CDECL_PARSER_H
 
 #include "ffi/ctype.h"
 
@@ -37,4 +37,4 @@ const char *Cdecl_LastError( void );
  */
 PCType_T Cdecl_ParseTypeExpr( const char *Source );
 
-#endif /* LUAVM_FFI_CDECL_PARSER_H */
+#endif /* CLUA_FFI_CDECL_PARSER_H */

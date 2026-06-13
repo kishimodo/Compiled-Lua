@@ -5,8 +5,8 @@
  *  to PAGE_EXECUTE_READ. Never RWX. One slot per emitted function.
  */
 
-#ifndef LUAVM_JIT_EXEC_MEM_H
-#define LUAVM_JIT_EXEC_MEM_H
+#ifndef CLUA_JIT_EXEC_MEM_H
+#define CLUA_JIT_EXEC_MEM_H
 
 #include <stddef.h>
 
@@ -52,4 +52,4 @@ int ExecMem_Commit( PEXEC_MEM_SLOT_T Slot );
  */
 void ExecMem_Release( PEXEC_MEM_SLOT_T Slot );
 
-#endif /* LUAVM_JIT_EXEC_MEM_H */
+#endif /* CLUA_JIT_EXEC_MEM_H */

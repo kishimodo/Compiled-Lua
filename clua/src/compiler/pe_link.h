@@ -1,17 +1,17 @@
 /*!
  * @brief
- *  Wrap a LUAVM blob as a PE-COFF object via objcopy, then link or archive
+ *  Wrap a CLUA blob as a PE-COFF object via objcopy, then link or archive
  *  it with the runtime + Lua into one of several output formats.
  */
 
-#ifndef LUAVM_COMPILER_PE_LINK_H
-#define LUAVM_COMPILER_PE_LINK_H
+#ifndef CLUA_COMPILER_PE_LINK_H
+#define CLUA_COMPILER_PE_LINK_H
 
 #include <stddef.h>
 
 typedef enum {
     PE_OUT_EXE  = 0,   /* default: PE executable */
-    PE_OUT_DLL,        /* PE dynamic-link library; exports luavm_run() */
+    PE_OUT_DLL,        /* PE dynamic-link library; exports clua_run() */
     PE_OUT_OBJ,        /* just the blob wrapped as a .o (no runtime) */
     PE_OUT_LIB,        /* static archive: blob.o + runtime.a + liblua54.a */
     PE_OUT_BLOB,       /* raw blob bytes (no objcopy, no linker) */
@@ -118,4 +118,4 @@ int PeLink_Bundle( const unsigned char *Blob,
                    const char          *OutputPath,
                    PPE_LINK_OPTS_T      Opts );
 
-#endif /* LUAVM_COMPILER_PE_LINK_H */
+#endif /* CLUA_COMPILER_PE_LINK_H */

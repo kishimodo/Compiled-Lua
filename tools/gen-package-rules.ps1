@@ -106,7 +106,7 @@ function Read-PackageManifest {
 
 # Parse package.lua's requires_native block:
 #   requires_native = {
-#       { dll = "sqlite3.dll", mode_default = "embed", env_var = "LUAVM_SQLITE_DLL" },
+#       { dll = "sqlite3.dll", mode_default = "embed", env_var = "CLUA_SQLITE_DLL" },
 #       ...
 #   }
 # Returns a list of @{ Dll; ModeDefault; EnvVar }, empty when absent.
@@ -263,8 +263,8 @@ $hdr = New-Object System.Text.StringBuilder
 [void]$hdr.AppendLine('   Mirrors the on-disk layout of clua/src/runtime/packages/. The compiler')
 [void]$hdr.AppendLine('   resolver consults this list to skip filesystem lookups for names')
 [void]$hdr.AppendLine('   that the runtime registers via package.preload. */')
-[void]$hdr.AppendLine('#ifndef LUAVM_BUILTIN_PACKAGES_H')
-[void]$hdr.AppendLine('#define LUAVM_BUILTIN_PACKAGES_H')
+[void]$hdr.AppendLine('#ifndef CLUA_BUILTIN_PACKAGES_H')
+[void]$hdr.AppendLine('#define CLUA_BUILTIN_PACKAGES_H')
 [void]$hdr.AppendLine()
 [void]$hdr.AppendLine('static const char *const k_BuiltinPackages[] = {')
 foreach ($p in $allPkgs) {
@@ -311,8 +311,8 @@ if ($OutNativeDepsHeader) {
     [void]$nd.AppendLine('   this table for every required package to decide which DLLs to')
     [void]$nd.AppendLine('   embed, copy as sidecars, or assume on PATH. Each row is one')
     [void]$nd.AppendLine('   (package, dll, default-mode, env-override-var). */')
-    [void]$nd.AppendLine('#ifndef LUAVM_BUILTIN_NATIVE_DEPS_H')
-    [void]$nd.AppendLine('#define LUAVM_BUILTIN_NATIVE_DEPS_H')
+    [void]$nd.AppendLine('#ifndef CLUA_BUILTIN_NATIVE_DEPS_H')
+    [void]$nd.AppendLine('#define CLUA_BUILTIN_NATIVE_DEPS_H')
     [void]$nd.AppendLine()
     [void]$nd.AppendLine('typedef struct {')
     [void]$nd.AppendLine('    const char *PkgName;')

@@ -25,8 +25,8 @@
  *  the original input, so the same routine encrypts and decrypts.
  */
 
-#ifndef LUAVM_COMMON_STREAM_CIPHER_H
-#define LUAVM_COMMON_STREAM_CIPHER_H
+#ifndef CLUA_COMMON_STREAM_CIPHER_H
+#define CLUA_COMMON_STREAM_CIPHER_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -90,4 +90,4 @@ static inline void StreamCipher_Apply( const uint8_t Key[ 32 ],
     }
 }
 
-#endif /* LUAVM_COMMON_STREAM_CIPHER_H */
+#endif /* CLUA_COMMON_STREAM_CIPHER_H */

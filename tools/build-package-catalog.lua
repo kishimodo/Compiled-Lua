@@ -5,12 +5,12 @@
 -- Markdown catalog to docs/packages-catalog.md.
 --
 -- No external deps (pure Lua I/O); runs under either system Lua 5.4 or
--- the project's build/bin/luavm.exe (which doesn't preload the runtime
+-- the project's build/bin/clua-interp.exe (which doesn't preload the runtime
 -- packages on its search path, so we don't try to require any of them).
 --
 -- Usage:
 --   lua tools/build-package-catalog.lua
---   ./build/bin/luavm.exe tools/build-package-catalog.lua
+--   ./build/bin/clua-interp.exe tools/build-package-catalog.lua
 
 -- ===== Paths ============================================================
 
@@ -176,7 +176,7 @@ local CATEGORY = {
 -- ===== Directory walk via popen =========================================
 
 -- Plain-Lua dir listing: we can't `lfs` without an external lib, and the
--- project's `fs` package isn't on luavm.exe's search path. Use `dir /b`
+-- project's `fs` package isn't on clua-interp.exe's search path. Use `dir /b`
 -- on Windows; fall back to `ls` for cross-platform safety.
 
 local function list_dir(dir)
@@ -497,7 +497,7 @@ local function render(records)
     local buf, nb = {}, 0
     local function w(s) nb = nb + 1; buf[nb] = s end
 
-    w("# LuaVM Package Catalog")
+    w("# CLua Package Catalog")
     w("")
     w(string.format(
         "%d modules in %d packages, ~%s lines of Lua.",

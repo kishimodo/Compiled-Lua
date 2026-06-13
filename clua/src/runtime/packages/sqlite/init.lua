@@ -27,7 +27,7 @@
 --   stmt:finalize()
 --
 -- DLL load order (first hit wins):
---   1. $LUAVM_SQLITE_DLL env var (full path or bare name)
+--   1. $CLUA_SQLITE_DLL env var (full path or bare name)
 --   2. "sqlite3"
 --   3. "sqlite3.dll"
 --   4. "sqlite.dll"
@@ -175,7 +175,7 @@ local function probe()
     if _lib_state ~= nil then return _lib_state end
     local names = {}
     -- Env var override first; supports either a full path or a bare DLL name.
-    local override = os.getenv("LUAVM_SQLITE_DLL")
+    local override = os.getenv("CLUA_SQLITE_DLL")
     if override and #override > 0 then names[#names + 1] = override end
     names[#names + 1] = "sqlite3"
     names[#names + 1] = "sqlite3.dll"
@@ -196,7 +196,7 @@ local function require_lib()
     local st = probe()
     if st == false then
         error("sqlite: sqlite3.dll not found on the search path. "
-            .. "Set LUAVM_SQLITE_DLL, drop sqlite3.dll next to LuaVM, or install sqlite3.")
+            .. "Set CLUA_SQLITE_DLL, drop sqlite3.dll next to CLua, or install sqlite3.")
     end
     return st.lib
 end

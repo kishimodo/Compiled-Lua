@@ -107,7 +107,7 @@ local function load_lib()
     if _lib then return _lib end
     if _load_err then return nil end
     local names = {}
-    local env_dll = os.getenv("LUAVM_MUPDF_DLL")
+    local env_dll = os.getenv("CLUA_MUPDF_DLL")
     if env_dll and #env_dll > 0 then names[#names + 1] = env_dll end
     names[#names + 1] = "mupdf"
     names[#names + 1] = "mupdf.dll"
@@ -117,7 +117,7 @@ local function load_lib()
         local ok, lib = pcall(ffi.load, n)
         if ok then _lib = lib; return lib end
     end
-    _load_err = "mupdf: mupdf.dll not found. Set LUAVM_MUPDF_DLL or drop mupdf.dll next to LuaVM."
+    _load_err = "mupdf: mupdf.dll not found. Set CLUA_MUPDF_DLL or drop mupdf.dll next to CLua."
     return nil
 end
 

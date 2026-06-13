@@ -44,13 +44,13 @@ end
 -- ===== Nested mappings =================================================
 do
     local doc = {
-        name = "luavm",
+        name = "clua-interp",
         version = 1,
         config = { host = "localhost", port = 8080, ratio = 0.5 },
         tags = {"x", "y", "z"},
     }
     local d = rt(doc)
-    ok(d.name == "luavm",        "top-level string")
+    ok(d.name == "clua-interp",        "top-level string")
     ok(d.version == 1,           "top-level integer")
     ok(d.config.host == "localhost", "nested mapping string")
     ok(d.config.port == 8080,    "nested mapping integer")

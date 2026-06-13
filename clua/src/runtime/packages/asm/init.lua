@@ -15,11 +15,11 @@ local bit = { band = function(a,b) return (tonumber(a) or 0) & (tonumber(b) or 0
 --   :assemble_to_bytes(text)       -> bytes (no count, addr=0)
 --   :close()
 --
--- Env override: LUAVM_KEYSTONE_DLL=<path>.
+-- Env override: CLUA_KEYSTONE_DLL=<path>.
 --
 -- Backend detection:
 --   Looks for keystone.dll, then keystone-0.dll (the version-suffixed
---   name used by the official Windows builds). Override via LUAVM_ASM_DLL.
+--   name used by the official Windows builds). Override via CLUA_ASM_DLL.
 --   If absent, every API throws an error directing the user to drop the
 --   DLL alongside the binary or set the env var.
 --
@@ -90,7 +90,7 @@ end
 local function probe()
     if _lib ~= nil then return _lib end
     local candidates = {}
-    local override = env("LUAVM_KEYSTONE_DLL") or env("LUAVM_ASM_DLL")
+    local override = env("CLUA_KEYSTONE_DLL") or env("CLUA_ASM_DLL")
     if override then candidates[#candidates + 1] = override end
     candidates[#candidates + 1] = "keystone"
     candidates[#candidates + 1] = "keystone-0"
@@ -109,7 +109,7 @@ local function probe()
         end
     end
     _last_error = "keystone.dll not found: tried keystone.dll, keystone-0.dll. "
-        .. "Set LUAVM_KEYSTONE_DLL=<path> or drop the DLL alongside the exe."
+        .. "Set CLUA_KEYSTONE_DLL=<path> or drop the DLL alongside the exe."
     _lib = false
     return _lib
 end

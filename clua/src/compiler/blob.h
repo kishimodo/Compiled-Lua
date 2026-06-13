@@ -1,10 +1,10 @@
 /*!
  * @brief
- *  Build a LUAVM blob from a set of bytecode modules.
+ *  Build a CLUA blob from a set of bytecode modules.
  */
 
-#ifndef LUAVM_COMPILER_BLOB_H
-#define LUAVM_COMPILER_BLOB_H
+#ifndef CLUA_COMPILER_BLOB_H
+#define CLUA_COMPILER_BLOB_H
 
 #include <stddef.h>
 
@@ -21,7 +21,7 @@ typedef struct _BLOB_BUILD_RESULT {
 
 /*!
  * @brief
- *  Serialise modules into the LUAVM blob format.
+ *  Serialise modules into the CLUA blob format.
  *
  * @return
  *  1 on success; 0 on invalid input or allocation failure
@@ -33,4 +33,4 @@ int Blob_Build( PBLOB_MODULE_T        Modules,
 
 void Blob_FreeResult( PBLOB_BUILD_RESULT_T Result );
 
-#endif /* LUAVM_COMPILER_BLOB_H */
+#endif /* CLUA_COMPILER_BLOB_H */

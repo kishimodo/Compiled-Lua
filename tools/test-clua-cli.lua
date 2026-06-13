@@ -4,7 +4,7 @@
 -- Covers the streamlining contract:
 --   * clua version/check/build/run subcommands
 --   * RELOCATABILITY: clua build works from a non-repo CWD (exe-relative
---     toolchain discovery), output exe runs, stdout matches `luavm -i`
+--     toolchain discovery), output exe runs, stdout matches `clua-interp -i`
 --   * program args reach the compiled program's `arg` global (v1 parity)
 --   * the closed-world stubs answer an evading _G["lo".."ad"] with the
 --     documented runtime error (AOT-CLOSEDWORLD-002) instead of parsing
@@ -13,11 +13,11 @@
 --     (catches the parser/JIT-compiler members sneaking back into the link)
 --   * rover.exe prints the rover banner and matches the script under -i
 --
--- Run by tools/run-tests.lua from the repo root under luavm.exe.
+-- Run by tools/run-tests.lua from the repo root under clua-interp.exe.
 
-local CLUA  = "build\\bin\\clua.exe"
-local ROVER = "build\\bin\\rover.exe"
-local LUAVM = "build\\bin\\luavm.exe"
+local CLUA   = "build\\bin\\clua.exe"
+local ROVER  = "build\\bin\\rover.exe"
+local INTERP = "build\\bin\\clua-interp.exe"
 
 local function exists(p)
   local f = io.open(p, "rb")
@@ -63,7 +63,7 @@ local function writefile(p, s)
 end
 
 local clua_abs  = ROOT .. "\\" .. CLUA
-local luavm_abs = ROOT .. "\\" .. LUAVM
+local interp_abs = ROOT .. "\\" .. INTERP
 
 -- snapshot pre-existing clua_user_*.o (e.g. a developer's --keep-temps
 -- leftovers) so the litter check below only flags files THIS suite created
@@ -112,9 +112,9 @@ print(mt.hello)
                         :format(TEMP, clua_abs))
   ok(code == 0, "clua build from a non-repo CWD", out)
   local c2, native = run(("\"%s\""):format(exe))
-  local c3, oracle = run(("\"%s\" -i \"%s\""):format(luavm_abs, src))
+  local c3, oracle = run(("\"%s\" -i \"%s\""):format(interp_abs, src))
   ok(c2 == 0 and c3 == 0 and native == oracle,
-     "compiled exe output matches luavm -i",
+     "compiled exe output matches clua-interp -i",
      ("native=%q oracle=%q"):format(native:sub(1, 80), oracle:sub(1, 80)))
 
   -- lean-exe canary: a hello-class exe is ~182 KB after the diet (no parser,
@@ -192,9 +192,9 @@ print(co())
                        :format(clua_abs, mexe))
     ok(c7 == 0, "clua build --shared-rt compiles aot_multimod (150 modules)", o7)
     local c8, mm_native = run(("\"%s\""):format(mexe))
-    local c9, mm_oracle = run(("\"%s\" -i tests\\differential\\aot_multimod.lua"):format(luavm_abs))
+    local c9, mm_oracle = run(("\"%s\" -i tests\\differential\\aot_multimod.lua"):format(interp_abs))
     ok(c8 == 0 and c9 == 0 and #mm_native > 0 and mm_native == mm_oracle,
-       "--shared-rt aot_multimod matches luavm -i (GC fix holds under the DLL)",
+       "--shared-rt aot_multimod matches clua-interp -i (GC fix holds under the DLL)",
        ("native=%q oracle=%q"):format(mm_native:sub(1, 80), mm_oracle:sub(1, 80)))
     os.remove(mexe)
     run(("del /q \"%s\\clua-rt.dll\" 2>nul"):format(TEMP))
@@ -336,7 +336,7 @@ else
      "rover.exe prints the rover banner", o1:sub(1, 120))
   -- the prebuilt exe may lag the script's help text between rebuilds; the
   -- identity (banner) line is the stable differential anchor.
-  local _, o2 = run(("\"%s\" -i rover\\src\\rover.lua"):format(luavm_abs))
+  local _, o2 = run(("\"%s\" -i rover\\src\\rover.lua"):format(interp_abs))
   local function banner(s) return (s:match("^[^\r\n]*")) end
   ok(banner(o1) == "rover -- the CLua package manager" and banner(o1) == banner(o2),
      "rover.exe and the script agree on the rover banner line")

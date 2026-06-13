@@ -44,7 +44,7 @@ int Blob_Build( PBLOB_MODULE_T        Modules,
         PayloadSum += Modules[ I ].BytesLen;
     }
 
-    HeaderSize = sizeof( LUAVM_BLOB_HEADER_T );
+    HeaderSize = sizeof( CLUA_BLOB_HEADER_T );
     TableSize  = sizeof( MODULE_ENTRY_T ) * Count;
     Total      = HeaderSize + TableSize + NamePool + PayloadSum;
 
@@ -53,9 +53,9 @@ int Blob_Build( PBLOB_MODULE_T        Modules,
         return 0;
     }
 
-    PLUAVM_BLOB_HEADER_T Hdr = ( PLUAVM_BLOB_HEADER_T )Buf;
-    Hdr->Magic      = LUAVM_BLOB_MAGIC;
-    Hdr->Version    = LUAVM_BLOB_VERSION;
+    PCLUA_BLOB_HEADER_T Hdr = ( PCLUA_BLOB_HEADER_T )Buf;
+    Hdr->Magic      = CLUA_BLOB_MAGIC;
+    Hdr->Version    = CLUA_BLOB_VERSION;
     Hdr->Count      = ( uint32_t )Count;
     Hdr->EntryIndex = ( uint32_t )EntryIndex;
     Hdr->TotalSize  = ( uint32_t )Total;

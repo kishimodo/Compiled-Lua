@@ -2,8 +2,8 @@
 -- pipeline (the published mirrors carry no code comments; the local repo
 -- stays the commented canonical source).
 --
---   luavm.exe tools\strip-comments.lua <file>            (in place, by ext)
---   luavm.exe tools\strip-comments.lua --tree <dir>      (recursive, by ext)
+--   clua-interp.exe tools\strip-comments.lua <file>            (in place, by ext)
+--   clua-interp.exe tools\strip-comments.lua --tree <dir>      (recursive, by ext)
 --
 -- Languages: .lua (full scanner: short/long strings, long comments),
 -- .c/.h (strings, char literals, // with backslash-continuation, /* */
@@ -193,7 +193,7 @@ end
 if _G.STRIP_AS_MODULE then return M end   -- dofile'd by build-registry.lua
 
 local args = { ... }
-if #args == 0 and arg then args = { arg[1], arg[2] } end  -- luavm host passes argv via `arg`
+if #args == 0 and arg then args = { arg[1], arg[2] } end  -- clua-interp host passes argv via `arg`
 if args[1] == "--tree" and args[2] then
   local root = args[2]
   local p = io.popen('dir /b /s /a-d "' .. root .. '" 2>nul')

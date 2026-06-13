@@ -13,8 +13,8 @@
  *    - void return               -> *Result is left untouched
  */
 
-#ifndef LUAVM_FFI_THUNK_H
-#define LUAVM_FFI_THUNK_H
+#ifndef CLUA_FFI_THUNK_H
+#define CLUA_FFI_THUNK_H
 
 #include "ffi/ctype.h"
 
@@ -36,4 +36,4 @@ FFI_THUNK_T Ffi_GetSignatureThunk( PCType_T FuncT );
  */
 void Ffi_ResetThunkCache( void );
 
-#endif /* LUAVM_FFI_THUNK_H */
+#endif /* CLUA_FFI_THUNK_H */

@@ -1,4 +1,4 @@
-/* test_harness.h -- minimal C unit-test harness for LuaVM tests/unit/test_*.c.
+/* test_harness.h -- minimal C unit-test harness for CLua tests/unit/test_*.c.
  *
  * Each test file is a standalone program with its own main():
  *
@@ -13,12 +13,12 @@
  *     }
  *
  * No registration, no framework, no deps beyond libc plus whatever objects the
- * test links against (the runner links every test against build/bin/libluavmtest.a
+ * test links against (the runner links every test against build/bin/libcluatest.a
  * + liblua54.a). TEST_END() returns from main with 0 if every CHECK passed, 1
  * otherwise, so the runner just inspects the exit code (and the PASS/FAIL line).
  */
-#ifndef LUAVM_TEST_HARNESS_H
-#define LUAVM_TEST_HARNESS_H
+#ifndef CLUA_TEST_HARNESS_H
+#define CLUA_TEST_HARNESS_H
 
 #include <stdio.h>
 #include <string.h>
@@ -70,4 +70,4 @@ static const char *th_name   = "?";
              return 1; \
          } } while (0)
 
-#endif /* LUAVM_TEST_HARNESS_H */
+#endif /* CLUA_TEST_HARNESS_H */

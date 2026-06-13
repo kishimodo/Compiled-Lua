@@ -35,8 +35,8 @@
 --
 -- The bootstrap CANNOT be a Lua-side ffi callback (Ffi_AllocCallback
 -- dispatches against a single shared lua_State). The runtime is expected
--- to export `_luavm_thread_bootstrap` with signature
---   DWORD WINAPI _luavm_thread_bootstrap(thread_ctx_t *ctx)
+-- to export `_clua_thread_bootstrap` with signature
+--   DWORD WINAPI _clua_thread_bootstrap(thread_ctx_t *ctx)
 -- When that helper is missing we fall back to a cooperative coroutine
 -- mode so the API stays usable for tests and single-thread programs.
 
@@ -142,7 +142,7 @@ end
 
 local NATIVE_BOOTSTRAP, NATIVE_BOOTSTRAP_PTR
 do
-    local ok, addr = pcall(function() return C._luavm_thread_bootstrap end)
+    local ok, addr = pcall(function() return C._clua_thread_bootstrap end)
     if ok then
         NATIVE_BOOTSTRAP = true
         NATIVE_BOOTSTRAP_PTR = ffi.cast("void *", addr)

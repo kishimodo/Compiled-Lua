@@ -2,14 +2,14 @@
 -- the four load() sites in rover (rover/src/rover.lua) so the
 -- package manager compiles under aotc.exe (which bans the global `load`).
 -- Pure-logic checks use the $ROVER_PKG_TEST export hook; a final end-to-end
--- check asserts the rebranded usage banner. Run from the repo root by luavm.exe.
+-- check asserts the rebranded usage banner. Run from the repo root by clua-interp.exe.
 
 local function abscwd()
   local p = io.popen("cd"); if not p then return "." end
   local d = p:read("*a") or ""; p:close(); return (d:gsub("%s+$", ""))
 end
 local ROOT  = abscwd()
-local LUAVM = ROOT .. "\\build\\bin\\luavm.exe"
+local CLUA = ROOT .. "\\build\\bin\\clua-interp.exe"
 local PKG   = ROOT .. "\\rover\\src\\rover.lua"
 
 local function slurp(p) local f = io.open(p, "rb"); if not f then return nil end local s = f:read("*a"); f:close(); return s end
@@ -20,7 +20,7 @@ local function fail(m) print("[-] FAIL test-pkgmgr-parse: " .. m); os.exit(1) en
 -- A) parse_return_table unit tests via the test-export hook.
 ----------------------------------------------------------------------
 do
-  local driver = (os.getenv("TEMP") or ".") .. "\\luavm-parsedriver.lua"
+  local driver = (os.getenv("TEMP") or ".") .. "\\clua-interp-parsedriver.lua"
   spit(driver, [==[
 dofile("rover/src/rover.lua")
 local M = _G.ROVER_PKG
@@ -108,7 +108,7 @@ for _, s in ipairs({ 'return { x = 1+1 }', 'return { x = foo() }', '{', 'return 
 end
 print("PARSE_OK")
 ]==])
-  local p = io.popen('set "ROVER_PKG_TEST=1" && "' .. LUAVM .. '" -i "' .. driver .. '" 2>&1')
+  local p = io.popen('set "ROVER_PKG_TEST=1" && "' .. CLUA .. '" -i "' .. driver .. '" 2>&1')
   local out = p and p:read("*a") or ""; if p then p:close() end
   os.remove(driver)
   if not out:match("PARSE_OK") then fail("parser checks failed: " .. (out:gsub("%s+", " "))) end
@@ -119,14 +119,14 @@ end
 ----------------------------------------------------------------------
 do
   local outf = (os.getenv("TEMP") or ".") .. "\\rover-usage.txt"
-  os.execute('""' .. LUAVM .. '" -i "' .. PKG .. '" > "' .. outf .. '" 2>&1"')
+  os.execute('""' .. CLUA .. '" -i "' .. PKG .. '" > "' .. outf .. '" 2>&1"')
   local usage = slurp(outf) or ""
   os.remove(outf)
   if not usage:match("rover %-%- the CLua package manager") then
     fail("usage banner is not rebranded to rover")
   end
-  if usage:match("LuaVM package manager") then
-    fail("usage banner still says 'LuaVM package manager'")
+  if usage:match("LuaVM") then
+    fail("usage banner still carries the old LuaVM brand")
   end
 end
 

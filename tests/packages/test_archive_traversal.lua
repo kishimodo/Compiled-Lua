@@ -18,7 +18,7 @@ local function mkdir(p) os.execute('mkdir "' .. p:gsub("/", "\\") .. '" 2>nul') 
 local function rmrf(p) os.execute('rmdir /s /q "' .. p:gsub("/", "\\") .. '" 2>nul') end
 
 local tmp  = os.getenv("TEMP") or os.getenv("TMP") or "."
-local base = tmp:gsub("\\", "/") .. "/luavm_slip_" .. tostring(os.time()) .. "_" .. tostring(math.floor(os.clock() * 1e6))
+local base = tmp:gsub("\\", "/") .. "/clua_slip_" .. tostring(os.time()) .. "_" .. tostring(math.floor(os.clock() * 1e6))
 mkdir(base)
 local sandbox = base .. "/sandbox"
 local escape_marker = base .. "/escape.txt"   -- one level above sandbox
@@ -40,12 +40,12 @@ do
   -- absolute / drive-letter entry must also be refused
   local tpath = base .. "/evil_abs.tar"
   local w = tar.writer(tpath)
-  w:add_file("C:/luavm_slip_abs.txt", "PWNED")
+  w:add_file("C:/clua_slip_abs.txt", "PWNED")
   w:close()
   local r = tar.open(tpath)
   local called = pcall(function() return r:extract_all(sandbox) end)
   ok(not called, "tar.extract_all refuses an absolute/drive-letter entry")
-  ok(not exists("C:/luavm_slip_abs.txt"), "tar: no absolute-path file written")
+  ok(not exists("C:/clua_slip_abs.txt"), "tar: no absolute-path file written")
 end
 
 do

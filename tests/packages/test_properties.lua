@@ -90,7 +90,7 @@ local function rt(t)
     for k in pairs(back) do if t[k] == nil then return false, k end end
     return true
 end
-ok(rt({ name = "luavm", ["spaced key"] = "spaced val ", url = "http://x:80/p" }),
+ok(rt({ name = "clua-interp", ["spaced key"] = "spaced val ", url = "http://x:80/p" }),
    "round-trip: spaced keys, : in value, trailing ws")
 ok(rt({ ["a:b"] = "c", ["d=e"] = "f", ["#h"] = "g", ["!i"] = "j" }),
    "round-trip: sep/comment chars in keys")

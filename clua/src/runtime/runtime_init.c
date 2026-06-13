@@ -56,8 +56,8 @@ typedef struct _REGISTERED_PACKAGE {
 
 /* Defined per-build by the compiler-emitted packages_refs.c.
    Returns NULL when the build had zero required packages
-   (luavm.exe REPL is not produced through pe_link, so it gets a
-   weak stub elsewhere; see luavm_main.c's own preload setup). */
+   (clua-interp.exe REPL is not produced through pe_link, so it gets a
+   weak stub elsewhere; see clua_interp_main.c's own preload setup). */
 extern const REGISTERED_PACKAGE_T *Runtime_GetPackages( size_t *OutCount );
 
 static int PushArgTable( lua_State *L, int Argc, char **Argv ) {
@@ -104,8 +104,8 @@ static void PrintLuaError( lua_State *L ) {
    via ntdll's Cabinet.dll-equivalent path before handing the bytes to
    luaL_loadbuffer. Packages that were emitted uncompressed (legacy
    path or --no-compress-pkgs) load directly. */
-#define LUAVM_PKG_COMPRESS_MAGIC 0x3143564Cu  /* 'LVC1' little-endian */
-#define LUAVM_PKG_COMPRESS_HDR   8            /* magic (4) + uncompressed len (4) */
+#define CLUA_PKG_COMPRESS_MAGIC 0x3143564Cu  /* 'LVC1' little-endian */
+#define CLUA_PKG_COMPRESS_HDR   8            /* magic (4) + uncompressed len (4) */
 
 /* Loaded lazily on first compressed-package load. NULL on systems that
    somehow lack ntdll (i.e. never). */
@@ -115,7 +115,7 @@ static PRtlDecompressBufferEx g_RtlDecompress = NULL;
 
 /* COMPRESSION_FORMAT_XPRESS_HUFF = 4 (LZ77 + Huffman, best ratio of the
    built-in formats; LZNT1 = 2 was the legacy alternative). */
-#define LUAVM_PKG_COMPRESSION_FORMAT 4
+#define CLUA_PKG_COMPRESSION_FORMAT 4
 
 /*!
  * @brief
@@ -140,8 +140,8 @@ static int Runtime_PackageLoader( lua_State *L ) {
     unsigned char  *Decomp = NULL;
 
     /* Compressed-package detection: first 4 bytes == "LVC1" => decompress. */
-    if ( Len >= LUAVM_PKG_COMPRESS_HDR &&
-         *( const uint32_t * )Src == LUAVM_PKG_COMPRESS_MAGIC ) {
+    if ( Len >= CLUA_PKG_COMPRESS_HDR &&
+         *( const uint32_t * )Src == CLUA_PKG_COMPRESS_MAGIC ) {
         uint32_t UncompLen = *( const uint32_t * )( Src + 4 );
         if ( g_RtlDecompress == NULL ) {
             HMODULE H = GetModuleHandleA( "ntdll.dll" );
@@ -169,10 +169,10 @@ static int Runtime_PackageLoader( lua_State *L ) {
         void *Scratch    = malloc( ScratchLen );
         ULONG OutLen = 0;
         LONG  Status = g_RtlDecompress(
-            LUAVM_PKG_COMPRESSION_FORMAT,
+            CLUA_PKG_COMPRESSION_FORMAT,
             ( PUCHAR )Decomp, UncompLen,
-            ( PUCHAR )( Src + LUAVM_PKG_COMPRESS_HDR ),
-            ( ULONG )( Len - LUAVM_PKG_COMPRESS_HDR ),
+            ( PUCHAR )( Src + CLUA_PKG_COMPRESS_HDR ),
+            ( ULONG )( Len - CLUA_PKG_COMPRESS_HDR ),
             &OutLen, Scratch );
         if ( Scratch ) free( Scratch );
         if ( Status != 0 || OutLen != UncompLen ) {
@@ -276,28 +276,28 @@ int RuntimeMain( int Argc, char **Argv ) {
     /* Capture the blob's feature flags for use after the Lua state is up.
        LUA_SANDBOX applies after luaL_openlibs() and can't ride the pre-state pass. */
     uint32_t BlobFlagsSnapshot = 0;
-    if ( BlobSize >= sizeof( LUAVM_BLOB_HEADER_T ) ) {
-        PLUAVM_BLOB_HEADER_T HdrPeek = ( PLUAVM_BLOB_HEADER_T )BlobBase;
-        if ( HdrPeek->Magic == LUAVM_BLOB_MAGIC ) BlobFlagsSnapshot = HdrPeek->Flags;
+    if ( BlobSize >= sizeof( CLUA_BLOB_HEADER_T ) ) {
+        PCLUA_BLOB_HEADER_T HdrPeek = ( PCLUA_BLOB_HEADER_T )BlobBase;
+        if ( HdrPeek->Magic == CLUA_BLOB_MAGIC ) BlobFlagsSnapshot = HdrPeek->Flags;
     }
 
     /* Pre-pass: if any processing flag is set (decrypt, integrity check,
        decompress), copy the blob into a writable buffer and run the
        matching pass(es) before BlobReader_Open sees it. */
-    if ( BlobSize >= sizeof( LUAVM_BLOB_HEADER_T ) ) {
-        PLUAVM_BLOB_HEADER_T Hdr = ( PLUAVM_BLOB_HEADER_T )BlobBase;
-        if ( Hdr->Magic == LUAVM_BLOB_MAGIC && Hdr->Flags != 0 ) {
+    if ( BlobSize >= sizeof( CLUA_BLOB_HEADER_T ) ) {
+        PCLUA_BLOB_HEADER_T Hdr = ( PCLUA_BLOB_HEADER_T )BlobBase;
+        if ( Hdr->Magic == CLUA_BLOB_MAGIC && Hdr->Flags != 0 ) {
             unsigned char *Mut = ( unsigned char * )malloc( BlobSize );
             if ( Mut == NULL ) {
                 fprintf( stderr, "[-] blob mutable copy alloc failed\n" );
                 return EXIT_FAILURE;
             }
             memcpy( Mut, BlobBase, BlobSize );
-            PLUAVM_BLOB_HEADER_T MutHdr = ( PLUAVM_BLOB_HEADER_T )Mut;
-            size_t HdrSize     = sizeof( LUAVM_BLOB_HEADER_T );
+            PCLUA_BLOB_HEADER_T MutHdr = ( PCLUA_BLOB_HEADER_T )Mut;
+            size_t HdrSize     = sizeof( CLUA_BLOB_HEADER_T );
             size_t PayloadSize = BlobSize - HdrSize;
 
-            if ( MutHdr->Flags & LUAVM_BLOB_FLAG_ENCRYPTED ) {
+            if ( MutHdr->Flags & CLUA_BLOB_FLAG_ENCRYPTED ) {
                 StreamCipher_Apply( MutHdr->EncryptionKey,
                                     Mut + HdrSize,
                                     PayloadSize );
@@ -309,7 +309,7 @@ int RuntimeMain( int Argc, char **Argv ) {
                Runs AFTER decrypt because ciphertext doesn't compress;
                build time applied compression first then encryption,
                so we reverse that order here. */
-            if ( ( MutHdr->Flags & LUAVM_BLOB_FLAG_COMPRESS_PAYLOAD ) &&
+            if ( ( MutHdr->Flags & CLUA_BLOB_FLAG_COMPRESS_PAYLOAD ) &&
                  PayloadSize >= 8 &&
                  *( uint32_t * )( Mut + HdrSize ) == 0x42435643u /* 'LVCB' */ ) {
                 uint32_t UncompSize = *( uint32_t * )( Mut + HdrSize + 4 );
@@ -351,9 +351,9 @@ int RuntimeMain( int Argc, char **Argv ) {
                 }
                 /* Rewrite header sizes inside NewBlob to match the
                    inflated payload. */
-                PLUAVM_BLOB_HEADER_T NewHdr = ( PLUAVM_BLOB_HEADER_T )NewBlob;
+                PCLUA_BLOB_HEADER_T NewHdr = ( PCLUA_BLOB_HEADER_T )NewBlob;
                 NewHdr->TotalSize = ( uint32_t )NewBlobSize;
-                NewHdr->Flags    &= ~LUAVM_BLOB_FLAG_COMPRESS_PAYLOAD;
+                NewHdr->Flags    &= ~CLUA_BLOB_FLAG_COMPRESS_PAYLOAD;
                 free( Mut );
                 Mut         = NewBlob;
                 MutHdr      = NewHdr;
@@ -385,7 +385,7 @@ int RuntimeMain( int Argc, char **Argv ) {
 
     /* --lua-version-strip: nil out the version / copyright strings that
        Lua wires into _G during openlibs. */
-    if ( BlobFlagsSnapshot & LUAVM_BLOB_FLAG_LUA_VERSION_STRIP ) {
+    if ( BlobFlagsSnapshot & CLUA_BLOB_FLAG_LUA_VERSION_STRIP ) {
         lua_pushnil( L ); lua_setglobal( L, "_VERSION" );
         lua_pushnil( L ); lua_setglobal( L, "_COPYRIGHT" );
         lua_pushnil( L ); lua_setglobal( L, "_DESCRIPTION" );
@@ -399,7 +399,7 @@ int RuntimeMain( int Argc, char **Argv ) {
        sub-table needs special handling: keep `package.preload` (our
        package system depends on it) and `package.loaded`, drop the
        rest. */
-    if ( BlobFlagsSnapshot & LUAVM_BLOB_FLAG_LUA_SANDBOX ) {
+    if ( BlobFlagsSnapshot & CLUA_BLOB_FLAG_LUA_SANDBOX ) {
         static const char *const k_DropGlobals[] = {
             "loadfile", "dofile", "load",
             NULL
@@ -519,12 +519,12 @@ int RuntimeMain( int Argc, char **Argv ) {
  * the embedded blob. Returns the same exit code RuntimeMain would.
  * No argv plumbing -- if you need args, link the same runtime.a into
  * a custom DLL with your own export that forwards to RuntimeMain. */
-__declspec(dllexport) int luavm_run( void ) {
+__declspec(dllexport) int clua_run( void ) {
     return RuntimeMain( 0, NULL );
 }
 
 /* main() lives in runtime_entry.c so that linking a custom-main host
  * against the static lib doesn't get a duplicate-main collision when
- * the linker pulls runtime_init.o for RuntimeMain/luavm_run. The
+ * the linker pulls runtime_init.o for RuntimeMain/clua_run. The
  * separate-TU split means runtime_entry.o is only pulled when nothing
  * else defines main. */

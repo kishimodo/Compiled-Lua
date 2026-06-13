@@ -4,7 +4,7 @@
     <TargetFramework>net8.0</TargetFramework>
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
-    <RootNamespace>LuaVM.WinmdGen</RootNamespace>
+    <RootNamespace>CLua.WinmdGen</RootNamespace>
     <AssemblyName>winmd-gen</AssemblyName>
     <!-- Self-contained single-file publish so the resulting .exe runs
          without requiring a separate dotnet runtime install on the

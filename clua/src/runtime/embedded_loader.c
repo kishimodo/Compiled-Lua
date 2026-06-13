@@ -5,7 +5,7 @@
 
 #include <string.h>
 
-static const char k_RegistryKey[ ] = "LUAVM_BLOB_READER";
+static const char k_RegistryKey[ ] = "CLUA_BLOB_READER";
 
 static int Searcher( lua_State *L ) {
     BLOB_LOOKUP_T Found = { 0 };

@@ -1,4 +1,4 @@
--- LuaVM clipboard package manifest.
+-- CLua clipboard package manifest.
 return {
     name        = "clipboard",
     version     = "0.1",

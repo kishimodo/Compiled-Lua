@@ -1,6 +1,6 @@
 -- Combined arith + control-flow differential (Plan 1): for-loop, if/elseif/else,
 -- modulo, full arithmetic, bitwise, comparisons, concat, length, unary.
--- Compiled by aotc and byte-diffed against luavm.exe -i.
+-- Compiled by aotc and byte-diffed against clua-interp.exe -i.
 for i = 1, 15 do
   if i % 15 == 0 then
     print("FizzBuzz")

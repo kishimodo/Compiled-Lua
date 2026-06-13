@@ -9,6 +9,6 @@ return {
     },
     requires        = {},
     requires_native = {
-        { dll = "liblz4.dll", mode_default = "embed", env_var = "LUAVM_LZ4_DLL" },
+        { dll = "liblz4.dll", mode_default = "embed", env_var = "CLUA_LZ4_DLL" },
     },
 }

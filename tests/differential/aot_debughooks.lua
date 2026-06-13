@@ -1,6 +1,6 @@
 -- aot_debughooks.lua — a program that MENTIONS debug links the full bytecode
 -- interpreter (the "debug" constant scan keeps lvm.o in), so debug.sethook
--- works in the compiled exe exactly like under luavm -i: functions entered
+-- works in the compiled exe exactly like under clua-interp -i: functions entered
 -- while a hook is active route through the hook-aware interpreter.
 --
 -- This also pins the interpreter-strip feature from the other side: if the

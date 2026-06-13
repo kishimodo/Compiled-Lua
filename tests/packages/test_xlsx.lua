@@ -32,7 +32,7 @@ ok(xlsx.build_a1(5, 3) == "C5",  "build_a1(5,3)=C5")
 ok(xlsx.parse_a1("not-a1") == nil, "parse_a1 rejects junk")
 
 -- ===== Writer -> reader round trip =======================================
-local path = os.getenv("TEMP") .. "/luavm_test_xlsx_rt.xlsx"
+local path = os.getenv("TEMP") .. "/clua_test_xlsx_rt.xlsx"
 
 local wb = xlsx.create()
 local sh = wb:add_sheet("Data")

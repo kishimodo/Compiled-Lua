@@ -2,30 +2,30 @@
 -- major==0, per node-semver), prerelease handling, `remove` dropping the entry
 -- from BOTH rover.toml and rover.lock, the `--registry` flag, and `publish`
 -- index.json generation. Pure-logic checks use the $ROVER_PKG_TEST export hook;
--- end-to-end checks use registry-test. Run from the repo root by luavm.exe.
+-- end-to-end checks use registry-test. Run from the repo root by clua-interp.exe.
 
 local function abscwd()
   local p = io.popen("cd"); if not p then return "." end
   local d = p:read("*a") or ""; p:close(); return (d:gsub("%s+$", ""))
 end
 local ROOT  = abscwd()
-local LUAVM = ROOT .. "\\build\\bin\\luavm.exe"
+local CLUA = ROOT .. "\\build\\bin\\clua-interp.exe"
 local PKG   = ROOT .. "\\rover\\src\\rover.lua"
 local REG   = ROOT .. "\\rover\\registry-test"
-local PROJ  = (os.getenv("TEMP") or ".") .. "\\luavm-semvertest"
+local PROJ  = (os.getenv("TEMP") or ".") .. "\\clua-interp-semvertest"
 
 local function sh(c) local ok, _, code = os.execute('"' .. c .. '"'); return (ok == true) or (ok == 0) or (code == 0) end
-local function pk(a) local ok, _, c = os.execute('cd /d "' .. PROJ .. '" && "' .. LUAVM .. '" -i "' .. PKG .. '" ' .. a); return (ok == true) or (ok == 0) or (c == 0) end
+local function pk(a) local ok, _, c = os.execute('cd /d "' .. PROJ .. '" && "' .. CLUA .. '" -i "' .. PKG .. '" ' .. a); return (ok == true) or (ok == 0) or (c == 0) end
 local function slurp(p) local f = io.open(p, "rb"); if not f then return nil end local s = f:read("*a"); f:close(); return s end
 local function spit(p, s) local f = io.open(p, "wb"); if not f then return false end f:write(s); f:close(); return true end
-local function cleanup() for _, n in ipairs({ "leaf", "mid", "app" }) do sh(LUAVM .. ' -i ' .. PKG .. ' remove ' .. n .. ' >nul 2>&1') end end
+local function cleanup() for _, n in ipairs({ "leaf", "mid", "app" }) do sh(CLUA .. ' -i ' .. PKG .. ' remove ' .. n .. ' >nul 2>&1') end end
 local function fail(m) print("[-] FAIL test-pkgmgr-semver: " .. m); cleanup(); os.exit(1) end
 
 ----------------------------------------------------------------------
 -- A) Pure semver logic via the test-export hook.
 ----------------------------------------------------------------------
 do
-  local driver = (os.getenv("TEMP") or ".") .. "\\luavm-semverdriver.lua"
+  local driver = (os.getenv("TEMP") or ".") .. "\\clua-interp-semverdriver.lua"
   spit(driver, [[
 dofile("rover/src/rover.lua")
 local M = _G.ROVER_PKG
@@ -83,7 +83,7 @@ eq(M.registry_ok("a|b"),                          false, "registry-rejects-pipe"
 eq(M.registry_ok("a%PATH%b"),                     false, "registry-rejects-percent")
 print("SEMVER_OK")
 ]])
-  local p = io.popen('set "ROVER_PKG_TEST=1" && "' .. LUAVM .. '" -i "' .. driver .. '" 2>&1')
+  local p = io.popen('set "ROVER_PKG_TEST=1" && "' .. CLUA .. '" -i "' .. driver .. '" 2>&1')
   local out = p and p:read("*a") or ""; if p then p:close() end
   os.remove(driver)
   if not out:match("SEMVER_OK") then fail("semver logic check failed: " .. (out:gsub("%s+", " "))) end
@@ -93,7 +93,7 @@ end
 -- B) `publish` generates a usable index.json (versions + hashes + files).
 ----------------------------------------------------------------------
 do
-  if not sh('"' .. LUAVM .. '" -i "' .. PKG .. '" publish "' .. REG .. '" >nul 2>&1') then fail("publish") end
+  if not sh('"' .. CLUA .. '" -i "' .. PKG .. '" publish "' .. REG .. '" >nul 2>&1') then fail("publish") end
   local idx = slurp(REG .. "\\index.json") or ""
   if not idx:match('"leaf"%s*:%s*%[') then fail("published index missing leaf versions") end
   if not idx:match('"hashes"') then fail("published index missing hashes block") end
@@ -101,9 +101,9 @@ do
 
   -- B2) `publish --push <dir>` distributes the generated registry to another
   -- location (the local-directory transport; the URL transport uses curl PUT).
-  local PUSH = (os.getenv("TEMP") or ".") .. "\\luavm-pushtest"
+  local PUSH = (os.getenv("TEMP") or ".") .. "\\clua-interp-pushtest"
   sh('rmdir /S /Q "' .. PUSH .. '" >nul 2>&1')
-  if not sh('"' .. LUAVM .. '" -i "' .. PKG .. '" publish "' .. REG .. '" --push "' .. PUSH .. '" >nul 2>&1') then
+  if not sh('"' .. CLUA .. '" -i "' .. PKG .. '" publish "' .. REG .. '" --push "' .. PUSH .. '" >nul 2>&1') then
     fail("publish --push to a local directory")
   end
   if not slurp(PUSH .. "\\index.json") then fail("publish --push did not copy index.json to the destination") end

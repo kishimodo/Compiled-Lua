@@ -6,7 +6,7 @@ local bit = { band = function(a,b) return (tonumber(a) or 0) & (tonumber(b) or 0
 --   Windows ships three useful built-in compression formats in ntdll
 --   (LZNT1, XPRESS, XPRESS_HUFF). The kernel uses them for hibernation,
 --   memory compression, prefetch, WIM, and -- relevant here -- the
---   LuaVM package loader uses XPRESS_HUFF (format 4) to shrink embedded
+--   CLua package loader uses XPRESS_HUFF (format 4) to shrink embedded
 --   bytecode blobs. Exposing the same primitives to Lua means scripts
 --   can produce / consume the exact byte layout the C side already
 --   understands.
@@ -48,7 +48,7 @@ local FRAME_MAGIC      = 0x3158564C
 local FRAME_HDR_SIZE   = 12  -- magic(4) + format(4) + original_len(4)
 
 -- ===== FFI cdefs =========================================================
--- LuaVM's ffi.cdef doesn't support typedef'd function-pointer types, so
+-- CLua's ffi.cdef doesn't support typedef'd function-pointer types, so
 -- we declare the ntdll routines as straight C prototypes. ffi.load's
 -- auto-preload of ntdll publishes them under ffi.C for direct use.
 

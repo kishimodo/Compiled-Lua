@@ -6,7 +6,7 @@
 --   * --Werror turns those warnings into a build failure;
 --   * -w/--no-warn silences them and compiles clean;
 --   * the return-value of a `return` is NOT misreported as dead code (W004).
--- Run from the repo root by luavm.exe (interpreter mode is irrelevant here --
+-- Run from the repo root by clua-interp.exe (interpreter mode is irrelevant here --
 -- the test only shells out to compiler.exe).
 
 local function abscwd()
@@ -15,7 +15,7 @@ local function abscwd()
 end
 local ROOT     = abscwd()
 local COMPILER = ROOT .. "\\build\\bin\\compiler.exe"
-local TMP      = (os.getenv("TEMP") or ".") .. "\\luavm-diagtest"
+local TMP      = (os.getenv("TEMP") or ".") .. "\\clua-interp-diagtest"
 
 local function sh(cmd) local ok, _, c = os.execute('"' .. cmd .. '"'); return (ok == true) or (ok == 0) or (c == 0) end
 local function spit(p, s) local f = io.open(p, "wb"); if not f then return false end f:write(s); f:close(); return true end

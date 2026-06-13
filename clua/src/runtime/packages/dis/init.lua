@@ -26,7 +26,7 @@
 -- Backend selection:
 --   opts.backend = "capstone" or "zydis" forces that backend, raising if
 --   it isn't loaded. "auto" (default) tries capstone first, then zydis.
---   The LUAVM_CAPSTONE_DLL / LUAVM_ZYDIS_DLL env vars pin a specific DLL.
+--   The CLUA_CAPSTONE_DLL / CLUA_ZYDIS_DLL env vars pin a specific DLL.
 --
 -- DLL distribution:
 --   Each backend is probed independently. requires_native lists both as
@@ -128,7 +128,7 @@ end
 local function probe_capstone()
     if _cs_lib ~= nil then return _cs_lib end
     local candidates = {}
-    local override = env("LUAVM_CAPSTONE_DLL")
+    local override = env("CLUA_CAPSTONE_DLL")
     if override then candidates[#candidates + 1] = override end
     candidates[#candidates + 1] = "capstone"
     candidates[#candidates + 1] = "capstone-5"
@@ -145,7 +145,7 @@ end
 local function probe_zydis()
     if _zd_lib ~= nil then return _zd_lib end
     local candidates = {}
-    local override = env("LUAVM_ZYDIS_DLL")
+    local override = env("CLUA_ZYDIS_DLL")
     if override then candidates[#candidates + 1] = override end
     candidates[#candidates + 1] = "Zydis"
     candidates[#candidates + 1] = "zydis"
@@ -385,7 +385,7 @@ function M.new(opts)
         if probe_zydis()    then return zd_new(bits, syntax) end
         error("dis: no disassembler available. " ..
               "Tried capstone (" .. (_cs_error or "") .. ") and zydis (" .. (_zd_error or "") .. "). " ..
-              "Set LUAVM_CAPSTONE_DLL or LUAVM_ZYDIS_DLL, or drop the DLL alongside the exe.")
+              "Set CLUA_CAPSTONE_DLL or CLUA_ZYDIS_DLL, or drop the DLL alongside the exe.")
     end
 end
 

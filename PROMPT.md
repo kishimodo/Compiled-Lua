@@ -1,8 +1,8 @@
 # LuaC — Build Specification & Implementation Prompt
 
-> **LuaC** = **Lua** **C**ompiled. It is LuaVM 2.0: a clean fork of LuaVM that turns
-> Lua 5.4 into a *true ahead-of-time native compiler*. Where LuaVM v1 embeds Lua
-> **bytecode** into the output and runs it with an in-binary JIT/interpreter, LuaC
+> **LuaC** = **Lua** **C**ompiled: a *true ahead-of-time native compiler* for
+> Lua 5.4. Where a bytecode-embedding compiler ships Lua **bytecode** in the
+> output and runs it with an in-binary VM, LuaC
 > lowers Lua 5.4 to **native x64 machine code at compile time** and emits an
 > ordinary Windows PE — standard sections, no bytecode blob, no in-binary VM, no
 > loader stub. The only thing linked alongside your code is a runtime *library*
@@ -34,7 +34,7 @@ headers** for the new backend (`src/ir`, `src/opt`, `src/codegen`, `src/link`,
 ## 1. KICKOFF PROMPT (hand this to the implementer)
 
 > You are implementing **LuaC**, an ahead-of-time optimizing compiler for Lua 5.4
-> targeting Windows x64. The repo is a fork of LuaVM v1; the Lua front-end
+> targeting Windows x64. The Lua front-end
 > (lexer/parser/bytecode compiler), the runtime core (GC, tables, strings,
 > metatables, coroutines), and the Windows FFI are already present and reused
 > **unchanged**. You are building the middle and back end: **Lua bytecode → SSA IR
@@ -77,7 +77,7 @@ These were decided deliberately. Do not relitigate them mid-build.
 | 2 | **Fresh whole-program optimizing backend.** Not the v1 JIT, not transpile-to-C. | New SSA IR + passes + instruction selection. Reuse only the low-level `emit_x64` encoder and `regalloc` from v1's JIT. |
 | 3 | **Whole-program, interprocedural** optimization is the end goal. | The IR carries a complete call graph and an interprocedural type-propagation fixpoint. Delivered last, but the IR is designed for it from day one. |
 | 4 | **100% Lua 5.4 fidelity via *sound-conservative* optimization.** | No speculation, no deopt machinery, no "strict dialect." Optimize only where provable; otherwise emit the dynamic path. FFI/C edges are conservative barriers. |
-| 5 | **Clean fork in this `LuaC/` folder.** v1 stays frozen as the reference/differential oracle. | Duplication is accepted; the two trees evolve independently. v1's `luavm.exe -i` is the correctness oracle. |
+| 5 | **Clean fork in this `LuaC/` folder.** v1 stays frozen as the reference/differential oracle. | Duplication is accepted; the two trees evolve independently. v1's `clua-interp.exe -i` is the correctness oracle. |
 
 ---
 
@@ -96,7 +96,7 @@ A compiled LuaC `.exe` has only standard sections:
 | `.idata` | Import directory (kernel32, advapi32, …; FFI loads its own libs at runtime) |
 | `.reloc` | Base relocations (omit only if you commit to a fixed image base) |
 
-**No** `.luavm`/payload section, **no** appended overlay past the last section,
+**No** `.clua-interp`/payload section, **no** appended overlay past the last section,
 **no** embedded bytecode blob (`g_LuaBlob` is gone), **no** in-binary module
 searcher. The user's program ships as *code*, not *data*. This is the entire
 point of the fork.
@@ -557,7 +557,7 @@ and add the killer layer for an optimizing compiler:
 - **Package** (`tests/packages/test_*.lua`): round-trip each builtin package.
 - **Differential — the AOT oracle** (`tests/differential/*.lua`): a deterministic
   script that *prints*; the runner compiles it with **LuaC (native)** and runs the
-  same script under **v1 `luavm.exe -i` (interpreter)** and **diffs stdout**. This
+  same script under **v1 `clua-interp.exe -i` (interpreter)** and **diffs stdout**. This
   is how you prove the optimizing AOT preserves Lua 5.4 semantics. Every optimizer
   bug surfaces here. Make this the gate for every milestone. v1 is the frozen
   oracle — never "fix" a differential failure by changing v1.
@@ -616,8 +616,8 @@ test is red" is a failure.
 
 ### Appendix A — provenance
 
-This spec was generated from a file-level audit of LuaVM v1 (six parallel
-subsystem deep-reads: front-end, runtime core, FFI, JIT/codegen, PE link,
+This spec was grounded in a file-level audit of the codebase (front-end,
+runtime core, FFI, JIT/codegen, PE link,
 packages/tests). The raw grounded manifest (every copy/strip/drop action, every
 key interface with `file:line`, and the per-subsystem gotcha lists) is in
 [`docs/fork-manifest.md`](docs/fork-manifest.md). When a claim here is terse, that

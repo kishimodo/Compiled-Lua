@@ -47,12 +47,12 @@ end
 do
     local doc = {
         title = "demo",
-        owner = { name = "luavm", level = 3 },
+        owner = { name = "clua-interp", level = 3 },
         server = { host = "localhost", port = 8080, ratio = 0.5 },
     }
     local d = rt(doc)
     ok(d.title == "demo",            "top-level string")
-    ok(d.owner.name == "luavm",      "nested table string")
+    ok(d.owner.name == "clua-interp",      "nested table string")
     ok(d.owner.level == 3,           "nested table integer")
     ok(d.server.port == 8080,        "deep nested integer")
     ok(d.server.ratio == 0.5,        "deep nested float")

@@ -9,6 +9,6 @@ return {
     },
     requires        = {},
     requires_native = {
-        { dll = "onig.dll", mode_default = "embed", env_var = "LUAVM_ONIG_DLL" },
+        { dll = "onig.dll", mode_default = "embed", env_var = "CLUA_ONIG_DLL" },
     },
 }

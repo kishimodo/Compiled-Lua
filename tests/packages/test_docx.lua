@@ -7,7 +7,7 @@ if not ok_req then print("[~] SKIP test_docx (" .. tostring(docx) .. ")") os.exi
 local fails = 0
 local function ok(c, m) if not c then fails = fails + 1; print("[-] FAIL test_docx: " .. tostring(m)) end end
 
-local path = os.getenv("TEMP") .. "/luavm_test_docx_rt.docx"
+local path = os.getenv("TEMP") .. "/clua_test_docx_rt.docx"
 
 -- ===== Build a document ==================================================
 local w = docx.create()

@@ -4,9 +4,9 @@
  *  HANDLE, LPCSTR, etc.) into the ctype table. Call after Ctype_Init.
  */
 
-#ifndef LUAVM_FFI_WIN_TYPES_H
-#define LUAVM_FFI_WIN_TYPES_H
+#ifndef CLUA_FFI_WIN_TYPES_H
+#define CLUA_FFI_WIN_TYPES_H
 
 void Ffi_RegisterWindowsTypes( void );
 
-#endif /* LUAVM_FFI_WIN_TYPES_H */
+#endif /* CLUA_FFI_WIN_TYPES_H */

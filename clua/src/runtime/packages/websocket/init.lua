@@ -406,7 +406,7 @@ function M.connect(url, opts)
         ["Connection"]            = "Upgrade",
         ["Sec-WebSocket-Key"]     = key_b64,
         ["Sec-WebSocket-Version"] = "13",
-        ["User-Agent"]            = "LuaVM-websocket/0.1",
+        ["User-Agent"]            = "CLua-websocket/0.1",
     }
     if opts.subprotocols then
         headers["Sec-WebSocket-Protocol"] = table.concat(opts.subprotocols, ", ")

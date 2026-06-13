@@ -71,12 +71,12 @@ ok(m.x == 1 and m.y == 2 and m.z == "three", "map string keys")
 
 -- ===== Nested + mixed (with floats) ====================================
 local doc = {
-    name = "luavm", count = 42, ratio = 3.14, active = true,
+    name = "clua-interp", count = 42, ratio = 3.14, active = true,
     tags = {"a", "b", "c"},
     meta = { version = 1.5, flag = false, deep = { x = 0.1 } },
 }
 local d = rt(doc)
-ok(d.name == "luavm",        "nested string")
+ok(d.name == "clua-interp",        "nested string")
 ok(d.count == 42,            "nested int")
 ok(d.ratio == 3.14,          "nested float (regression guard)")
 ok(d.active == true,         "nested bool")

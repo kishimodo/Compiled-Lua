@@ -515,7 +515,7 @@ local function set_principal(principal, opts)
         set_prop(principal, "LogonType", LOGON_TYPE_INTERACTIVE)
     else
         -- "user" -- run as the calling user, no password (S4U). Works on
-        -- 7+/Server 2008 R2+, which is everything LuaVM targets.
+        -- 7+/Server 2008 R2+, which is everything CLua targets.
         set_prop(principal, "LogonType", LOGON_TYPE_S4U)
     end
     if run_level == "highest" then
@@ -540,7 +540,7 @@ function M.create_task(opts)
         -- RegistrationInfo
         local reg = dispatch_of(get_prop(def, "RegistrationInfo"))
         if opts.description then set_prop(reg, "Description", opts.description) end
-        set_prop(reg, "Author", opts.author or "LuaVM")
+        set_prop(reg, "Author", opts.author or "CLua")
         release(reg)
 
         -- Principal

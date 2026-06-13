@@ -537,7 +537,7 @@ function M.absolute(p, base)
     if M.is_absolute(p) then return M.normalize(p) end
     if base == nil then
         -- Pull cwd via GetCurrentDirectoryW. ffi is injected globally by
-        -- the LuaVM runtime; if it's absent (pure-Lua build), fall back to
+        -- the CLua runtime; if it's absent (pure-Lua build), fall back to
         -- "." which still produces a reasonable normalized result.
         local ok, cwd = pcall(function()
             -- windows.lua already loads kernel32 and cdefs GetCurrentDirectoryW.

@@ -503,8 +503,8 @@ end
 -- DLLs are present we still expose probe/frames via the FFI.
 
 local function shell_exe()
-    -- Prefer LUAVM_FFMPEG_EXE; fall back to PATH.
-    return os.getenv("LUAVM_FFMPEG_EXE") or "ffmpeg"
+    -- Prefer CLUA_FFMPEG_EXE; fall back to PATH.
+    return os.getenv("CLUA_FFMPEG_EXE") or "ffmpeg"
 end
 
 local function quote(s)
@@ -536,7 +536,7 @@ end
 function M.convert(in_path, out_path, opts)
     opts = opts or {}
     if not exe_available() then
-        error("ffmpeg.convert: ffmpeg.exe not on PATH (set LUAVM_FFMPEG_EXE)", 2)
+        error("ffmpeg.convert: ffmpeg.exe not on PATH (set CLUA_FFMPEG_EXE)", 2)
     end
     local args = { "-y", "-i", in_path }
     if opts.video_codec   then args[#args + 1] = "-c:v"; args[#args + 1] = opts.video_codec end
@@ -603,7 +603,7 @@ function M.concat(in_paths, out_path, opts)
     opts = opts or {}
     if not exe_available() then error("ffmpeg.concat: ffmpeg.exe not on PATH", 2) end
     -- Build a temporary list-file consumable by the concat demuxer.
-    local temp = (os.getenv("TEMP") or ".") .. "\\luavm_ffmpeg_concat_" .. tostring(os.time()) .. ".txt"
+    local temp = (os.getenv("TEMP") or ".") .. "\\clua_ffmpeg_concat_" .. tostring(os.time()) .. ".txt"
     local f, err = io.open(temp, "wb")
     if not f then error("ffmpeg.concat: cannot create list file: " .. tostring(err)) end
     for _, p in ipairs(in_paths) do

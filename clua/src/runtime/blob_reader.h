@@ -1,10 +1,10 @@
 /*!
  * @brief
- *  Read-only view over an in-memory LUAVM blob.
+ *  Read-only view over an in-memory CLUA blob.
  */
 
-#ifndef LUAVM_RUNTIME_BLOB_READER_H
-#define LUAVM_RUNTIME_BLOB_READER_H
+#ifndef CLUA_RUNTIME_BLOB_READER_H
+#define CLUA_RUNTIME_BLOB_READER_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -42,4 +42,4 @@ int BlobReader_Find( PBLOB_READER_T Reader, const char *Name, PBLOB_LOOKUP_T Out
  */
 int BlobReader_GetEntry( PBLOB_READER_T Reader, PBLOB_LOOKUP_T Out );
 
-#endif /* LUAVM_RUNTIME_BLOB_READER_H */
+#endif /* CLUA_RUNTIME_BLOB_READER_H */

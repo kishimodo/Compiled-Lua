@@ -1,5 +1,5 @@
 -- Project-workflow test: rover.toml (deps) + rover.lock (resolved versions +
--- hashes). Run by luavm.exe from the repo root. Operates in a temp project dir
+-- hashes). Run by clua-interp.exe from the repo root. Operates in a temp project dir
 -- so it never writes rover.toml/rover.lock into the repo. Cleans up afterwards.
 
 -- Absolute repo root: cmd's `cd` with no args prints the current directory.
@@ -11,26 +11,26 @@ local function abscwd()
   return (d:gsub("%s+$", ""))
 end
 local CWD     = abscwd()                               -- repo root (absolute)
-local LUAVM   = CWD .. "\\build\\bin\\luavm.exe"
+local CLUA   = CWD .. "\\build\\bin\\clua-interp.exe"
 local PKG     = CWD .. "\\rover\\src\\rover.lua"
 local REG     = CWD .. "\\rover\\registry"
-local PROJ    = (os.getenv("TEMP") or ".") .. "\\luavm-projtest"
+local PROJ    = (os.getenv("TEMP") or ".") .. "\\clua-interp-projtest"
 
 local function sh(cmd) local ok, _, c = os.execute('"' .. cmd .. '"'); return (ok == true) or (ok == 0) or (c == 0) end
 -- run the pkg manager with the project dir as the working directory. The
 -- command starts with `cd` (not a quote), so no outer-quote wrap is needed
 -- (and wrapping a compound `cd && exe` command would mis-parse under cmd).
 local function pk(args)
-  local cmd = 'cd /d "' .. PROJ .. '" && "' .. LUAVM .. '" -i "' .. PKG .. '" ' .. args
+  local cmd = 'cd /d "' .. PROJ .. '" && "' .. CLUA .. '" -i "' .. PKG .. '" ' .. args
   local ok, _, c = os.execute(cmd)
   return (ok == true) or (ok == 0) or (c == 0)
 end
 local function slurp(p) local f = io.open(p, "rb"); if not f then return nil end local s = f:read("*a"); f:close(); return s end
-local function fail(m) print("[-] FAIL test-pkgmgr-project: " .. m); sh(LUAVM .. ' -i ' .. PKG .. ' remove greet >nul 2>&1'); os.exit(1) end
+local function fail(m) print("[-] FAIL test-pkgmgr-project: " .. m); sh(CLUA .. ' -i ' .. PKG .. ' remove greet >nul 2>&1'); os.exit(1) end
 
 sh('rmdir /S /Q "' .. PROJ .. '" >nul 2>&1')
 sh('mkdir "' .. PROJ .. '" >nul 2>&1')
-sh(LUAVM .. ' -i ' .. PKG .. ' remove greet >nul 2>&1')
+sh(CLUA .. ' -i ' .. PKG .. ' remove greet >nul 2>&1')
 
 -- 1) add a dependency: installs it AND records rover.toml + rover.lock
 if not pk('add greet "' .. REG .. '"') then fail("add greet") end
@@ -47,7 +47,7 @@ if not lock:match('%["greet"%]') or not lock:match('hash%s*=%s*"%x%x%x') then fa
 if not pk('verify >nul 2>&1') then fail("project verify should pass on clean install") end
 
 -- 3) tamper the installed package -> project verify must FAIL
-sh(LUAVM .. ' -i ' .. PKG .. ' where > "' .. PROJ .. '\\store.txt"')
+sh(CLUA .. ' -i ' .. PKG .. ' where > "' .. PROJ .. '\\store.txt"')
 -- read the store path (strip JIT/runtime noise + trailing newline)
 local storeRaw = slurp(PROJ .. "\\store.txt") or ""
 local store
@@ -73,7 +73,7 @@ if not pk('add greet "' .. REG .. '" >nul 2>&1') then fail("reinstall greet via 
 if not pk('verify >nul 2>&1') then fail("project verify should pass after reinstall") end
 
 -- cleanup
-sh(LUAVM .. ' -i ' .. PKG .. ' remove greet >nul 2>&1')
+sh(CLUA .. ' -i ' .. PKG .. ' remove greet >nul 2>&1')
 sh('rmdir /S /Q "' .. PROJ .. '" >nul 2>&1')
 print("[+] PASS test-pkgmgr-project (rover.toml + rover.lock: add/install/verify + tamper detection)")
 os.exit(0)

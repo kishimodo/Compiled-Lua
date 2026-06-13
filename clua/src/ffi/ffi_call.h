@@ -9,8 +9,8 @@
  *  args and large struct returns are 6e's job.
  */
 
-#ifndef LUAVM_FFI_CALL_H
-#define LUAVM_FFI_CALL_H
+#ifndef CLUA_FFI_CALL_H
+#define CLUA_FFI_CALL_H
 
 #include "ffi/cdata.h"
 #include "lua.h"
@@ -31,4 +31,4 @@ int Ffi_GenericCall( lua_State *L, PCData_T FnCd, int BaseIdx );
  */
 int Cdata_Call( lua_State *L );
 
-#endif /* LUAVM_FFI_CALL_H */
+#endif /* CLUA_FFI_CALL_H */

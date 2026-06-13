@@ -4,17 +4,17 @@
 #include <string.h>
 
 int BlobReader_Open( const unsigned char *Base, size_t Size, PBLOB_READER_T Reader ) {
-    PLUAVM_BLOB_HEADER_T Hdr = { 0 };
+    PCLUA_BLOB_HEADER_T Hdr = { 0 };
 
     if ( Base == NULL || Reader == NULL ) {
         return 0;
     }
-    if ( Size < sizeof( LUAVM_BLOB_HEADER_T ) ) {
+    if ( Size < sizeof( CLUA_BLOB_HEADER_T ) ) {
         return 0;
     }
-    Hdr = ( PLUAVM_BLOB_HEADER_T )Base;
-    if ( Hdr->Magic != LUAVM_BLOB_MAGIC )         { return 0; }
-    if ( Hdr->Version != LUAVM_BLOB_VERSION )     { return 0; }
+    Hdr = ( PCLUA_BLOB_HEADER_T )Base;
+    if ( Hdr->Magic != CLUA_BLOB_MAGIC )         { return 0; }
+    if ( Hdr->Version != CLUA_BLOB_VERSION )     { return 0; }
     if ( Hdr->Count == 0 )                        { return 0; }
     if ( Hdr->TotalSize != Size )                 { return 0; }
     if ( Hdr->EntryIndex >= Hdr->Count )          { return 0; }

@@ -2,7 +2,7 @@
 -- staged registry package, mechanically, from the ORIGINAL (commented) source
 -- under clua/src/runtime/packages/<name>/init.lua.
 --
---   build\bin\luavm.exe tools\build-package-readmes.lua <staged-registry-dir>
+--   build\bin\clua-interp.exe tools\build-package-readmes.lua <staged-registry-dir>
 --
 -- Writes <staged-registry-dir>\<name>\README.md (PACKAGE level, NOT inside the
 -- version dir — rover's publish hashes only version dirs, so these files must
@@ -142,7 +142,7 @@ local function render(name, src)
   if src:match("ffi%.") or src:match('require%s*%(?%s*["\']ffi["\']') then
     md[#md + 1] = "---"
     md[#md + 1] = ""
-    md[#md + 1] = "Note: this package is FFI-backed and runs under the LuaVM host only."
+    md[#md + 1] = "Note: this package is FFI-backed and runs under the CLua host only."
     md[#md + 1] = ""
   end
   return table.concat(md, "\n")

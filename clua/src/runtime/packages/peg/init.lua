@@ -83,7 +83,7 @@ function M.any()
 end
 
 function M.seq(...)
-    -- LuaVM JIT does not support OP_SETLIST(B=0) from `{...}`, so collect
+    -- CLua JIT does not support OP_SETLIST(B=0) from `{...}`, so collect
     -- via select() into a fresh table.
     local n = select("#", ...)
     local parts = {}

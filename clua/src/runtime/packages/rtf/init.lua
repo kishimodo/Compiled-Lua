@@ -170,7 +170,7 @@ function M.parse(s)
     local cur_para = { runs = {}, alignment = "left", style = nil }
     local cur_text = {}
     -- Wrap the first frame in a fresh table assignment to avoid the JIT
-    -- codegen path that fails on {func()} table constructors (the LuaVM
+    -- codegen path that fails on {func()} table constructors (the CLua
     -- bytecode emits OP_SETLIST B=0, which the JIT can't lower).
     local _init_state = new_state()
     local stack = {}

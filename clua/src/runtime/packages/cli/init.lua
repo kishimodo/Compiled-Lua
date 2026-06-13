@@ -151,7 +151,7 @@ end
 -- ===== Parse ========================================================
 
 local function default_argv()
-    -- LuaVM passes argv through the global `arg` table just like stock Lua.
+    -- CLua passes argv through the global `arg` table just like stock Lua.
     if arg then
         local out = {}
         for i = 1, #arg do out[i] = arg[i] end

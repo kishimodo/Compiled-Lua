@@ -5,8 +5,8 @@
  *  metatable lives in the Lua registry under "ffi.cdata.mt".
  */
 
-#ifndef LUAVM_FFI_CDATA_H
-#define LUAVM_FFI_CDATA_H
+#ifndef CLUA_FFI_CDATA_H
+#define CLUA_FFI_CDATA_H
 
 #include "ffi/ctype.h"
 
@@ -123,4 +123,4 @@ PCData_T FfiGetCData( lua_State *L, int Idx );
  */
 int FfiIsCData( lua_State *L, int Idx );
 
-#endif /* LUAVM_FFI_CDATA_H */
+#endif /* CLUA_FFI_CDATA_H */

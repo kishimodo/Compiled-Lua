@@ -39,7 +39,7 @@ the honest valuation from the optimizer status doc), and **stale markers**
    against compiled exes.~~ **DONE 2026-06-12:** the v1 JIT compiler
    (jit/codegen, codegen_ffi, emit_x64, regalloc) is gone; `jit/dispatch.c`
    is cache-only and `jit/runtime.c` (the `Rt_*` AOT runtime helpers) is
-   lookup-only. luavm always interprets (`-i` is a no-op). The behavioral,
+   lookup-only. clua-interp always interprets (`-i` is a no-op). The behavioral,
    differential, conformance and fuzz layers all run aotc-compiled exes
    against the interpreter oracle, which guards the shared `Rt_*` helpers
    directly.

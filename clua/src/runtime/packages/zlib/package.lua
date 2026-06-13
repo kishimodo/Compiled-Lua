@@ -9,6 +9,6 @@ return {
     },
     requires        = {},
     requires_native = {
-        { dll = "zlib1.dll", mode_default = "embed", env_var = "LUAVM_ZLIB_DLL" },
+        { dll = "zlib1.dll", mode_default = "embed", env_var = "CLUA_ZLIB_DLL" },
     },
 }

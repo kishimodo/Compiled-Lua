@@ -1,17 +1,17 @@
 -- tools/run-tests.lua : CLua's universal, auto-discovering test runner.
 --
 -- Run it via  build\run-tests.bat  (which sets the MinGW/make PATH so gcc/ar are
--- found, builds the products, then calls  build\bin\luavm.exe tools\run-tests.lua).
+-- found, builds the products, then calls  build\bin\clua-interp.exe tools\run-tests.lua).
 --
 -- The two execution engines are COMPILED NATIVE EXES (aotc/clua-emitted PEs)
--- and the REFERENCE BYTECODE INTERPRETER (luavm.exe; `-i` is accepted as a
+-- and the REFERENCE BYTECODE INTERPRETER (clua-interp.exe; `-i` is accepted as a
 -- no-op). The v1 JIT has been removed from the tree, so every differential
 -- layer diffs a compiled exe against the interpreter oracle.
 --
 -- It discovers and runs the test layers with ZERO per-test wiring -- drop a file
 -- in the matching folder and it runs; delete one and nothing breaks:
 --   tests/unit/test_*.c        C unit tests, compiled against build/bin/libcluatest.a
---   tests/lua/*.lua            behavioral, run under luavm.exe (interpreter) AND
+--   tests/lua/*.lua            behavioral, run under clua-interp.exe (interpreter) AND
 --                              as an aotc-compiled exe (same pass criteria)
 --   tests/packages/test_*.lua  package tests, compiled with compiler.exe then run
 --   tests/differential/*.lua   aotc-compiled at -O0 and -O1; stdout must match -i
@@ -23,7 +23,7 @@
 -- (e.g. a package whose external DLL is absent); otherwise FAILS.
 
 local BIN      = "build\\bin"
-local LUAVM    = BIN .. "\\luavm.exe"
+local CLUA    = BIN .. "\\clua-interp.exe"
 local COMPILER = BIN .. "\\compiler.exe"
 local AOTC     = BIN .. "\\aotc.exe"
 local ARCHIVE  = BIN .. "\\libcluatest.a"
@@ -153,7 +153,7 @@ local function header(t) print("\n===== " .. t .. " =====") end
 -- imgui host (symbols not in this archive). Everything else is fair game; an
 -- archive member is only linked into a test that references its symbols.
 local ARCHIVE_EXCLUDE = {
-  ["main.o"] = true, ["luavm_main.o"] = true,
+  ["main.o"] = true, ["clua_interp_main.o"] = true,
   ["runtime_init.o"] = true, ["native_loader.o"] = true,
   -- aot_entry.c (added by a later task) defines main() for compiled PEs; it
   -- must stay out of the unit-test archive, like the other *_main objects.
@@ -230,7 +230,7 @@ local function run_lua()
     if not src:match("/_") then         -- skip _helpers.lua etc.
       local name = basename(src, "%.lua")
       -- engine 1: the reference interpreter
-      local out, rc = capture(guard('"' .. LUAVM .. '" -i "' .. src .. '" 2>&1'))
+      local out, rc = capture(guard('"' .. CLUA .. '" -i "' .. src .. '" 2>&1'))
       record("lua", name, out, rc)
       -- engine 2: the same test compiled to a native exe (aotc -O1)
       local why = LUA_INTERP_ONLY[name]
@@ -261,7 +261,7 @@ end
 -- ---- phase 4: package tests -----------------------------------------------
 
 -- Source-path LUA_PATH so the script runner can `require` builtin packages
--- straight from src/ -- the compiled exe embeds them, but luavm.exe does not.
+-- straight from src/ -- the compiled exe embeds them, but clua-interp.exe does not.
 local PKG_LUA_PATH = "clua\\src\\runtime\\packages\\?\\init.lua;clua\\src\\runtime\\packages\\?.lua"
 
 local function file_exists(path)
@@ -285,7 +285,7 @@ local function run_packages()
       record("package", name, out, rc)
 
       -- Second-engine cross-check: run the same test source under the
-      -- reference interpreter (luavm.exe -i, LUA_PATH pointed at the package
+      -- reference interpreter (clua-interp.exe -i, LUA_PATH pointed at the package
       -- sources) and diff its stdout against the compiled exe's stdout. This
       -- validates the whole embed pipeline (bytecode blob, compression,
       -- preload registration) against the plain-source oracle. Packages whose
@@ -293,7 +293,7 @@ local function run_packages()
       -- source require -- those are covered by the compiled run alone.
       if rc == 0 and out:find("%[%+%] PASS") then
         local setenv = 'set "LUA_PATH=' .. PKG_LUA_PATH .. '" && '
-        local oi, ri = capture(setenv .. guard('"' .. LUAVM .. '" -i "' .. src .. '" 2>nul'))
+        local oi, ri = capture(setenv .. guard('"' .. CLUA .. '" -i "' .. src .. '" 2>nul'))
         if ri == 0 then
           local oe, re = capture(guard('"' .. exe .. '" 2>nul'))   -- stdout only
           if re == 0 and oe == oi then
@@ -316,7 +316,7 @@ end
 -- ---- phase 5: differential (compiled exe vs interpreter) -------------------
 
 -- Compile each tests/differential/*.lua with aotc.exe into a real PE, run it,
--- and diff its stdout against luavm.exe -i on the same source (the arbiter: a
+-- and diff its stdout against clua-interp.exe -i on the same source (the arbiter: a
 -- compiled program must match the interpreter byte-for-byte). Each file is
 -- exercised at BOTH -O0 (faithful boxed baseline) and -O1 (the optimizer's
 -- typed fastpaths), so the optimizer can never silently change behavior.
@@ -332,7 +332,7 @@ local function run_aot_differential()
                        { flag = "-O1", tag = "O1" } }
   for _, src in ipairs(glob("tests/differential", "*.lua")) do
     local base = basename(src, "%.lua")
-    local oi, ri = capture(guard('"' .. LUAVM .. '" -i "' .. src .. '" 2>nul'))
+    local oi, ri = capture(guard('"' .. CLUA .. '" -i "' .. src .. '" 2>nul'))
     for _, lvl in ipairs(OPT_LEVELS) do
       local name = base .. "[" .. lvl.tag .. "]"
       local exe  = TESTBIN .. "\\" .. base .. "_" .. lvl.tag .. ".exe"
@@ -399,7 +399,7 @@ local function run_conformance()
   for _, src in ipairs(glob("tests/conformance", "*.lua")) do
     local base   = basename(src, "%.lua")
     local reason = diff_xfail_reason(src)
-    local oi, ri = capture(guard('"' .. LUAVM .. '" -i "' .. src .. '" 2>nul'))
+    local oi, ri = capture(guard('"' .. CLUA .. '" -i "' .. src .. '" 2>nul'))
     -- The interpreter is the oracle: it must run clean and produce output.
     local oracle_ok = (ri == 0 and #oi > 0)
     for _, lvl in ipairs(OPT_LEVELS) do
@@ -453,7 +453,7 @@ local function run_suites()
   -- and the rover suites) so new ones are gated automatically.
   for _, src in ipairs(glob("tools", "test-*.lua")) do
     local name = basename(src, "%.lua")
-    local out, rc = capture(guard('"' .. LUAVM .. '" "tools\\' .. name .. '.lua" 2>&1'))
+    local out, rc = capture(guard('"' .. CLUA .. '" "tools\\' .. name .. '.lua" 2>&1'))
     record("suite", name, out, rc)
   end
 end
@@ -466,7 +466,7 @@ end
 -- seeds keep CI deterministic; long campaigns live in build\run-fuzz.bat.
 local function run_fuzz_smoke()
   header("Differential fuzz smoke (tools/fuzz-differential.lua, seeds 1-25)")
-  local out, rc = capture(guard('"' .. LUAVM .. '" tools\\fuzz-differential.lua 1 25 2>&1'))
+  local out, rc = capture(guard('"' .. CLUA .. '" tools\\fuzz-differential.lua 1 25 2>&1'))
   record("fuzz", "seeds-1-25", out, rc)
   -- surface the fuzzer's own summary line for context
   local summary = out:match("%[fuzz%][^\r\n]*")

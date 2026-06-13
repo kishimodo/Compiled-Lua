@@ -1,4 +1,4 @@
-# LuaVM Test System — Design (2026-06-07)
+# CLua Test System — Design (2026-06-07)
 
 Status: approved, implementing. Supersedes the deleted `tests/` tree and the
 ~50 hand-written C-unit Makefile rules (which broke the build the moment a file

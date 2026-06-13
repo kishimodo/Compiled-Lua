@@ -34,8 +34,8 @@
  *    coroutine.close(co)
  */
 
-#ifndef LUAVM_RUNTIME_CORO_H
-#define LUAVM_RUNTIME_CORO_H
+#ifndef CLUA_RUNTIME_CORO_H
+#define CLUA_RUNTIME_CORO_H
 
 #include "lua.h"
 
@@ -60,4 +60,4 @@ void Coro_InitProcess( void );
  */
 void Coro_InitThreadAsFiber( void );
 
-#endif /* LUAVM_RUNTIME_CORO_H */
+#endif /* CLUA_RUNTIME_CORO_H */

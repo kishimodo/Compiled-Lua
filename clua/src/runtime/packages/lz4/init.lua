@@ -529,7 +529,7 @@ local _native_state -- nil = unprobed, false = absent, table = loaded
 
 local function probe_native()
     if _native_state ~= nil then return _native_state end
-    local override = os.getenv("LUAVM_LZ4_DLL")
+    local override = os.getenv("CLUA_LZ4_DLL")
     local names    = { "liblz4", "lz4", "liblz4.dll", "lz4.dll" }
     if override and override ~= "" then
         table.insert(names, 1, override)

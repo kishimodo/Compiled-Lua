@@ -30,13 +30,13 @@ if errorlevel 1 (
 
 pushd %~dp0..
 
-echo [*] building products (compiler, luavm, embedded)...
+echo [*] building products (compiler, clua-interp, embedded)...
 rem `embedded` = lua-embedded + runtime-embedded + packages-embedded. The package
 rem tests compile via compiler.exe, which LINKS runtime-embedded.a +
 rem liblua54-embedded.a; building only `packages-embedded` leaves those archives
 rem missing after a `clean`, and every package test then fails to link with
 rem "cannot find build/bin/runtime-embedded.a".
-make -f build/Makefile compiler luavm embedded luac-objs
+make -f build/Makefile compiler clua-interp embedded luac-objs
 if errorlevel 1 (
     echo [-] product build failed
     set RC=1
@@ -53,7 +53,7 @@ if errorlevel 1 (
 )
 
 echo [*] running test suite...
-build\bin\luavm.exe tools\run-tests.lua
+build\bin\clua-interp.exe tools\run-tests.lua
 set RC=%ERRORLEVEL%
 
 :done

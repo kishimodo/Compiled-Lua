@@ -1,10 +1,10 @@
 -- tools/fuzz-differential.lua : differential fuzzer -- compiled exe vs interpreter.
 --
---   build\bin\luavm.exe tools\fuzz-differential.lua [start_seed] [count] [--keep]
+--   build\bin\clua-interp.exe tools\fuzz-differential.lua [start_seed] [count] [--keep]
 --
 -- Generates deterministic Lua programs from a seeded PRNG, compiles each with
 -- aotc.exe at -O1 into a native PE, runs it, and byte-compares its stdout
--- against the bytecode interpreter (luavm.exe -i). The interpreter is the
+-- against the bytecode interpreter (clua-interp.exe -i). The interpreter is the
 -- oracle: any divergence is an AOT codegen/optimizer bug. A divergence is
 -- re-run once to confirm (filters environmental flakiness), then the case is
 -- saved to tests/fuzz-failures/fuzz_seed_<n>.lua with a header ready for
@@ -25,7 +25,7 @@
 --   * never print tables/functions/userdata (addresses)
 --   * bounded loops and recursion; no clock/time/random in generated code
 
--- luavm.exe passes script arguments via the global `arg` table (stock-Lua
+-- clua-interp.exe passes script arguments via the global `arg` table (stock-Lua
 -- convention: arg[0] = script name, arg[1..] = arguments), not as chunk `...`.
 local args  = arg or { ... }
 local START = tonumber(args[1] or "1")  or 1
@@ -33,7 +33,7 @@ local COUNT = tonumber(args[2] or "100") or 100
 local KEEP  = (args[3] == "--keep")
 
 local BIN      = "build\\bin"
-local LUAVM    = BIN .. "\\luavm.exe"
+local CLUA    = BIN .. "\\clua-interp.exe"
 local AOTC     = BIN .. "\\aotc.exe"
 local CASE     = BIN .. "\\tests\\_fuzz_case.lua"
 local CASEEXE  = BIN .. "\\tests\\_fuzz_case.exe"
@@ -471,7 +471,7 @@ local function run_case()
   else
     oa, ra = capture(guard('"' .. CASEEXE .. '" 2>nul'))
   end
-  local oi, ri = capture(guard('"' .. LUAVM .. '" -i "' .. CASE .. '" 2>nul'))
+  local oi, ri = capture(guard('"' .. CLUA .. '" -i "' .. CASE .. '" 2>nul'))
   return oa, ra, oi, ri
 end
 
@@ -507,7 +507,7 @@ for seed = START, START + COUNT - 1 do
     local saved = FAILDIR .. "\\fuzz_seed_" .. seed .. ".lua"
     write_file(saved,
       "-- compiled-vs-interpreter DIVERGENCE found by tools/fuzz-differential.lua (seed " .. seed .. ").\n" ..
-      "-- Reproduce:  build\\bin\\aotc.exe -O1 <this file> -o case.exe && case.exe   vs   build\\bin\\luavm.exe -i <this file>\n" ..
+      "-- Reproduce:  build\\bin\\aotc.exe -O1 <this file> -o case.exe && case.exe   vs   build\\bin\\clua-interp.exe -i <this file>\n" ..
       "-- To track as a known bug: add `-- DIFF-XFAIL: <reason>` and move into tests/conformance/.\n" ..
       program)
     print(string.format("  [-] FAIL fuzz seed %d (compiled exe vs -i divergence%s) -> %s",

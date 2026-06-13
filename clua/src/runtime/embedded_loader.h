@@ -4,8 +4,8 @@
  *  require("foo.bar") resolves to a bytecode chunk inside the blob.
  */
 
-#ifndef LUAVM_RUNTIME_EMBEDDED_LOADER_H
-#define LUAVM_RUNTIME_EMBEDDED_LOADER_H
+#ifndef CLUA_RUNTIME_EMBEDDED_LOADER_H
+#define CLUA_RUNTIME_EMBEDDED_LOADER_H
 
 #include "lua.h"
 #include "runtime/blob_reader.h"
@@ -16,4 +16,4 @@
  */
 void EmbeddedLoader_Install( lua_State *L, PBLOB_READER_T Reader );
 
-#endif /* LUAVM_RUNTIME_EMBEDDED_LOADER_H */
+#endif /* CLUA_RUNTIME_EMBEDDED_LOADER_H */

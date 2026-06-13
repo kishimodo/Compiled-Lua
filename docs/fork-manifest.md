@@ -220,7 +220,7 @@ emit native package objects. Absent external DLL → `SKIP`.
 **Tests** — reuse the 5-layer auto-discovered suite (`tests/unit`, `tests/lua`,
 `tests/packages`, `tests/differential`; runner `tools/run-tests.lua`,
 `build\run-tests.bat`) and **add the AOT differential oracle**: compile a printing
-script with **LuaC (native)**, run the same script under **v1 `luavm.exe -i`
+script with **LuaC (native)**, run the same script under **v1 `clua-interp.exe -i`
 (interpreter)**, **diff stdout**. v1 is the frozen oracle; never edit v1 to make a
 diff pass. Keep the `XFAIL`/`XPASS` discipline (CLAUDE.md). New C-unit tests cover
 the IR builder, each opt pass, emitter relocations, PE sections, and unwind-info
@@ -228,5 +228,5 @@ correctness.
 
 ---
 
-*Provenance: six parallel subsystem deep-reads of LuaVM v1 (front-end, runtime
+*Provenance: subsystem deep-reads of the codebase (front-end, runtime
 core, FFI, JIT/codegen, PE link, packages/tests), 190 file reads.*

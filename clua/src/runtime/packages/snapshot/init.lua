@@ -14,7 +14,7 @@
 --   snapshot.update(on?)                      force "update on mismatch" mode for the session
 --   snapshot.is_update_mode()                 -> bool (env var or update() flag set)
 --
--- Env var: LUAVM_UPDATE_SNAPSHOTS=1 (preferred), UPDATE_SNAPSHOTS=1 (legacy) -> overwrite stored snapshots.
+-- Env var: CLUA_UPDATE_SNAPSHOTS=1 (preferred), UPDATE_SNAPSHOTS=1 (legacy) -> overwrite stored snapshots.
 --
 -- opts:
 --   format     "json" | "text" | "lua_repr"   default "lua_repr"
@@ -49,7 +49,7 @@ function M.is_update_mode()
     if _state.update_mode then return true end
     local g = os.getenv
     if not g then return false end
-    local a = g("LUAVM_UPDATE_SNAPSHOTS")
+    local a = g("CLUA_UPDATE_SNAPSHOTS")
     if a == "1" or a == "true" then return true end
     local b = g("UPDATE_SNAPSHOTS")
     if b == "1" or b == "true" then return true end
@@ -298,10 +298,10 @@ local function should_update(opts)
     if opts.update == true then return true end
     if opts.update == false then return false end
     if _state.update_mode then return true end
-    -- Env var fallback (LUAVM_UPDATE_SNAPSHOTS preferred; UPDATE_SNAPSHOTS legacy).
+    -- Env var fallback (CLUA_UPDATE_SNAPSHOTS preferred; UPDATE_SNAPSHOTS legacy).
     local g = os.getenv
     if not g then return false end
-    local a = g("LUAVM_UPDATE_SNAPSHOTS")
+    local a = g("CLUA_UPDATE_SNAPSHOTS")
     if a == "1" or a == "true" then return true end
     local b = g("UPDATE_SNAPSHOTS")
     return b == "1" or b == "true"
@@ -375,7 +375,7 @@ function M.match(a, b, c)
 
     local d = diff(existing, serialized)
     local msg = string.format(
-        "snapshot mismatch: %s [%s]\n%s\n(rerun with LUAVM_UPDATE_SNAPSHOTS=1 to overwrite)",
+        "snapshot mismatch: %s [%s]\n%s\n(rerun with CLUA_UPDATE_SNAPSHOTS=1 to overwrite)",
         name, store_path, d)
     error(msg, 2)
 end

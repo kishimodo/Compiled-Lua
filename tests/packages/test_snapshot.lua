@@ -62,7 +62,7 @@ ok(snapshot.is_update_mode() == false, "update(false) clears update mode")
 -- ===== match() round trip in an isolated temp dir =====
 -- Make every run identical: remove the store first so match() always takes the
 -- "created" branch, then a second match with the same value returns ok (no diff).
-local tmpdir = (os.getenv("TEMP") or os.getenv("TMP") or ".") .. "/luavm_snap_test/"
+local tmpdir = (os.getenv("TEMP") or os.getenv("TMP") or ".") .. "/clua_snap_test/"
 tmpdir = tmpdir:gsub("\\", "/")
 snapshot.set_dir(tmpdir)
 -- Force a stable test_file stem so the store filename is deterministic.

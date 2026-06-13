@@ -9,7 +9,7 @@ local function ok(c, m) if not c then fails = fails + 1; print("[-] FAIL test_mm
 -- Build a deterministic temp path (no random/time; fixed name, cleaned at end).
 local tmpdir = os.getenv("TEMP") or os.getenv("TMP") or "."
 local sep = tmpdir:find("\\") and "\\" or "/"
-local fpath = tmpdir .. sep .. "luavm_mmap_test_fixed.bin"
+local fpath = tmpdir .. sep .. "clua_mmap_test_fixed.bin"
 local CONTENT = "Hello, mmap world! 0123456789"   -- 29 bytes
 
 -- Write the fixture file.
@@ -75,7 +75,7 @@ end
 
 -- ===== error paths =====
 ok(select(1, mmap.open(fpath, "bogus")) == nil, "unknown mode returns nil + err")
-ok(select(1, mmap.open(tmpdir .. sep .. "luavm_definitely_missing_file_zzz.bin", "r")) == nil,
+ok(select(1, mmap.open(tmpdir .. sep .. "clua_definitely_missing_file_zzz.bin", "r")) == nil,
    "opening a missing file returns nil + err")
 
 -- ===== anonymous mapping (pagefile-backed) =====

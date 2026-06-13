@@ -4,7 +4,7 @@
 -- metamethods can return ANY type. The result was wrongly marked proven-INT,
 -- poisoning downstream tag-check elision -> silent miscompile (raw bits treated
 -- as integers). Fixed: those ops yield UNKNOWN unless operands are proven
--- primitive integers. Compiled by aotc and byte-diffed vs luavm.exe -i.
+-- primitive integers. Compiled by aotc and byte-diffed vs clua-interp.exe -i.
 
 -- __len returning a float, then arithmetic on the result
 local tf = setmetatable({}, { __len = function() return 3.5 end })

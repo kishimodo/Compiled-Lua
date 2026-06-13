@@ -45,7 +45,7 @@ static int HashFile( const char *Path, uint8_t Digest[ 32 ] ) {
 }
 
 /* Resolve the per-binary extraction directory. Prefers
-   %LOCALAPPDATA%\luavm\<hash> (per-user-scoped, not world-writable)
+   %LOCALAPPDATA%\clua-interp\<hash> (per-user-scoped, not world-writable)
    over %TEMP%. Returns the chosen path in Dir; returns 1 on success. */
 static int ResolveExtractDir( char *Dir, size_t Cap ) {
     char Base[ MAX_PATH ] = { 0 };
@@ -53,10 +53,10 @@ static int ResolveExtractDir( char *Dir, size_t Cap ) {
         /* Fall back to TEMP (per-user on modern Windows but world-
            writable on shared hosts). Document the trade-off. */
         if ( GetTempPathA( MAX_PATH, Base ) == 0 ) return 0;
-        snprintf( Dir, Cap, "%sluavm-%08x", Base, HashExePath( ) );
+        snprintf( Dir, Cap, "%sclua-%08x", Base, HashExePath( ) );
     } else {
         char Parent[ MAX_PATH ] = { 0 };
-        snprintf( Parent, sizeof( Parent ), "%s\\luavm", Base );
+        snprintf( Parent, sizeof( Parent ), "%s\\clua-interp", Base );
         CreateDirectoryA( Parent, NULL );  /* inherits user-only ACL */
         snprintf( Dir, Cap, "%s\\%08x", Parent, HashExePath( ) );
     }

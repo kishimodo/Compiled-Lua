@@ -159,7 +159,7 @@ end
 
 function M.load_corpus(corpus_dir)
     local out = {}
-    -- Portable directory listing via shell. We assume cmd.exe on the LuaVM
+    -- Portable directory listing via shell. We assume cmd.exe on the CLua
     -- host; this is a Windows-only project.
     local pipe = io.popen('dir /b "' .. corpus_dir:gsub("/", "\\") .. '" 2>nul')
     if not pipe then return out end

@@ -9,14 +9,14 @@
 --     download): install + WARNING text, list marks [FOREIGN] + warns,
 --     verify warns + passes, tamper -> verify fails, package.lua `entry`
 --     form, missing-init failure, and `add` recording source in toml + lock.
--- Run from the repo root by luavm.exe. No network access.
+-- Run from the repo root by clua-interp.exe. No network access.
 
 local function abscwd()
   local p = io.popen("cd"); if not p then return "." end
   local d = p:read("*a") or ""; p:close(); return (d:gsub("%s+$", ""))
 end
 local ROOT  = abscwd()
-local LUAVM = ROOT .. "\\build\\bin\\luavm.exe"
+local CLUA = ROOT .. "\\build\\bin\\clua-interp.exe"
 local PKG   = ROOT .. "\\rover\\src\\rover.lua"
 local TEMP  = os.getenv("TEMP") or "."
 local HOME  = TEMP .. "\\rover-foreign-home"      -- isolated CLUA_HOME store
@@ -51,7 +51,7 @@ end
 local function rover(args, extra, cwd)
   local pre = 'set "CLUA_HOME=' .. HOME .. '" && set "ROVER_REGISTRY=" && ' .. (extra or "")
   local cd  = cwd and ('cd /d "' .. cwd .. '" && ') or ""
-  return run(cd .. pre .. '"' .. LUAVM .. '" -i "' .. PKG .. '" ' .. args)
+  return run(cd .. pre .. '"' .. CLUA .. '" -i "' .. PKG .. '" ' .. args)
 end
 
 ----------------------------------------------------------------------
@@ -110,7 +110,7 @@ ok(M.OFFICIAL_REGISTRY == "https://raw.githubusercontent.com/kishimodo/CLua-Pack
 print("HOOK_OK")
 ]==])
   local c, out = run('set "ROVER_PKG_TEST=1" && set "ROVER_REGISTRY=" && "'
-                     .. LUAVM .. '" -i "' .. driver .. '"')
+                     .. CLUA .. '" -i "' .. driver .. '"')
   os.remove(driver)
   if c ~= 0 or not out:match("HOOK_OK") then
     fail("hook checks failed: " .. out:gsub("%s+", " "))
@@ -127,14 +127,14 @@ do
             .. 'io.write(_G.ROVER_PKG.default_registry())\n')
   -- B1: env var set (cwd = repo root, where rover\registry exists) -> env wins
   local c1, o1 = run('set "ROVER_PKG_TEST=1" && set "ROVER_REGISTRY=C:\\custom\\reg" && "'
-                     .. LUAVM .. '" -i "' .. driver .. '"')
+                     .. CLUA .. '" -i "' .. driver .. '"')
   if c1 ~= 0 or o1 ~= "C:\\custom\\reg" then
     os.remove(driver); fail("ROVER_REGISTRY should win over the dev checkout, got: " .. o1)
   end
   -- B2: cwd = %TEMP% (no rover\registry there), env unset -> OFFICIAL URL.
   --     Pure hook introspection -- nothing is fetched from the network.
   local c2, o2 = run('cd /d "' .. TEMP .. '" && set "ROVER_PKG_TEST=1" && set "ROVER_REGISTRY=" && "'
-                     .. LUAVM .. '" -i "' .. driver .. '"')
+                     .. CLUA .. '" -i "' .. driver .. '"')
   os.remove(driver)
   if c2 ~= 0 or o2 ~= OFFICIAL then
     fail("official-URL fallback: expected " .. OFFICIAL .. ", got: " .. o2)

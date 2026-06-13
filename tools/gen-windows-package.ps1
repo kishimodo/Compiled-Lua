@@ -1,4 +1,4 @@
-# Generate a LuaVM windows sub-package from Microsoft's win32metadata.
+# Generate a CLua windows sub-package from Microsoft's win32metadata.
 #
 # Two-stage pipeline:
 #   1. (PowerShell, this file) Download + cache the win32metadata NuGet,
@@ -6,7 +6,7 @@
 #   2. (C#, tools/winmd-gen/Program.cs) Read the winmd via
 #      System.Reflection.Metadata, decode every P/Invoke / struct /
 #      union / enum / constant in the requested namespace, emit a
-#      LuaVM packages/windows/<area>.lua file with proper ffi.cdef
+#      CLua packages/windows/<area>.lua file with proper ffi.cdef
 #      declarations.
 #
 # Usage:
@@ -38,7 +38,7 @@
 param(
     [Parameter(Mandatory=$true)] [string]$Namespace,
     [string]$OutFile,
-    [string]$CacheDir     = "$env:TEMP\luavm-winmd",
+    [string]$CacheDir     = "$env:TEMP\clua-interp-winmd",
     [string]$NugetVersion = "63.0.31-preview",
     [switch]$ListOnly,
     [switch]$Rebuild        # force rebuild of winmd-gen.dll

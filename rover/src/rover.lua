@@ -1,11 +1,11 @@
 -- rover -- the CLua package manager (local-first, R6 + v1.x).
 --
--- Run by luavm.exe:  luavm.exe -i rover/src/rover.lua <cmd> ...
+-- Run by clua-interp.exe:  clua-interp.exe -i rover/src/rover.lua <cmd> ...
 --
 -- Model: a single GLOBAL content store -- install once, `require` from any
 -- project. The store is %CLUA_HOME%\packages, or %LOCALAPPDATA%\clua\packages.
 -- compiler.exe resolves `require "<name>"` against this store at compile time
--- (so it bundles the package into the standalone exe), and luavm.exe -i adds
+-- (so it bundles the package into the standalone exe), and clua-interp.exe -i adds
 -- it to package.path so the interpreter can require it at runtime. Installing
 -- the same package again is idempotent (it overwrites the same store path), so
 -- a forgotten reinstall cannot corrupt state.

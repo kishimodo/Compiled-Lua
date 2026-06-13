@@ -831,7 +831,7 @@ const char *zlibVersion(void);
 
 local function probe_native()
     if _native_state ~= nil then return _native_state end
-    local override = os.getenv("LUAVM_ZLIB_DLL")
+    local override = os.getenv("CLUA_ZLIB_DLL")
     local names    = { "zlibwapi", "zlib1", "zlib", "libz" }
     if override and override ~= "" then
         table.insert(names, 1, override)

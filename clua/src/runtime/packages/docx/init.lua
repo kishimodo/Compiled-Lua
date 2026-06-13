@@ -521,7 +521,7 @@ local function _build_app(meta)
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
         '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"',
         ' xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">',
-        '<Application>', xml_escape(meta.application or "LuaVM docx"), '</Application>',
+        '<Application>', xml_escape(meta.application or "CLua docx"), '</Application>',
         meta.company and ("<Company>" .. xml_escape(meta.company) .. "</Company>") or "",
         '</Properties>',
     })

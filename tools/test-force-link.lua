@@ -1,10 +1,10 @@
 -- R4.1 automated test: the compiler's -L/--link flag force-bundles a package
--- the static require scan cannot see. Run by luavm.exe (shell-agnostic).
+-- the static require scan cannot see. Run by clua-interp.exe (shell-agnostic).
 -- Compiles the dynamic-require entry both ways and asserts:
 --   without -L  -> produced exe fails at runtime (require not bundled)
 --   with -L json -> produced exe succeeds
 local COMPILER = "build\\bin\\compiler.exe"   -- backslashes: os.execute -> cmd
-local TMP      = (os.getenv("TEMP") or os.getenv("TMP") or ".") .. "\\luavm-fltest"
+local TMP      = (os.getenv("TEMP") or os.getenv("TMP") or ".") .. "\\clua-interp-fltest"
 os.execute('if not exist "' .. TMP .. '" mkdir "' .. TMP .. '" >nul 2>&1')
 
 -- Self-contained entry fixture (written to TMP so the test needs no on-disk

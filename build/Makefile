@@ -1,4 +1,4 @@
-# LuaVM build script. Run from the project root: `make -f build/Makefile <target>`
+# CLua build script. Run from the project root: `make -f build/Makefile <target>`
 # or via `build/build.bat`.
 
 # Force cmd.exe as the recipe shell. Every recipe here is cmd syntax
@@ -27,7 +27,7 @@ CFLAGS      += -DCLUA_TARGET_WINDOWS_X64=1
 all: help
 
 help:
-	@echo "LuaVM build targets:"
+	@echo "CLua build targets:"
 	@echo "  make compiler   - build compiler.exe"
 	@echo "  make runtime    - build runtime.a"
 	@echo "  make runluac    - build runluac.exe (M2 scaffolding)"
@@ -200,7 +200,7 @@ RUNTIME_OBJS := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/obj/%.o,$(RUNTIME_SRCS))
 # --- runtime -- embedded variant (size + hardening tuned) ---------------
 # Same source set, compiled with the embedded CFLAGS so compiler-emitted
 # PEs link a debug-stripped + size-optimized + stack-protected runtime
-# instead of the host (luavm.exe / test) variant.
+# instead of the host (clua-interp.exe / test) variant.
 # Note: NO -fdata-sections here. The runtime has several MB-scale
 # zero-initialized arrays (g_Enums, g_Slots, g_AllTypes in ffi/ctype.c
 # and similar) that GCC + mingw demote out of .bss into .data when
@@ -237,7 +237,7 @@ $(BUILD_DIR)/runtime-embedded.a: $(RUNTIME_EMB_OBJS)
 # The ONLY remaining difference is -DLUAC_AOT_RUNTIME, kept solely for
 # coro.c's TLS choice: a plain static (single-OS-thread AOT exes) instead of
 # __thread, which would drag libgcc emutls + ~23 KB of winpthread into every
-# compiled exe. runtime-embedded.a (luavm.exe / v1 compiler.exe PEs, which
+# compiled exe. runtime-embedded.a (clua-interp.exe / v1 compiler.exe PEs, which
 # may see foreign threads via FFI callbacks) keeps real TLS.
 AOT_RT_SRCS := $(RUNTIME_SRCS)
 AOT_RT_CFLAGS := $(EMBEDDED_RT_CFLAGS) -DLUAC_AOT_RUNTIME=1
@@ -396,18 +396,18 @@ $(BUILD_DIR)/runtime.a: $(RUNTIME_OBJS)
 runtime: $(BUILD_DIR)/runtime.a packages
 packages: $(PACKAGE_OBJS)
 
-# --- standalone luavm.exe (REPL + script runner) --------------------------
-LUAVM_SRC := $(SRC_DIR)/runtime/luavm_main.c
-LUAVM_OBJ := $(BUILD_DIR)/obj/runtime/luavm_main.o
+# --- standalone clua-interp.exe (REPL + script runner) --------------------------
+CLUA_SRC := $(SRC_DIR)/runtime/clua_interp_main.c
+CLUA_OBJ := $(BUILD_DIR)/obj/runtime/clua_interp_main.o
 
-$(LUAVM_OBJ): $(LUAVM_SRC) | $(BUILD_DIR)/obj/runtime
+$(CLUA_OBJ): $(CLUA_SRC) | $(BUILD_DIR)/obj/runtime
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/luavm.exe: $(LUAVM_OBJ) $(BUILD_DIR)/runtime.a $(PACKAGE_OBJS) $(BUILD_DIR)/liblua54.a
-	$(CC) $(CFLAGS) -o $@ $(LUAVM_OBJ) $(BUILD_DIR)/runtime.a $(PACKAGE_OBJS) $(BUILD_DIR)/liblua54.a -lm -lkernel32 -ladvapi32 -liphlpapi -lpsapi
+$(BUILD_DIR)/clua-interp.exe: $(CLUA_OBJ) $(BUILD_DIR)/runtime.a $(PACKAGE_OBJS) $(BUILD_DIR)/liblua54.a
+	$(CC) $(CFLAGS) -o $@ $(CLUA_OBJ) $(BUILD_DIR)/runtime.a $(PACKAGE_OBJS) $(BUILD_DIR)/liblua54.a -lm -lkernel32 -ladvapi32 -liphlpapi -lpsapi
 
-.PHONY: luavm
-luavm: $(BUILD_DIR)/luavm.exe
+.PHONY: clua-interp
+clua-interp: $(BUILD_DIR)/clua-interp.exe
 
 # --- ffi -------------------------------------------------------------------
 
@@ -464,7 +464,7 @@ runluac: $(BUILD_DIR)/runluac.exe
 # cannot break the build. Run the full suite with:
 #   build\run-tests.bat                       (builds products, then runs them)
 # or, with the products already built:
-#   build\bin\luavm.exe tools\run-tests.lua
+#   build\bin\clua-interp.exe tools\run-tests.lua
 .PHONY: test
 # `embedded` (= lua-embedded + runtime-embedded + packages-embedded), not just
 # packages-embedded: compiler.exe links build/bin/liblua54-embedded.a and
@@ -472,8 +472,8 @@ runluac: $(BUILD_DIR)/runluac.exe
 # them built. Depending only on packages-embedded made `make test` rely on a
 # cache restore (CI) or a previous build (local) for the two archives -- a cold
 # tree failed with "cannot find build/bin/runtime-embedded.a".
-test: compiler luavm embedded luac-objs
-	$(BUILD_DIR)/luavm.exe $(ROOT)/tools/run-tests.lua
+test: compiler clua-interp embedded luac-objs
+	$(BUILD_DIR)/clua-interp.exe $(ROOT)/tools/run-tests.lua
 # --- ImGui (Dear ImGui + cimgui + Win32/DX11 backends) --------------------
 # Compiled into imgui.a. The compiler.exe link step pulls this in only when
 # the user's Lua program statically requires "imgui" (auto-detect via the

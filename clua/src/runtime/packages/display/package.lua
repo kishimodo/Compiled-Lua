@@ -1,4 +1,4 @@
--- LuaVM display package manifest.
+-- CLua display package manifest.
 return {
     name        = "display",
     version     = "0.1",

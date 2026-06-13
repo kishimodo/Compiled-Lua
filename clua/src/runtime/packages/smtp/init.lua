@@ -21,7 +21,7 @@
 --       headers      = { ["X-Custom"] = "value" }      -- extra headers
 --       tls_opts     = { verify=..., server_name=... }
 --       timeout      = ms (default 30000)
---       hostname     = HELO/EHLO identity (default "luavm.local")
+--       hostname     = HELO/EHLO identity (default "clua-interp.local")
 --
 --   smtp.build_message(opts) -> string  -- the RFC 5322 message body
 --     useful for callers who want to ship the message via a different
@@ -125,7 +125,7 @@ end
 local _boundary_seq = 0
 local function gen_boundary()
     _boundary_seq = _boundary_seq + 1
-    return string.format("----=LuaVMSMTP_%d_%d", os.time(), _boundary_seq)
+    return string.format("----=CLuaSMTP_%d_%d", os.time(), _boundary_seq)
 end
 
 -- Generate an RFC 5322 Date header from os.time().
@@ -324,7 +324,7 @@ end
 -- ============================================================
 
 local function ehlo(conn, hostname)
-    local ok, err = send_line(conn, "EHLO " .. (hostname or "luavm.local"))
+    local ok, err = send_line(conn, "EHLO " .. (hostname or "clua-interp.local"))
     if not ok then return nil, err end
     local code, text = read_reply(conn)
     if code ~= 250 then return nil, "EHLO failed: " .. tostring(text) end

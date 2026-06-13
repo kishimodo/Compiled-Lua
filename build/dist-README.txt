@@ -18,7 +18,7 @@ Shared runtime (optional)
   Copy clua-rt.dll next to your exe (or put it on PATH). The default build
   stays fully static and single-file.
 
-  rover init                    start a project (luavm.toml)
+  rover init                    start a project (rover.toml)
   rover add <package>           add a dependency
   rover install                 reproducible install from the lockfile
 

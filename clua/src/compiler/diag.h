@@ -2,8 +2,8 @@
  * + source line + caret) and an advisory lint pass (warnings/info), so broken
  * code fails to compile with a clear, located message and questionable-but-valid
  * code compiles with warnings. */
-#ifndef LUAVM_COMPILER_DIAG_H
-#define LUAVM_COMPILER_DIAG_H
+#ifndef CLUA_COMPILER_DIAG_H
+#define CLUA_COMPILER_DIAG_H
 
 #include <stddef.h>
 
@@ -34,4 +34,4 @@ int Diag_RunLint( const char *SourcePath, const char *LintSource,
  * NULL on failure. Helper for loading the lint source / source snippets. */
 char *Diag_SlurpFile( const char *Path, size_t *OutLen );
 
-#endif /* LUAVM_COMPILER_DIAG_H */
+#endif /* CLUA_COMPILER_DIAG_H */

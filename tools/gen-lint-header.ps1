@@ -14,8 +14,8 @@ $bytes = [System.IO.File]::ReadAllBytes($In)
 
 $sb = New-Object System.Text.StringBuilder
 [void]$sb.AppendLine("/* AUTO-GENERATED from $([System.IO.Path]::GetFileName($In)) by tools/gen-lint-header.ps1 -- do not edit. */")
-[void]$sb.AppendLine("#ifndef LUAVM_GEN_LINT_SRC_H")
-[void]$sb.AppendLine("#define LUAVM_GEN_LINT_SRC_H")
+[void]$sb.AppendLine("#ifndef CLUA_GEN_LINT_SRC_H")
+[void]$sb.AppendLine("#define CLUA_GEN_LINT_SRC_H")
 [void]$sb.AppendLine("static const unsigned char g_LintSource[] = {")
 
 $line = "    "
@@ -33,7 +33,7 @@ if ($line.Trim().Length -gt 0) { [void]$sb.AppendLine($line) }
 
 [void]$sb.AppendLine("};")
 [void]$sb.AppendLine("static const unsigned int g_LintSourceLen = $($bytes.Length)u;")
-[void]$sb.AppendLine("#endif /* LUAVM_GEN_LINT_SRC_H */")
+[void]$sb.AppendLine("#endif /* CLUA_GEN_LINT_SRC_H */")
 
 # ASCII, no BOM -- gcc is happy and the file diffs cleanly.
 $enc = New-Object System.Text.UTF8Encoding($false)

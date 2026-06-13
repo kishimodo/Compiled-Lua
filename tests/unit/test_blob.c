@@ -29,9 +29,9 @@ int main( void ) {
     CHECK( Result.BytesLen > 0 );
 
     /* Validate header fields. */
-    PLUAVM_BLOB_HEADER_T Hdr = (PLUAVM_BLOB_HEADER_T)Result.Bytes;
-    CHECK_EQ_INT( (int)Hdr->Magic,      (int)LUAVM_BLOB_MAGIC );
-    CHECK_EQ_INT( (int)Hdr->Version,    (int)LUAVM_BLOB_VERSION );
+    PCLUA_BLOB_HEADER_T Hdr = (PCLUA_BLOB_HEADER_T)Result.Bytes;
+    CHECK_EQ_INT( (int)Hdr->Magic,      (int)CLUA_BLOB_MAGIC );
+    CHECK_EQ_INT( (int)Hdr->Version,    (int)CLUA_BLOB_VERSION );
     CHECK_EQ_INT( (int)Hdr->Count,      2 );
     CHECK_EQ_INT( (int)Hdr->EntryIndex, 0 );
     CHECK_EQ_INT( (int)Hdr->TotalSize,  (int)Result.BytesLen );
@@ -53,14 +53,14 @@ int main( void ) {
     /* EntryIndex 1 also works. */
     BLOB_BUILD_RESULT_T R2 = { 0 };
     CHECK_EQ_INT( Blob_Build( Mods, 2, 1, &R2 ), 1 );
-    PLUAVM_BLOB_HEADER_T H2 = (PLUAVM_BLOB_HEADER_T)R2.Bytes;
+    PCLUA_BLOB_HEADER_T H2 = (PCLUA_BLOB_HEADER_T)R2.Bytes;
     CHECK_EQ_INT( (int)H2->EntryIndex, 1 );
     Blob_FreeResult( &R2 );
 
     /* Single-module blob. */
     BLOB_BUILD_RESULT_T R3 = { 0 };
     CHECK_EQ_INT( Blob_Build( Mods, 1, 0, &R3 ), 1 );
-    PLUAVM_BLOB_HEADER_T H3 = (PLUAVM_BLOB_HEADER_T)R3.Bytes;
+    PCLUA_BLOB_HEADER_T H3 = (PCLUA_BLOB_HEADER_T)R3.Bytes;
     CHECK_EQ_INT( (int)H3->Count, 1 );
     Blob_FreeResult( &R3 );
 

@@ -1,4 +1,4 @@
--- LuaVM screenshot package manifest.
+-- CLua screenshot package manifest.
 return {
     name        = "screenshot",
     version     = "0.1",

@@ -4,8 +4,8 @@
  *  parser + dumper (luaL_loadfile + lua_dump).
  */
 
-#ifndef LUAVM_COMPILER_LUA_COMPILE_H
-#define LUAVM_COMPILER_LUA_COMPILE_H
+#ifndef CLUA_COMPILER_LUA_COMPILE_H
+#define CLUA_COMPILER_LUA_COMPILE_H
 
 #include <stddef.h>
 
@@ -32,4 +32,4 @@ int LuaCompile_File( const char *SourcePath, int Strip, PLUA_COMPILE_RESULT_T Re
 
 void LuaCompile_FreeResult( PLUA_COMPILE_RESULT_T Result );
 
-#endif /* LUAVM_COMPILER_LUA_COMPILE_H */
+#endif /* CLUA_COMPILER_LUA_COMPILE_H */

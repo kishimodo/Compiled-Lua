@@ -139,7 +139,7 @@ local _lib_state -- nil = unprobed, false = absent, table = loaded
 
 local function probe()
     if _lib_state ~= nil then return _lib_state end
-    local override = os.getenv("LUAVM_ZSTD_DLL")
+    local override = os.getenv("CLUA_ZSTD_DLL")
     -- Try the names libzstd ships under on Windows. The official builds
     -- are libzstd.dll; some package managers rename to zstd.dll.
     local names = { "libzstd", "zstd", "libzstd.dll", "zstd.dll" }
@@ -161,7 +161,7 @@ local function require_lib()
     local st = probe()
     if st == false then
         error("zstd: libzstd.dll not found on the search path. "
-            .. "Drop libzstd.dll next to the LuaVM binary, or use "
+            .. "Drop libzstd.dll next to the CLua binary, or use "
             .. "xpress (Windows-native, no deps) or lz4 (pure Lua) instead.")
     end
     return st.lib

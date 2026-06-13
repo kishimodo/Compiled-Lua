@@ -27,7 +27,7 @@
 --
 -- Scheduling design:
 --   We keep a Lua-side binary min-heap of pending handles. Callbacks run
---   on the LuaVM main thread (no Win32 worker threads touching Lua
+--   on the CLua main thread (no Win32 worker threads touching Lua
 --   state). poll() drains everything that's due now. run_forever()
 --   alternates poll/sleep until the heap empties.
 

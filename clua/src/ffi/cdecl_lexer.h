@@ -5,8 +5,8 @@
  *  Tracks line + column for error reporting.
  */
 
-#ifndef LUAVM_FFI_CDECL_LEXER_H
-#define LUAVM_FFI_CDECL_LEXER_H
+#ifndef CLUA_FFI_CDECL_LEXER_H
+#define CLUA_FFI_CDECL_LEXER_H
 
 #include <stdint.h>
 
@@ -66,4 +66,4 @@ typedef struct {
 void Lexer_Init( PLEXER_T Lex, const char *Source );
 int Lexer_Next( PLEXER_T Lex, PTOKEN_T Out );
 
-#endif /* LUAVM_FFI_CDECL_LEXER_H */
+#endif /* CLUA_FFI_CDECL_LEXER_H */

@@ -1,4 +1,4 @@
--- LuaVM wndproc package manifest.
+-- CLua wndproc package manifest.
 return {
     name        = "wndproc",
     version     = "0.1",

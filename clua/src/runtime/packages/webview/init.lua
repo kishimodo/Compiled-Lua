@@ -187,7 +187,7 @@ end
 -- ===== Window host ======================================================
 -- Both backends sit inside our own message-pumped HWND. The class is
 -- shared across all webview instances created from the same Lua state.
-local _CLASS_NAME = "LuaVM_WebView_Host"
+local _CLASS_NAME = "CLua_WebView_Host"
 local _class_registered = false
 
 local function ensure_host_class()
@@ -317,7 +317,7 @@ local function backend_webview2(self, opts)
     -- Kick off env creation. The completion handler is invoked on the
     -- thread that owns the host HWND -- which is whichever thread runs
     -- our message pump.
-    local user_dir = opts.user_data_folder or (tempdir() .. "LuaVM_WebView")
+    local user_dir = opts.user_data_folder or (tempdir() .. "CLua_WebView")
     local hr = create_env(
         nil,
         ffi.cast("LPCWSTR", W.ToWide(user_dir)),
@@ -365,7 +365,7 @@ end
 -- ===== MSHTML fallback backend ==========================================
 -- The legacy IWebBrowser2 (CLSID 8856F961-340A-11D0-A96B-00C04FD705A2)
 -- can be hosted via OleCreate or by spawning iexplore.exe. We use the
--- simpler "spawn a navigated process" approach since LuaVM tests don't
+-- simpler "spawn a navigated process" approach since CLua tests don't
 -- need the embedded ActiveX surface, just a window pointing at content.
 local function backend_mshtml(self, opts)
     self.backend = "mshtml"
@@ -424,7 +424,7 @@ function Webview:load_html(html, base_uri)
         end)
     else
         -- Drop the HTML into a temp file and navigate to the file:// URL.
-        local path = tempdir() .. "luavm_wv_" .. tostring(os.time()) .. ".html"
+        local path = tempdir() .. "clua_wv_" .. tostring(os.time()) .. ".html"
         local f, err = io.open(path, "w")
         if not f then error("load_html(mshtml fallback): " .. tostring(err)) end
         f:write(html); f:close()
@@ -499,7 +499,7 @@ function Webview:bind(name, fn)
         window.%s = function () {
             var args = Array.prototype.slice.call(arguments);
             window.chrome.webview.postMessage(JSON.stringify({
-                __luavm_bind = "%s", args: args
+                __clua_bind = "%s", args: args
             }));
         };
     ]], name, name)

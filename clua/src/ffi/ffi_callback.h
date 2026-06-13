@@ -4,8 +4,8 @@
  *  can call directly (qsort, EnumWindows, WNDPROC, etc.).
  */
 
-#ifndef LUAVM_FFI_CALLBACK_H
-#define LUAVM_FFI_CALLBACK_H
+#ifndef CLUA_FFI_CALLBACK_H
+#define CLUA_FFI_CALLBACK_H
 
 #include "ffi/ctype.h"
 
@@ -65,4 +65,4 @@ int64_t Callback_Dispatch( int StubId, uint64_t *ArgBuf );
  */
 void Ffi_SetDispatchL( lua_State *L );
 
-#endif /* LUAVM_FFI_CALLBACK_H */
+#endif /* CLUA_FFI_CALLBACK_H */

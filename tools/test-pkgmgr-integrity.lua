@@ -3,14 +3,14 @@
 -- records a Merkle-style root over ALL files (sorted relative paths + per-file
 -- sha256) in the manifest AND the lock, and `verify` checks it. This test
 -- installs a 2-file package (mfpkg: init.lua + helper.lua), tampers ONLY
--- helper.lua, and asserts verify FAILS. Uses registry-test. Run by luavm.exe.
+-- helper.lua, and asserts verify FAILS. Uses registry-test. Run by clua-interp.exe.
 
 local function abscwd()
   local p = io.popen("cd"); if not p then return "." end
   local d = p:read("*a") or ""; p:close(); return (d:gsub("%s+$", ""))
 end
 local ROOT  = abscwd()
-local LUAVM = ROOT .. "\\build\\bin\\luavm.exe"
+local CLUA = ROOT .. "\\build\\bin\\clua-interp.exe"
 local PKG   = ROOT .. "\\rover\\src\\rover.lua"
 local REG   = ROOT .. "\\rover\\registry-test"
 local STORE = (function()
@@ -20,7 +20,7 @@ local STORE = (function()
 end)()
 
 local function run(args)
-  local p = io.popen('"' .. LUAVM .. ' -i ' .. PKG .. ' ' .. args .. '" 2>&1')
+  local p = io.popen('"' .. CLUA .. ' -i ' .. PKG .. ' ' .. args .. '" 2>&1')
   if not p then return false, "" end
   local out = p:read("*a") or ""
   local ok = p:close()

@@ -1168,7 +1168,7 @@ void luaV_finishOp (lua_State *L) {
 
 
 /* CLua native-dispatch hook — set by the runtime before the first Lua call.
- * NULL means no native backend is loaded (compiler, luavm -i oracle paths). */
+ * NULL means no native backend is loaded (compiler, clua-interp -i oracle paths). */
 clua_dispatch_t clua_dispatch_hook = NULL;
 
 static int Clua_DefaultInvoke( lua_State *L, int ( *Fn )( lua_State * ) ) {
@@ -1180,7 +1180,7 @@ clua_invoke_t clua_invoke_hook = Clua_DefaultInvoke;
 #ifndef CLUA_NO_INTERP
 /* Revived upstream bytecode interpreter (see below). Used as a true
  * no-codegen execution backend when no dispatch hook is registered
- * (luavm.exe -i, and the differential-test oracle). */
+ * (clua-interp.exe -i, and the differential-test oracle). */
 static void clua_Interpret (lua_State *L, CallInfo *ci);
 #endif
 
@@ -1215,7 +1215,7 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
      * registered body). Do NOT abort: fall through to the bytecode
      * interpreter below, a transparent slow path. It runs this Proto in `ci`
      * and handles its own poscall, exactly like the no-hook path. This
-     * unifies luavm.exe (the differential oracle) with the baked runtime and
+     * unifies clua-interp.exe (the differential oracle) with the baked runtime and
      * turns every "backend can't do this" case into correct, slower
      * execution instead of a fatal crash. */
   }

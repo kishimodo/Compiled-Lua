@@ -1,6 +1,6 @@
 -- run-package-tests.lua -- per-package behavioral test harness (R3.1).
 --
--- Run by luavm.exe (so it is shell-agnostic: the same on bash and cmd). The
+-- Run by clua-interp.exe (so it is shell-agnostic: the same on bash and cmd). The
 -- Makefile `test-packages` target passes every clua/src/runtime/packages/<name>/
 -- test.lua path as an argument. For each, this harness compiles it to a
 -- standalone exe with compiler.exe (which statically bundles the package the
@@ -24,7 +24,7 @@ local function pkg_name(path)
   return (path:match("([^/\\]+)%.lua$") or path)
 end
 
--- luavm.exe passes script arguments via the global `arg` table.
+-- clua-interp.exe passes script arguments via the global `arg` table.
 local tests = {}
 for i = 1, #(arg or {}) do tests[i] = arg[i] end
 if #tests == 0 then

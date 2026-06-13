@@ -268,7 +268,7 @@ function Multi:bar(opts)
     -- Defer the absolute row resolution to first paint by leaving line_index
     -- as a function. Simpler: track via a fixed offset from cursor at time of
     -- creation by querying term.size + cursor via a save/restore probe.
-    -- For LuaVM's typical batched terminals, treating bars as a vertical
+    -- For CLua's typical batched terminals, treating bars as a vertical
     -- stack anchored to "current cursor at time of multi()" is reliable.
     local term = require "term"
     if not self.anchor then

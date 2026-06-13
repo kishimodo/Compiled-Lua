@@ -30,7 +30,7 @@ M.reset = CSI .. "0m"
 -- ===== Capability detection ===========================================
 
 local function getenv(name)
-    -- os.getenv is the portable hook; LuaVM exposes it like stock Lua.
+    -- os.getenv is the portable hook; CLua exposes it like stock Lua.
     return os.getenv and os.getenv(name) or nil
 end
 

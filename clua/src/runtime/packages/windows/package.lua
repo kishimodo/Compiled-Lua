@@ -1,4 +1,4 @@
--- LuaVM package manifest. Consumed by tools/gen-package-rules.ps1
+-- CLua package manifest. Consumed by tools/gen-package-rules.ps1
 -- (the auto-scan generator) and the future package manager. The
 -- manifest is authoritative for require-name choice; sub-module files
 -- not listed here pick up the default convention "<dir>.<file>".
@@ -47,7 +47,7 @@ return {
         ["windows.gdi"]         = "gdi.lua",           -- Graphics.Gdi                    (396 fns)
         ["windows.power"]       = "power.lua",         -- System.Power                    ( 97 fns)
     },
-    -- depends on other LuaVM packages (none -- this is foundational)
+    -- depends on other CLua packages (none -- this is foundational)
     requires        = {},
     -- DLL link-line additions when this package is required.
     -- Compiler resolver currently only acts on requires_native = "imgui";

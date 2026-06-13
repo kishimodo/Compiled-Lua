@@ -21,7 +21,7 @@
 --     dec:finish()                    -- assert stream is at end
 --
 -- DLL load order (first hit wins):
---   1. $LUAVM_BROTLI_DLL
+--   1. $CLUA_BROTLI_DLL
 --   2. "brotli" / "brotli.dll"
 --   3. Split-build encoder + decoder: "brotlienc"/"brotlidec" or
 --      "libbrotlienc"/"libbrotlidec"
@@ -131,7 +131,7 @@ local function load_libs()
     if _load_err then return nil end
     -- Try unified first.
     local unified_names = {}
-    local env_dll = os.getenv("LUAVM_BROTLI_DLL")
+    local env_dll = os.getenv("CLUA_BROTLI_DLL")
     if env_dll and #env_dll > 0 then unified_names[#unified_names + 1] = env_dll end
     unified_names[#unified_names + 1] = "brotli"
     unified_names[#unified_names + 1] = "brotli.dll"
@@ -154,7 +154,7 @@ local function load_libs()
     end
     if enc and dec then _lib_enc = enc; _lib_dec = dec; return enc, dec end
     _load_err = "brotli: brotli.dll (or brotlienc.dll + brotlidec.dll) not found. "
-        .. "Set LUAVM_BROTLI_DLL or drop the DLLs next to LuaVM."
+        .. "Set CLUA_BROTLI_DLL or drop the DLLs next to CLua."
     return nil
 end
 

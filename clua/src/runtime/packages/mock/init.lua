@@ -111,7 +111,7 @@ function M.match.between(lo, hi)
 end
 
 -- Pack varargs preserving nil holes. Avoid the `{ n=..., ... }` mixed
--- constructor pattern -- the LuaVM JIT cannot codegen it. Build manually.
+-- constructor pattern -- the CLua JIT cannot codegen it. Build manually.
 local function pack(...)
     local n = select("#", ...)
     local t = { n = n }

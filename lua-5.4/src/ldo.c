@@ -62,17 +62,17 @@
 
 #elif defined(CLUA_TARGET_WINDOWS_X64) && defined(__GNUC__)	/* }{ */
 
-/* LuaVM: Windows x64 with GCC. Use __builtin_setjmp/__builtin_longjmp,
+/* CLua: Windows x64 with GCC. Use __builtin_setjmp/__builtin_longjmp,
    which do NOT trigger Windows SEH stack unwinding. Standard setjmp on
    MinGW resolves to _setjmpex / longjmp which walks each frame's SEH
    unwind info — and our JIT-emitted frames have no .pdata/.xdata, so
    the walk faults on any pcall that catches an error thrown from inside
    JIT code (status 0xC00000FF in RtlUnwindEx). The GCC builtins just
    save/restore FP/SP/PC and jump directly, skipping the SEH unwinder. */
-typedef void *luavm_builtin_jmpbuf_t[5];
+typedef void *clua_builtin_jmpbuf_t[5];
 #define LUAI_THROW(L,c)		__builtin_longjmp((c)->b, 1)
 #define LUAI_TRY(L,c,a)		if (__builtin_setjmp((c)->b) == 0) { a }
-#define luai_jmpbuf		luavm_builtin_jmpbuf_t
+#define luai_jmpbuf		clua_builtin_jmpbuf_t
 
 #elif defined(LUA_USE_POSIX)				/* }{ */
 
@@ -653,7 +653,7 @@ l_sinline void ccall (lua_State *L, StkId func, int nResults, l_uint32 inc) {
      * the hook-gated prologue of luaV_execute (lvm.c) exactly — same
      * hookmask gate, same NULL-body fallthrough, same luaD_poscall — but
      * dispatches here, skipping the luaV_execute C frame on every C→Lua
-     * entry. With no hook registered (luavm -i oracle) behavior is
+     * entry. With no hook registered (clua-interp -i oracle) behavior is
      * untouched. luaV_execute keeps its own prologue: other re-entry
      * routes (and a declined Proto below) still go through it. */
     if (clua_dispatch_hook != NULL && L->hookmask == 0) {

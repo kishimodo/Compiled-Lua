@@ -9,6 +9,6 @@ return {
     },
     requires        = {},
     requires_native = {
-        { dll = "harfbuzz.dll", mode_default = "embed", env_var = "LUAVM_HARFBUZZ_DLL" },
+        { dll = "harfbuzz.dll", mode_default = "embed", env_var = "CLUA_HARFBUZZ_DLL" },
     },
 }

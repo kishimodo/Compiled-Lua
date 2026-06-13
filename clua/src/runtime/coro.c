@@ -37,7 +37,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define CORO_METATABLE       "luavm.coro"
+#define CORO_METATABLE       "clua-interp.coro"
 
 #define STATUS_SUSPENDED     0
 #define STATUS_RUNNING       1

@@ -1,5 +1,5 @@
 @echo off
-rem LuaVM build wrapper. Forwards arguments to `make -f build/Makefile`.
+rem CLua build wrapper. Forwards arguments to `make -f build/Makefile`.
 rem PATH adjustment: GnuWin32's GNU make and the MinGW binutils (objcopy, ld)
 rem are prepended so they win over Embarcadero's same-named tools which sit
 rem earlier on the default user PATH. Adjust CLUA_MINGW_BIN if your MinGW

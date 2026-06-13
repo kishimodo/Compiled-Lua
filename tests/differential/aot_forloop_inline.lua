@@ -1,7 +1,7 @@
 -- M1 inline integer FORLOOP fast path (runtime-checked on the step tag; float
 -- loops fall to Rt_ForLoop). Mirrors lvm.c's integer OP_FORLOOP. Stresses steps,
 -- direction, large counts, nesting, break, and the float path. Compiled by aotc
--- and byte-diffed vs luavm.exe -i.
+-- and byte-diffed vs clua-interp.exe -i.
 
 -- basic ascending / unit step
 local s = 0

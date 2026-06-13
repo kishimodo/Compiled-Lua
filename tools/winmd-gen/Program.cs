@@ -1,7 +1,7 @@
-// LuaVM windows-package generator.
+// CLua windows-package generator.
 //
 // Reads Microsoft's Windows.Win32.winmd file, walks the requested
-// namespace, and emits a LuaVM packages/windows/<area>.lua file with
+// namespace, and emits a CLua packages/windows/<area>.lua file with
 // proper ffi.cdef declarations for every P/Invoke function + struct
 // + constant in that namespace.
 //
@@ -882,7 +882,7 @@ static class CTypeKeywords
 }
 
 // ============================================================================
-// CTypeProvider -- translates winmd type signatures to LuaVM C types.
+// CTypeProvider -- translates winmd type signatures to CLua C types.
 
 class CTypeProvider : ISignatureTypeProvider<string, object?>
 {

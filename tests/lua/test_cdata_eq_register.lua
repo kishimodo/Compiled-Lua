@@ -5,7 +5,7 @@
 -- WITHOUT Protect, so luaT_callTMres wrote its frame at a stale L->top.p,
 -- overwriting the live register that held the about-to-be-called function
 -- ("attempt to call a boolean value"). Found 2026-06-12 when the migrated
--- suite first ran tests/lua under `luavm.exe -i`; fixed by running the
+-- suite first ran tests/lua under `clua-interp.exe -i`; fixed by running the
 -- metamethod path under Protect exactly like OP_EQ.
 local name = "test_cdata_eq_register"
 if not ffi then print("[~] SKIP " .. name .. " (no ffi)") os.exit(0) end

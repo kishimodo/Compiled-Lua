@@ -1,6 +1,6 @@
 -- build-registry.lua — stage every in-tree package as a rover registry.
 --
---   build\bin\luavm.exe tools\build-registry.lua <out-dir>
+--   build\bin\clua-interp.exe tools\build-registry.lua <out-dir>
 --
 -- For each clua/src/runtime/packages/<name>/:
 --   <out>/<name>/1.0.0/<files>   (.lua files comment-stripped + parse-checked;

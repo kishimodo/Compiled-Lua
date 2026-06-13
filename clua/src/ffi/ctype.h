@@ -5,8 +5,8 @@
  *  (for compound types) field layout.
  */
 
-#ifndef LUAVM_FFI_CTYPE_H
-#define LUAVM_FFI_CTYPE_H
+#ifndef CLUA_FFI_CTYPE_H
+#define CLUA_FFI_CTYPE_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -100,4 +100,4 @@ void Ctype_RegisterExtern( const char *Name, PCType_T Type );
  */
 PCType_T Ctype_LookupExtern( const char *Name );
 
-#endif /* LUAVM_FFI_CTYPE_H */
+#endif /* CLUA_FFI_CTYPE_H */

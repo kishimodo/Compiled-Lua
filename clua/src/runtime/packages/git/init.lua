@@ -34,7 +34,7 @@ local bit = { band = function(a,b) return (tonumber(a) or 0) & (tonumber(b) or 0
 --   :close()
 --
 -- DLL load order (first hit wins):
---   1. $LUAVM_GIT2_DLL
+--   1. $CLUA_GIT2_DLL
 --   2. "git2"  /  "git2.dll"
 --   3. "libgit2"  /  "libgit2.dll"
 
@@ -294,7 +294,7 @@ local function load_lib()
     if _lib then return _lib end
     if _load_err then return nil end
     local names = {}
-    local env_dll = os.getenv("LUAVM_GIT2_DLL")
+    local env_dll = os.getenv("CLUA_GIT2_DLL")
     if env_dll and #env_dll > 0 then names[#names + 1] = env_dll end
     names[#names + 1] = "git2"
     names[#names + 1] = "git2.dll"
@@ -305,7 +305,7 @@ local function load_lib()
         if ok then _lib = lib; return lib end
     end
     _load_err = "git: git2.dll not found on the search path. "
-        .. "Set LUAVM_GIT2_DLL or drop git2.dll next to LuaVM."
+        .. "Set CLUA_GIT2_DLL or drop git2.dll next to CLua."
     return nil
 end
 
@@ -677,7 +677,7 @@ function Repo:commit(message, opts)
     if opts.author and opts.email then
         rc = L.git_signature_now(sig_pp, opts.author, opts.email)
     else
-        rc = L.git_signature_now(sig_pp, "LuaVM", "luavm@local")
+        rc = L.git_signature_now(sig_pp, "CLua", "clua-interp@local")
     end
     check(L, rc, "signature_now")
     local sig = ffi.gc(sig_pp[0], L.git_signature_free)

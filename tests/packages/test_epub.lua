@@ -8,7 +8,7 @@ if not ok_req then print("[~] SKIP test_epub (" .. tostring(epub) .. ")") os.exi
 local fails = 0
 local function ok(c, m) if not c then fails = fails + 1; print("[-] FAIL test_epub: " .. tostring(m)) end end
 
-local path = os.getenv("TEMP") .. "/luavm_test_epub_rt.epub"
+local path = os.getenv("TEMP") .. "/clua_test_epub_rt.epub"
 
 -- ===== Build a book ======================================================
 local w = epub.create()
@@ -16,7 +16,7 @@ w:set_metadata({
     title       = "The Test Book",
     author      = "Jane Doe",
     language    = "en",
-    publisher   = "LuaVM Press",
+    publisher   = "CLua Press",
     identifier  = "urn:uuid:fixed-book-id-1234",
     subjects    = { "Fiction", "Testing" },
 })
@@ -37,7 +37,7 @@ local meta = book:metadata()
 ok(meta.title == "The Test Book", "metadata title round-trips")
 ok(meta.author == "Jane Doe",     "metadata author round-trips")
 ok(meta.language == "en",         "metadata language round-trips")
-ok(meta.publisher == "LuaVM Press","metadata publisher round-trips")
+ok(meta.publisher == "CLua Press","metadata publisher round-trips")
 ok(#meta.subjects == 2,           "two subjects parsed")
 -- subjects order is spine/document order (deterministic), assert both present
 do

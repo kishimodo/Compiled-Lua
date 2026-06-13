@@ -9,6 +9,6 @@ return {
     },
     requires        = {},
     requires_native = {
-        { dll = "libzstd.dll", mode_default = "embed", env_var = "LUAVM_ZSTD_DLL" },
+        { dll = "libzstd.dll", mode_default = "embed", env_var = "CLUA_ZSTD_DLL" },
     },
 }

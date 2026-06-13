@@ -6,8 +6,8 @@
  *  bodies are only ever registered, never generated at run time.)
  */
 
-#ifndef LUAVM_JIT_DISPATCH_H
-#define LUAVM_JIT_DISPATCH_H
+#ifndef CLUA_JIT_DISPATCH_H
+#define CLUA_JIT_DISPATCH_H
 
 #include "lua.h"
 #include "lobject.h"
@@ -56,4 +56,4 @@ int Jit_LookupSourceLine( void *Rip, const char **OutSource, int *OutLine );
  */
 void *Jit_DebugGetPcAddress( Proto *P, int Pc );
 
-#endif /* LUAVM_JIT_DISPATCH_H */
+#endif /* CLUA_JIT_DISPATCH_H */

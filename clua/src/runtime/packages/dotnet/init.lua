@@ -1,4 +1,4 @@
--- LuaVM dotnet package -- comprehensive in-memory .NET CLR hosting.
+-- CLua dotnet package -- comprehensive in-memory .NET CLR hosting.
 --
 -- Mirrors .NET surface as closely as Lua syntax allows:
 --   dotnet.Assembly.Load(bytes)        -- System.Reflection.Assembly.Load(byte[])

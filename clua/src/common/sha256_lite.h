@@ -9,8 +9,8 @@
  *  where CNG isn't yet warmed up.
  */
 
-#ifndef LUAVM_SHA256_LITE_H
-#define LUAVM_SHA256_LITE_H
+#ifndef CLUA_SHA256_LITE_H
+#define CLUA_SHA256_LITE_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -124,4 +124,4 @@ static inline void Sha256Lite_Hash( const void *Data, size_t Len, uint8_t Out[ 3
     Sha256Lite_Final( &Ctx, Out );
 }
 
-#endif /* LUAVM_SHA256_LITE_H */
+#endif /* CLUA_SHA256_LITE_H */

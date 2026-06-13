@@ -121,7 +121,7 @@ typedef enum {
  * native body (AOT: a lookup in the registered-body cache; v1 JIT: compile
  * on demand). Returns the entry point as void*, or NULL when there is no
  * native body (then luaV_execute falls back to the bytecode interpreter).
- * NULL hook = pure interpreter (luavm.exe -i, the differential oracle). */
+ * NULL hook = pure interpreter (clua-interp.exe -i, the differential oracle). */
 typedef void *(*clua_dispatch_t)(lua_State *L, void *proto);
 extern clua_dispatch_t clua_dispatch_hook;
 

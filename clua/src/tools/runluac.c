@@ -18,7 +18,7 @@ int main( int Argc, char **Argv ) {
     int Rc = { 0 };
 
     if ( Argc < 2 ) {
-        printf( "[*] LuaVM runluac v%s\n", LUAVM_VERSION_STRING );
+        printf( "[*] CLua runluac v%s\n", CLUA_VERSION_STRING );
         printf( "[_] usage: runluac.exe <input.luac> [args...]\n" );
         return EXIT_FAILURE;
     }

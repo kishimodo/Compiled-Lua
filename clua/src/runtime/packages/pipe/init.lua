@@ -13,7 +13,7 @@ local bit = { band = function(a,b) return (tonumber(a) or 0) & (tonumber(b) or 0
 --     :handle()  -- raw cdata HANDLE (e.g. to pass to WaitForSingleObject)
 --
 -- Pipe naming convention: callers pass just the leaf name, e.g.
--- "luavm_demo"; this module prepends "\\\\.\\pipe\\" automatically. Pass
+-- "clua_demo"; this module prepends "\\\\.\\pipe\\" automatically. Pass
 -- the full \\.\pipe\foo path if you need an unusual one (we don't try
 -- to be clever about detecting that).
 

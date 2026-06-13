@@ -46,14 +46,14 @@ ok(m.x == 1 and m.y == 2, "round-trip map {x=1,y=2}")
 
 -- Nested structure with mixed types
 local nested = {
-    name   = "luavm",
+    name   = "clua-interp",
     count  = 42,
     active = true,
     tags   = {"a", "b", "c"},
     meta   = { version = 1, flag = false },
 }
 local back = rt(nested)
-ok(back.name   == "luavm",   "nested: string field")
+ok(back.name   == "clua-interp",   "nested: string field")
 ok(back.count  == 42,        "nested: integer field")
 ok(back.active == true,      "nested: boolean field")
 ok(#back.tags  == 3,         "nested: array length")

@@ -1,7 +1,7 @@
 -- M1 float-K arith elision: ADDK/SUBK/MULK/DIVK with a proven-float R[B] and a
 -- numeric constant (int K converted to double at compile time, same cast as the
 -- runtime helper), plus the reg-reg DIV float/float elide. Compiled by aotc and
--- byte-diffed vs luavm.exe -i.
+-- byte-diffed vs clua-interp.exe -i.
 
 -- float accumulator + INT K (the common loop pattern -- previously helper every time)
 local f = 0.5

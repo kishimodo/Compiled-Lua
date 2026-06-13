@@ -36,7 +36,7 @@
  *                         return;
  *                     }
  *                 }
- *                 luaVM_Interpret(L, ci);  // fallback: bytecode interpreter
+ *                 clua_Interpret(L, ci);  // fallback: bytecode interpreter
  *
  * Therefore, for a REGISTERED entry to be invoked, ALL of these must hold:
  *   (A) clua_dispatch_hook must be set to a function that consults the
@@ -143,7 +143,7 @@ int main( void ) {
 
     /* -----------------------------------------------------------------------
      * NEGATIVE CONTROL: with NO compile hook installed, luaV_execute falls
-     * straight through to the bytecode interpreter (luaVM_Interpret). Our
+     * straight through to the bytecode interpreter (clua_Interpret). Our
      * registered entry is NEVER consulted. We push the closure, call it, and
      * assert the body did NOT run. (The 1-op RETURN0 Proto runs cleanly under
      * the interpreter and returns no values.) This proves the spike's PASS

@@ -1,19 +1,19 @@
-// LuaVM ImGui host shim. Bridges the async event loop to Dear ImGui's
+// CLua ImGui host shim. Bridges the async event loop to Dear ImGui's
 // Win32 + DX11 backends. Window + device + frame lifecycle lives here;
 // every widget call goes straight to cimgui from Lua via FFI.
 //
 // Exported C ABI (dllexport so ffi.C lookups via GetProcAddress on the
 // main module handle succeed):
 //
-//   LuaVM_ImGuiHost_Init(title_utf8, w, h) -> 0 ok, nonzero err code
-//   LuaVM_ImGuiHost_PumpEvents()           -> 1 if close requested, 0 ok
-//   LuaVM_ImGuiHost_NewFrame()             -> backend NewFrame + ImGui::NewFrame
-//   LuaVM_ImGuiHost_Render(r,g,b,a)        -> Render + clear + Present
-//   LuaVM_ImGuiHost_Shutdown()             -> tear down ImGui + D3D11 + window
-//   LuaVM_ImGuiHost_Version()              -> IMGUI_VERSION_NUM (sanity probe)
-//   LuaVM_ImGuiHost_GetD3DDevice()         -> ID3D11Device*  (cdata, advanced use)
-//   LuaVM_ImGuiHost_GetD3DContext()        -> ID3D11DeviceContext*
-//   LuaVM_ImGuiHost_RebuildFontAtlas()     -> drop+rebuild backend font texture
+//   CLua_ImGuiHost_Init(title_utf8, w, h) -> 0 ok, nonzero err code
+//   CLua_ImGuiHost_PumpEvents()           -> 1 if close requested, 0 ok
+//   CLua_ImGuiHost_NewFrame()             -> backend NewFrame + ImGui::NewFrame
+//   CLua_ImGuiHost_Render(r,g,b,a)        -> Render + clear + Present
+//   CLua_ImGuiHost_Shutdown()             -> tear down ImGui + D3D11 + window
+//   CLua_ImGuiHost_Version()              -> IMGUI_VERSION_NUM (sanity probe)
+//   CLua_ImGuiHost_GetD3DDevice()         -> ID3D11Device*  (cdata, advanced use)
+//   CLua_ImGuiHost_GetD3DContext()        -> ID3D11DeviceContext*
+//   CLua_ImGuiHost_RebuildFontAtlas()     -> drop+rebuild backend font texture
 //                                            after Lua loaded new fonts
 //
 // Widget calls (igButton, igSliderFloat, igGetIO, igPushStyleColor, ...)
@@ -130,16 +130,16 @@ void DestroyDeviceD3D() {
 
 extern "C" {
 
-__declspec(dllexport) int LuaVM_ImGuiHost_Init(const char *title_utf8, int width, int height) {
+__declspec(dllexport) int CLua_ImGuiHost_Init(const char *title_utf8, int width, int height) {
     if (g_state.hWnd) return 1; /* already initialised */
 
     g_state.hInstance = GetModuleHandleW(nullptr);
     g_state.wc = { sizeof(g_state.wc), CS_CLASSDC, HostWndProc, 0L, 0L,
                    g_state.hInstance, nullptr, nullptr, nullptr, nullptr,
-                   L"LuaVMImGuiHost", nullptr };
+                   L"CLuaImGuiHost", nullptr };
     RegisterClassExW(&g_state.wc);
 
-    WCHAR wtitle[256] = L"LuaVM ImGui";
+    WCHAR wtitle[256] = L"CLua ImGui";
     if (title_utf8 && *title_utf8) {
         MultiByteToWideChar(CP_UTF8, 0, title_utf8, -1, wtitle, 255);
     }
@@ -174,7 +174,7 @@ __declspec(dllexport) int LuaVM_ImGuiHost_Init(const char *title_utf8, int width
     return 0;
 }
 
-__declspec(dllexport) int LuaVM_ImGuiHost_PumpEvents(void) {
+__declspec(dllexport) int CLua_ImGuiHost_PumpEvents(void) {
     MSG msg = {};
     while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
         TranslateMessage(&msg);
@@ -184,13 +184,13 @@ __declspec(dllexport) int LuaVM_ImGuiHost_PumpEvents(void) {
     return g_state.want_close ? 1 : 0;
 }
 
-__declspec(dllexport) void LuaVM_ImGuiHost_NewFrame(void) {
+__declspec(dllexport) void CLua_ImGuiHost_NewFrame(void) {
     ImGui_ImplDX11_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
 }
 
-__declspec(dllexport) void LuaVM_ImGuiHost_Render(float r, float g, float b, float a) {
+__declspec(dllexport) void CLua_ImGuiHost_Render(float r, float g, float b, float a) {
     ImGui::Render();
     if (!g_state.context || !g_state.rtv) return;
     const float clear[4] = { r, g, b, a };
@@ -200,7 +200,7 @@ __declspec(dllexport) void LuaVM_ImGuiHost_Render(float r, float g, float b, flo
     g_state.swapchain->Present(1, 0); /* vsync */
 }
 
-__declspec(dllexport) void LuaVM_ImGuiHost_Shutdown(void) {
+__declspec(dllexport) void CLua_ImGuiHost_Shutdown(void) {
     if (!g_state.hWnd) return;
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
@@ -212,22 +212,22 @@ __declspec(dllexport) void LuaVM_ImGuiHost_Shutdown(void) {
     g_state.want_close = false;
 }
 
-__declspec(dllexport) int LuaVM_ImGuiHost_Version(void) {
+__declspec(dllexport) int CLua_ImGuiHost_Version(void) {
     return IMGUI_VERSION_NUM;
 }
 
-__declspec(dllexport) void *LuaVM_ImGuiHost_GetD3DDevice(void) {
+__declspec(dllexport) void *CLua_ImGuiHost_GetD3DDevice(void) {
     return (void *)g_state.device;
 }
 
-__declspec(dllexport) void *LuaVM_ImGuiHost_GetD3DContext(void) {
+__declspec(dllexport) void *CLua_ImGuiHost_GetD3DContext(void) {
     return (void *)g_state.context;
 }
 
 /* Call after the Lua side mutates io.Fonts (AddFontFromFileTTF etc).
    The DX11 backend caches the rasterised atlas as a GPU texture, so we
    drop and rebuild it; ImGuiIO.Fonts itself stays alive. */
-__declspec(dllexport) void LuaVM_ImGuiHost_RebuildFontAtlas(void) {
+__declspec(dllexport) void CLua_ImGuiHost_RebuildFontAtlas(void) {
     ImGui_ImplDX11_InvalidateDeviceObjects();
     ImGui_ImplDX11_CreateDeviceObjects();
 }

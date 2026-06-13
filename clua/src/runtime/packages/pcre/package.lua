@@ -9,6 +9,6 @@ return {
     },
     requires        = {},
     requires_native = {
-        { dll = "pcre2-8.dll", mode_default = "embed", env_var = "LUAVM_PCRE2_DLL" },
+        { dll = "pcre2-8.dll", mode_default = "embed", env_var = "CLUA_PCRE2_DLL" },
     },
 }

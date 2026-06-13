@@ -320,7 +320,7 @@ end
 function M.run_as_service(handler, opts)
     opts = opts or {}
     assert(type(handler) == "function", "daemon.run_as_service: handler required")
-    local name = opts.name or "luavm_service"
+    local name = opts.name or "clua_service"
 
     -- Cast Lua closures to C-compatible function pointers ONCE per process;
     -- the SCM keeps the pointer for the duration of the run. We stash them

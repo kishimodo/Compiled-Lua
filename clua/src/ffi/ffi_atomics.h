@@ -15,8 +15,8 @@
  *  error fires.
  */
 
-#ifndef LUAVM_FFI_ATOMICS_H
-#define LUAVM_FFI_ATOMICS_H
+#ifndef CLUA_FFI_ATOMICS_H
+#define CLUA_FFI_ATOMICS_H
 
 /*!
  * @brief
@@ -25,4 +25,4 @@
  */
 void *Ffi_AtomicsLookup( const char *Sym );
 
-#endif /* LUAVM_FFI_ATOMICS_H */
+#endif /* CLUA_FFI_ATOMICS_H */

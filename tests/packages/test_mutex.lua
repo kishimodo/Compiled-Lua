@@ -83,7 +83,7 @@ ok(kok, "mutex.kernel_mutex() constructs without an ffi.new cdata-kind error (re
 -- Regression (MUTEX-OPENKERNEL-NULLCMP-001): open_kernel() on a MISSING name
 -- must return cleanly; a null HANDLE used not to compare == nil in this FFI,
 -- so it fell through to the ffi.new("HANDLE[1]", null) error.
-local ook = pcall(function() return mutex.open_kernel("LuaVM_test_no_such_mutex_zzz_42") end)
+local ook = pcall(function() return mutex.open_kernel("CLua_test_no_such_mutex_zzz_42") end)
 ok(ook, "open_kernel(missing) returns cleanly (null HANDLE compares == nil) (regression MUTEX-OPENKERNEL-NULLCMP-001)")
 
 if fails == 0 then print("[+] PASS test_mutex") os.exit(0) else os.exit(1) end

@@ -645,12 +645,12 @@ function M.lint_file(path, opts)
     return M.check_file(path, opts)
 end
 
--- Load a project-level config file (./.luavmlint.lua) when present.
+-- Load a project-level config file (./.clualint.lua) when present.
 local function load_project_config()
-    local f = io.open(".luavmlint.lua", "rb")
+    local f = io.open(".clualint.lua", "rb")
     if not f then return {} end
     local src = f:read("*a"); f:close()
-    local chunk = load(src, "=luavmlint", "t", {})
+    local chunk = load(src, "=clualint", "t", {})
     if not chunk then return {} end
     local ok, cfg = pcall(chunk)
     if ok and type(cfg) == "table" then return cfg end

@@ -5,9 +5,9 @@
  *  to the upstream Lua interpreter against the embedded blob.
  */
 
-#ifndef LUAVM_RUNTIME_INIT_H
-#define LUAVM_RUNTIME_INIT_H
+#ifndef CLUA_RUNTIME_INIT_H
+#define CLUA_RUNTIME_INIT_H
 
 int RuntimeMain( int Argc, char **Argv );
 
-#endif /* LUAVM_RUNTIME_INIT_H */
+#endif /* CLUA_RUNTIME_INIT_H */

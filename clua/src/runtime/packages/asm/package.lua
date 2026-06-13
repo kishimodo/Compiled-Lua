@@ -10,7 +10,7 @@ return {
     requires        = {},
     requires_native = {
         { dll = "keystone.dll", mode_default = "embed",
-          env_var = "LUAVM_KEYSTONE_DLL",
+          env_var = "CLUA_KEYSTONE_DLL",
           alternatives = { "keystone-0.dll", "keystone" } },
     },
 }

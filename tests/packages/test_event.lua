@@ -1,7 +1,7 @@
 -- tests/packages/test_event.lua : Win32 kernel events (CreateEventW).
 --
 -- KNOWN BUG (FFI-HANDLE-ARRAY-INIT-001): every event constructor goes through
--- wrap(), which does ffi.new("HANDLE[1]", handle). In this LuaVM FFI,
+-- wrap(), which does ffi.new("HANDLE[1]", handle). In this CLua FFI,
 -- initializing a pointer-array from a pointer cdata raises
 -- "ffi.new init: ffi: cdata kind 4 does not match target kind 5", so even
 -- event.manual()/event.auto() fail. We assert the API surface and XFAIL the

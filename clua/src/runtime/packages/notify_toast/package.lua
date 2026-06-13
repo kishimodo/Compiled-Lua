@@ -1,4 +1,4 @@
--- LuaVM notify_toast package manifest.
+-- CLua notify_toast package manifest.
 return {
     name        = "notify_toast",
     version     = "0.1",

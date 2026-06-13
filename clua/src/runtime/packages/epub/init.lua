@@ -441,7 +441,7 @@ local function _build_opf(meta, chapters, cover_ext)
         '<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid">',
         '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">',
         '<dc:identifier id="bookid">' ..
-            xml_escape(meta.identifier or ("urn:uuid:" .. (meta.uuid or "luavm-epub-id"))) ..
+            xml_escape(meta.identifier or ("urn:uuid:" .. (meta.uuid or "clua-interp-epub-id"))) ..
             '</dc:identifier>',
         '<dc:title>' .. xml_escape(meta.title or "Untitled") .. '</dc:title>',
         '<dc:language>' .. xml_escape(meta.language or "en") .. '</dc:language>',

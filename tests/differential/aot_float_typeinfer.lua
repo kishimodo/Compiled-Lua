@@ -2,7 +2,7 @@
 -- float (lc_pass_local_typeinfer), codegen emits a bare SSE op with no tag-check
 -- and no helper. Validates correctness incl. mixed int/float (checked path),
 -- a captured float mutated to int through a closure (must NOT elide), //, and
--- nan/inf propagation. Compiled by aotc and byte-diffed vs luavm.exe -i.
+-- nan/inf propagation. Compiled by aotc and byte-diffed vs clua-interp.exe -i.
 
 local s, x, y = 0.0, 1.5, 2.0
 for i = 1, 5 do s = s + x * y - x end

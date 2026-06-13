@@ -4,7 +4,7 @@
 -- MinGW-ANSI-stdio vs ucrt choice): string.format, tostring of floats,
 -- integer/float printing, %a hex floats, huge/denormal/negative-zero corners,
 -- and tonumber parsing round-trips. Runs under the aotdiff layer (compiled
--- PE vs luavm -i, byte-identical stdout required) and the plain JIT-vs-i
+-- PE vs clua-interp -i, byte-identical stdout required) and the plain JIT-vs-i
 -- differential.
 
 local function p(...) print(...) end

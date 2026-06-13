@@ -4,8 +4,8 @@
  *  All use the Windows x64 ABI.
  */
 
-#ifndef LUAVM_JIT_RUNTIME_H
-#define LUAVM_JIT_RUNTIME_H
+#ifndef CLUA_JIT_RUNTIME_H
+#define CLUA_JIT_RUNTIME_H
 
 #include "lua.h"
 
@@ -360,4 +360,4 @@ int Rt_TForCall( lua_State *L, int A, int C );
  */
 int Rt_TForLoop( lua_State *L, int A );
 
-#endif /* LUAVM_JIT_RUNTIME_H */
+#endif /* CLUA_JIT_RUNTIME_H */

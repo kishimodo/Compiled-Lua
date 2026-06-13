@@ -130,7 +130,7 @@ static const char *DefaultOr( const char *V, const char *Default ) {
 
 /*!
  * @brief
- *  Resolve a tool name to a full path. If the LUAVM_MINGW_BIN env var is
+ *  Resolve a tool name to a full path. If the CLUA_MINGW_BIN env var is
  *  set (build.bat sets it), prefer "<dir>\<tool>". Otherwise return the
  *  bare tool name and trust PATH. The env-var pass avoids picking up
  *  Embarcadero's same-named tools when they shadow MinGW on PATH.
@@ -138,7 +138,7 @@ static const char *DefaultOr( const char *V, const char *Default ) {
  *  The returned pointer is into the caller-supplied Out buffer.
  */
 static const char *ResolveTool( const char *ToolName, char *Out, size_t OutSize ) {
-    const char *MingwBin = getenv( "LUAVM_MINGW_BIN" );
+    const char *MingwBin = getenv( "CLUA_MINGW_BIN" );
     if ( MingwBin == NULL || MingwBin[ 0 ] == '\0' ) {
         return ToolName;
     }
@@ -363,7 +363,7 @@ static int MakeBlobCObject( const unsigned char *Blob,
         return 0;
     }
     /* No #include needed -- plain unsigned char + unsigned int are
-       built-in. The 8-byte alignment guarantees the LUAVM_BLOB_HEADER's
+       built-in. The 8-byte alignment guarantees the CLUA_BLOB_HEADER's
        uint32 fields are correctly aligned for in-place reads. */
     fprintf( Fp, "__attribute__((aligned(8)))\n" );
     fprintf( Fp, "const unsigned char g_LuaBlob[%zu] = {\n", BlobLen );
@@ -1074,7 +1074,7 @@ static int AppendPackageObjects( char **Pkgs, size_t Count,
    the inputs (e.g. "-shared" for DLLs, "-Wl,--subsystem,console" for exes).
    WholeArchive=1 wraps the runtime + lua archives in --whole-archive so
    the linker can't drop objects that nothing in the DLL surface
-   references (needed because luavm_run is the only user-visible export
+   references (needed because clua_run is the only user-visible export
    but the runtime needs everything to actually work).
 
    ImguiArchive (optional): if set, link via g++ instead of gcc (to pull
@@ -1155,7 +1155,7 @@ static int MakeFatLib( const char *Ar,
     char Cmd[ 4096 ]           = { 0 };
 
     if ( GetTempPathA( MAX_PATH, TempDir ) == 0 ) { return 0; }
-    snprintf( StageDir, sizeof( StageDir ), "%sluavmlib%lu",
+    snprintf( StageDir, sizeof( StageDir ), "%sclualib%lu",
               TempDir, ( unsigned long )GetCurrentProcessId( ) );
     if ( CreateDirectoryA( StageDir, NULL ) == 0
             && GetLastError( ) != ERROR_ALREADY_EXISTS ) {

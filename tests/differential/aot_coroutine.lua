@@ -1,5 +1,5 @@
 -- Fiber-based coroutines (Plan 4): create/resume/yield/wrap/status, plus a yield
--- across a nested native call frame. Compiled by aotc, byte-diffed vs luavm.exe -i.
+-- across a nested native call frame. Compiled by aotc, byte-diffed vs clua-interp.exe -i.
 local co = coroutine.create(function()
   coroutine.yield(1)
   coroutine.yield(2)

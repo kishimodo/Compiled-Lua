@@ -79,7 +79,7 @@ function M.create_rng(seed)
     seed = seed or os.time()
     local sm = { s = seed & MASK64 }
     -- Avoid building the array as { call(), call(), call(), call() } -- the
-    -- LuaVM codegen can't handle the SETLIST varargs tail when the final
+    -- CLua codegen can't handle the SETLIST varargs tail when the final
     -- expression's multi-return spills into the constructor.
     local s = { 0, 0, 0, 0 }
     s[1] = splitmix64(sm)

@@ -5,8 +5,8 @@
  *  resolves each dependency. Dynamic `require(var)` calls emit a warning.
  */
 
-#ifndef LUAVM_COMPILER_RESOLVE_H
-#define LUAVM_COMPILER_RESOLVE_H
+#ifndef CLUA_COMPILER_RESOLVE_H
+#define CLUA_COMPILER_RESOLVE_H
 
 #include <stddef.h>
 #include "compiler/paths.h"
@@ -65,4 +65,4 @@ int Resolve_AppendBuiltinModules( PRESOLVE_RESULT_T Out, PRESOLVE_OPTS_T Opts,
 
 void Resolve_FreeResult( PRESOLVE_RESULT_T R );
 
-#endif /* LUAVM_COMPILER_RESOLVE_H */
+#endif /* CLUA_COMPILER_RESOLVE_H */

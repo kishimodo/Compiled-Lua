@@ -22,7 +22,7 @@
 -- All limiters use time.monotonic() so a wallclock jump doesn't break them.
 -- Mutex integration is best-effort: if the "mutex" package is available
 -- we wrap state updates in a lock; otherwise we run lock-free (correct
--- under a single OS thread, which is what LuaVM provides today).
+-- under a single OS thread, which is what CLua provides today).
 
 local time = require "time"
 

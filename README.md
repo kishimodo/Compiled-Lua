@@ -41,15 +41,12 @@ library keep it and behave exactly like the oracle under `debug.sethook`).
 `--gc-sections` drops everything unreferenced. What remains is the language
 itself: the Lua core + full stdlib + GC + the AOT runtime helpers.
 
-This is a standalone project, separated from its origin (**LuaVM**, the
-JIT-based v1, which lives in its own repository). The v1 JIT compiler has
-been **removed from this tree**; the only execution engines are compiled
-native exes and the reference bytecode interpreter. That interpreter is
-still carried *inside this repo* — not as the product, but as the
-**differential test oracle**: every compiled program must match
-`luavm.exe -i` (the reference interpreter; luavm always interprets and `-i`
-is accepted as a no-op) byte-for-byte, and the suite enforces that across
-the whole corpus at both `-O0` and `-O1`.
+CLua has exactly two execution engines: the compiled native exe (the
+product) and a reference bytecode interpreter that exists only as the
+**differential test oracle**. There is no JIT anywhere in the tree. Every
+compiled program must match `clua-interp.exe -i` byte-for-byte (the
+interpreter always interprets; `-i` is accepted as a no-op), and the suite
+enforces that across the whole corpus at both `-O0` and `-O1`.
 
 ## Status
 
@@ -93,7 +90,7 @@ for the complete record, including what was deliberately *not* built and why.
   the interpreter uses. No speculation, no deopt, no dialect.
 - **The differential oracle is the arbiter.** Every script must produce
   identical stdout whether compiled by CLua (native) or run under
-  `luavm.exe -i` (the embedded reference interpreter). A red diff blocks
+  `clua-interp.exe -i` (the embedded reference interpreter). A red diff blocks
   everything.
 
 ## Build & test
@@ -102,8 +99,8 @@ From PowerShell:
 
 ```
 cmd /c "build\build-luac.bat"             # builds everything: clua.exe, rover.exe,
-                                          # aotc.exe, runtime-aot.a, oracle luavm.exe
-build\bin\luavm.exe tools\run-tests.lua   # full auto-discovered suite
+                                          # aotc.exe, runtime-aot.a, oracle clua-interp.exe
+build\bin\clua-interp.exe tools\run-tests.lua   # full auto-discovered suite
 ```
 
 Compile a program (works from any directory — `clua.exe` finds its runtime
@@ -123,7 +120,6 @@ machine is a MinGW-w64 gcc on PATH (or `CLUA_GCC`) for the final link.
 
 - Build spec & implementation prompt: [`PROMPT.md`](PROMPT.md)
 - Working notes & testing discipline: [`CLAUDE.md`](CLAUDE.md)
-- Fork manifest (what was inherited from v1): [`docs/fork-manifest.md`](docs/fork-manifest.md)
 - Known bugs / bounded divergences: [`docs/known-bugs-2026-06-07.md`](docs/known-bugs-2026-06-07.md)
 
 ## Roadmap
@@ -133,11 +129,9 @@ machine is a MinGW-w64 gcc on PATH (or `CLUA_GCC`) for the final link.
   interpreter strip is DONE for debug-free programs (`lvm_nointerp.o`,
   AOT-NODEBUG-001); `luaV_execute` itself is now a thin native-dispatch
   entry (`clua_dispatch_hook`), not an interpreter.
-- **Toolchain slimming**: emitted exes exclude any JIT (none exists in the
-  tree anymore), and the Lua front-end (closed-world stubs). **DONE
-  2026-06-12:** the v1 JIT compiler was removed from the tree; the
-  behavioral, differential, conformance and fuzz layers all run against
-  aotc-compiled exes vs the interpreter (the interpreter stays — it *is*
-  the oracle).
+- **Toolchain slimming**: emitted exes exclude any JIT (there is none in the
+  tree) and the Lua front-end (closed-world stubs). The behavioral,
+  differential, conformance and fuzz layers all run aotc-compiled exes
+  against the interpreter (the interpreter stays — it *is* the oracle).
 - **Workload-gated**: scalar replacement of non-escaping tables (see the
   status doc for the honest valuation).

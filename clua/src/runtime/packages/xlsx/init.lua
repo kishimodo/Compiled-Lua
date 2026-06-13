@@ -471,7 +471,7 @@ end
 
 local function _build_shared_strings(pool)
     -- Build pieces incrementally so the table constructor doesn't end with
-    -- a function call (LuaVM JIT can't lower OP_SETLIST B=0).
+    -- a function call (CLua JIT can't lower OP_SETLIST B=0).
     local pieces = {}
     pieces[1] = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
     pieces[2] = string.format(

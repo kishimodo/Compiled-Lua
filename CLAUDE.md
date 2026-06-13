@@ -1,12 +1,9 @@
 # CLua (LuaC) — working notes
 
-> **This is CLua, the standalone AOT-compiled Lua 5.4 language** (separated
-> from LuaVM, the JIT-based v1, in June 2026 — v1 lives in its own repository
-> and is no longer related to this codebase except as history). Read
-> [`README.md`](README.md) for status and [`PROMPT.md`](PROMPT.md) for the
-> build spec (mission, locked decisions, IR, optimizer, codegen, PE emission,
-> FFI rules, testing, milestones). The file-level inheritance record is
-> [`docs/fork-manifest.md`](docs/fork-manifest.md).
+> **This is CLua, the standalone AOT-compiled Lua 5.4 language.** There is no
+> JIT anywhere in the tree. Read [`README.md`](README.md) for status and
+> [`PROMPT.md`](PROMPT.md) for the build spec (mission, locked decisions, IR,
+> optimizer, codegen, PE emission, FFI rules, testing, milestones).
 >
 > **The product is `clua.exe`** (subcommands `build`/`run`/`check`/`version`,
 > `-O1` default, output name derived from the input; relocatable — finds its
@@ -33,25 +30,25 @@
 > *library*, like libc. The backend lives in `clua/src/{ir,opt,codegen,link,driver}`.
 > **Closed world:** `load`/`loadstring`/`dofile`/`string.dump`/dynamic
 > `require` are compile errors. **Fidelity:** the compiled program must match
-> the embedded reference interpreter (`luavm.exe -i`) exactly — the
+> the embedded reference interpreter (`clua-interp.exe -i`) exactly — the
 > differential test is the arbiter.
 >
 > **The reference interpreter inside this repo is TEST ORACLE infrastructure,
-> not the product.** `luavm.exe` always interprets (`-i` is accepted as a
+> not the product.** `clua-interp.exe` always interprets (`-i` is accepted as a
 > no-op) and is the frozen fidelity reference — never edit interpreter
-> semantics to make a diff pass. The v1 JIT compiler was REMOVED from the
-> tree (June 2026): `clua/src/jit/` now carries only the dispatch cache
-> (`dispatch.c`), W^X exec memory for FFI thunks/callbacks (`exec_mem.c`),
-> and the `Rt_*` helpers in `clua/src/jit/runtime.c` — NOT JIT code; they
-> are the shared runtime library the AOT codegen links.
+> semantics to make a diff pass. There is no JIT compiler in the tree:
+> `clua/src/jit/` carries only the dispatch cache (`dispatch.c`), W^X exec
+> memory for FFI thunks/callbacks (`exec_mem.c`), and the `Rt_*` helpers in
+> `clua/src/jit/runtime.c` — NOT JIT code; they are the shared runtime
+> library the AOT codegen links.
 
 ---
 
-## Oracle / build-machinery notes (inherited from v1)
+## Oracle / build-machinery notes
 
-`luavm.exe` runs a script through the reference bytecode interpreter — always
+`clua-interp.exe` runs a script through the reference bytecode interpreter — always
 (`-i` / `--interpret` is accepted as a no-op; there is no JIT in the tree).
-`compiler.exe` is v1's bytecode-embedding front-end (kept for the package
+`compiler.exe` is a bytecode-embedding front-end (kept for the package
 test layer; its emitted exes also run through the interpreter). The compiler
 statically scans `require "literal"` to bundle packages (or `-L <pkg>` to
 force-bundle).
@@ -61,9 +58,9 @@ force-bundle).
 From PowerShell (authoritative): `cmd /c "build\build-luac.bat"` builds
 everything: `clua.exe`, `aotc.exe`, `aot_entry.o`, `rover.exe` (via
 `build/Makefile.luac`) plus the base products and the three runtime archives
-(`runtime-embedded.a`, `runtime-aot.a`, `liblua54-embedded.a`). The v1
+(`runtime-embedded.a`, `runtime-aot.a`, `liblua54-embedded.a`). The legacy
 targets remain available via `cmd /c "build\build.bat <target>"`: `compiler`,
-`luavm`, `embedded`, `packages-embedded`, `lua`, `clean`. `build.bat` puts
+`clua-interp`, `embedded`, `packages-embedded`, `lua`, `clean`. `build.bat` puts
 GnuWin32 `make` + the MinGW `bin` on PATH, then runs `make -f build/Makefile`.
 Do **not** run `make` directly from bash (the package-discovery `$_` PowerShell
 gotcha prints harmless `'x86' is not recognized` noise). The user-facing
@@ -92,7 +89,7 @@ build\run-tests.bat
 
 builds the products and runs **every** test plus the behavioral suites, printing
 one tally: `[PASS] n  [FAIL] n  [SKIP] n  [XFAIL] n  [XPASS] n`. Exit non-zero on
-any real failure. (If products are already built: `build\bin\luavm.exe tools\run-tests.lua`.)
+any real failure. (If products are already built: `build\bin\clua-interp.exe tools\run-tests.lua`.)
 
 Tests are **auto-discovered** — the Makefile and runner never name an individual
 test file. **Just drop a file in the right folder**; deleting one breaks nothing.
@@ -102,7 +99,7 @@ test file. **Just drop a file in the right folder**; deleting one breaks nothing
 | C unit | `tests/unit/test_*.c` | internals (FFI/runtime/compiler) | standalone C program using `tests/unit/test_harness.h` (`TEST_BEGIN`/`CHECK*`/`TEST_END`); links against the auto-built `libcluatest.a` |
 | Lua behavioral | `tests/lua/*.lua` | language/runtime behavior — run under the interpreter AND as an aotc-compiled exe | assert with a local helper; `print("[+] PASS <name>")` + `os.exit(0)`, or `os.exit(1)` on failure. If it must use closed-world-banned constructs (`load`...), add it to `LUA_INTERP_ONLY` in `tools/run-tests.lua` |
 | Package | `tests/packages/test_*.lua` | a builtin package round-trip | `require` the package + assert; the runner compiles it with `compiler.exe` then runs it (plus an `-i` source-run stdout diff). Absent external DLL → `print("[~] SKIP …") os.exit(0)` |
-| Differential | `tests/differential/*.lua` | compiled-exe-vs-interpreter equivalence | a deterministic script that *prints*; the runner aotc-compiles it at `-O0` **and** `-O1`, runs each exe, and diffs stdout against `luavm.exe -i` (catches silent codegen/optimizer miscompiles) |
+| Differential | `tests/differential/*.lua` | compiled-exe-vs-interpreter equivalence | a deterministic script that *prints*; the runner aotc-compiles it at `-O0` **and** `-O1`, runs each exe, and diffs stdout against `clua-interp.exe -i` (catches silent codegen/optimizer miscompiles) |
 | Conformance | `tests/conformance/*.lua` | broad Lua 5.4 corpus, same compiled-vs-`-i` diff at O0+O1 | deterministic printing script; mark a known divergence with a first-lines `-- DIFF-XFAIL: <reason>` |
 
 Templates to copy: `tests/unit/test_ctype.c`, `tests/lua/test_basics.lua`,

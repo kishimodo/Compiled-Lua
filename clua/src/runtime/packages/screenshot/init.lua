@@ -166,7 +166,7 @@ end
 -- CRC-32 (poly 0xEDB88320). Table built lazily on first save_png call so
 -- scripts that only capture (and pass bytes elsewhere) don't pay for it.
 -- Uses LuaJIT's bit library throughout (band/bxor/rshift) -- the same
--- one every other LuaVM package relies on.
+-- one every other CLua package relies on.
 local bit_band  = bit.band
 local bit_bxor  = bit.bxor
 local bit_rsh   = bit.rshift

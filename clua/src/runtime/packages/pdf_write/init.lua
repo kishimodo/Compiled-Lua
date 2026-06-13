@@ -303,7 +303,7 @@ function _page_mt:circle(cx, cy, r, opts)
         pieces[#pieces + 1] = _color_op(opts.color) .. " RG"
     end
     -- Helper assembles space-separated tokens without using a {...}
-    -- table constructor (the LuaVM JIT can't lower OP_SETLIST B=0).
+    -- table constructor (the CLua JIT can't lower OP_SETLIST B=0).
     local function p(a, b, c, d, e, f, g)
         if g ~= nil then
             return a .. " " .. b .. " " .. c .. " " .. d .. " " ..
@@ -452,7 +452,7 @@ function _doc_mt:to_bytes()
         local pieces = { "<<" }
         if self._title  then pieces[#pieces + 1] = "/Title "  .. pdf_escape_string(self._title)  end
         if self._author then pieces[#pieces + 1] = "/Author " .. pdf_escape_string(self._author) end
-        pieces[#pieces + 1] = "/Producer (LuaVM pdf_write)"
+        pieces[#pieces + 1] = "/Producer (CLua pdf_write)"
         local now = os.date("!%Y%m%d%H%M%SZ")
         pieces[#pieces + 1] = "/CreationDate (D:" .. now .. ")"
         pieces[#pieces + 1] = ">>"

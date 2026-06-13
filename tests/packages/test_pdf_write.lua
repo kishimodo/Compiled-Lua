@@ -56,7 +56,7 @@ ok(bytes:find("0 0 200 300", 1, true) ~= nil, "page two MediaBox 200x300")
 ok(bytes:find("0 0 612 792", 1, true) ~= nil, "page one MediaBox 612x792")
 
 -- ===== save() writes a real file =========================================
-local path = os.getenv("TEMP") .. "/luavm_test_pdf_write.pdf"
+local path = os.getenv("TEMP") .. "/clua_test_pdf_write.pdf"
 local n = d:save(path)
 ok(n == #bytes, "save() returns byte count == #to_bytes()")
 do

@@ -220,7 +220,7 @@ M.CB = CB
 
 -- Install the __call shim now that M.run is set. We capture the
 -- function locally so the metamethod doesn't have to round-trip through
--- the module table (and avoids one LuaVM JIT codegen path).
+-- the module table (and avoids one CLua JIT codegen path).
 local _retry_run = M.run
 setmetatable(M, {
     __call = function(_, fn, opts) return _retry_run(fn, opts) end,

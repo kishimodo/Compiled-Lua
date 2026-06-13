@@ -1,4 +1,4 @@
-# LuaVM — Bugs found by the new test suite (2026-06-07) — ALL FIXED
+# CLua — Bugs found by the new test suite (2026-06-07) — ALL FIXED
 
 Building the fresh test suite surfaced five pre-existing bugs (three in the JIT,
 two in packages). Each was root-caused and fixed the same day; each now has a
@@ -371,7 +371,7 @@ with link layout (memory corruption, so the same .text fails differently):
   took its callee from a wrong register/slot.
 - Single-module stripped-json at -O0: `:-25: attempt to call a nil value
   (field '?')` — NEGATIVE line + garbage name (corrupt debug-info reads);
-  the byte-identical source runs clean under `luavm -i`, and the
+  the byte-identical source runs clean under `clua-interp -i`, and the
   UNSTRIPPED json works at -O0 — the failure is input-shape-sensitive
   (line-table/layout dependent), not a source-semantics issue.
 
@@ -394,11 +394,11 @@ oracle-verified correct.
   pass.
 - **table.move "must bypass metamethods"** (audit claim): false — Lua 5.4
   `table.move` uses `lua_geti`/`lua_seti`, so it correctly honors `__index`/
-  `__newindex`. LuaVM matches the spec.
+  `__newindex`. CLua matches the spec.
 
 ## Update 2026-06-10 — LuaC AOT adversarial attack findings (rounds 1–6)
 
-The multi-lens differential attack harness (aotc -O1 vs `luavm -i`) found and we
+The multi-lens differential attack harness (aotc -O1 vs `clua-interp -i`) found and we
 fixed five silent wrong-answer bugs — including three in the **shared baseline
 runtime/JIT**, which corrects the earlier "no silent metamethod miscompiles"
 note above:
@@ -421,7 +421,7 @@ note above:
 
 - **AOT-ERRBANNER-001** — an UNCAUGHT runtime error prints
   `clua: runtime error: <msg>` (no traceback) from a compiled exe, vs
-  `luavm: <msg>` + `stack traceback: …` under `luavm -i`. The `<msg>` itself
+  `clua-interp: <msg>` + `stack traceback: …` under `clua-interp -i`. The `<msg>` itself
   (including `source:line:` and operand annotations) matches. Differential
   tests must assert error behavior through `pcall` (messages compare exactly);
   byte-equality of the top-level banner is inherently impossible (different
@@ -466,7 +466,7 @@ Regression test: `tests/differential/aot_errpath_fidelity.lua` (both engines).
   program that EVADES the compile-time closed-world scan (e.g.
   `_G["lo".."ad"]`) gets a runtime loader error — `load(...)` returns
   `nil, "source chunk loading is disabled in a compiled CLua program (closed
-  world)"` — where `luavm -i` would parse and run the chunk. Legal programs
+  world)"` — where `clua-interp -i` would parse and run the chunk. Legal programs
   can never reach the stubs (`load`/`loadstring`/`dofile`/`string.dump` by
   name are compile errors), so this is a bounded divergence of the same class
   as AOT-DEBUGREFLECT-001. Guarded by tools/test-clua-cli.lua (asserts the

@@ -6,7 +6,7 @@ if not ok_req then print("[~] SKIP test_env") os.exit(0) end
 local fails = 0
 local function ok(c, m) if not c then fails = fails + 1; print("[-] FAIL test_env: " .. tostring(m)) end end
 
-local NAME = "LUAVM_ENV_TEST_VAR_42"
+local NAME = "CLUA_ENV_TEST_VAR_42"
 
 -- clean slate: a name we own and never collides with a real var
 env.unset(NAME)

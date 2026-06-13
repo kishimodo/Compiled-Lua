@@ -571,7 +571,7 @@ function M.run(opts)
     local pool = try_pool(opts)
     -- We currently run sequentially even if `pool` is present; the harness
     -- doesn't try to share suite-level mutable hook state across workers.
-    -- (Async tests above use a cooperative deadline -- the LuaVM runtime
+    -- (Async tests above use a cooperative deadline -- the CLua runtime
     -- expects callers to advance coroutines from outside.)
     local _ = pool  -- reserved; not yet wired in
 

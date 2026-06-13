@@ -107,7 +107,7 @@ local WM_TRAY_CALLBACK = WP.WM_USER + 11
 -- The class name is unique per process; if the user reloads the script
 -- (and the prior __gc ran) we re-register fresh. If not, register_class()
 -- short-circuits to the existing record.
-local TRAY_CLASS = "LuaVM_TrayHost"
+local TRAY_CLASS = "CLua_TrayHost"
 
 -- ===== Hidden message-only window =======================================
 -- Track every live tray by uID so the shared WndProc can route events.
@@ -234,7 +234,7 @@ function M.new(opts)
     _next_id = _next_id + 1
     local hwnd = WP.create_window({
         class    = TRAY_CLASS,
-        title    = "LuaVM tray host #" .. uid,
+        title    = "CLua tray host #" .. uid,
         x = 0, y = 0, width = 0, height = 0,
         style    = 0,  -- not visible -- it's a message-only sink
         ex_style = WP.WS_EX_TOOLWINDOW,

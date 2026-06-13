@@ -31,7 +31,7 @@ ok(doc:page_count() == 2, "page_count == 2")
 local meta = doc:metadata()
 ok(meta.title == "Round Trip",  "metadata title parsed")
 ok(meta.author == "Reader Test","metadata author parsed")
-ok(meta.producer == "LuaVM pdf_write", "metadata producer parsed")
+ok(meta.producer == "CLua pdf_write", "metadata producer parsed")
 
 -- catalog
 local cat = doc:catalog()

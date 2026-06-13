@@ -2,7 +2,7 @@
 --
 -- All operations go through the Win32 process environment block (the W
 -- variants -- UTF-16). UTF-8 strings come in/out at the Lua boundary
--- because LuaVM scripts are byte-strings by convention.
+-- because CLua scripts are byte-strings by convention.
 --
 -- Public surface:
 --   env.get(name)          -> value or nil

@@ -2,16 +2,16 @@
 -- attacker-controlled (CLI, rover.toml, AND a remote registry's index.json) and
 -- ends up inside shell command strings (io.popen/os.execute). A name containing
 -- a quote/`&`/`|`/path-separator must be REJECTED before any command runs --
--- otherwise a compromised registry => local code execution. Run by luavm.exe.
+-- otherwise a compromised registry => local code execution. Run by clua-interp.exe.
 
 local function abscwd()
   local p = io.popen("cd"); if not p then return "." end
   local d = p:read("*a") or ""; p:close(); return (d:gsub("%s+$", ""))
 end
 local ROOT  = abscwd()
-local LUAVM = ROOT .. "\\build\\bin\\luavm.exe"
+local CLUA = ROOT .. "\\build\\bin\\clua-interp.exe"
 local PKG   = ROOT .. "\\rover\\src\\rover.lua"
-local MARK  = (os.getenv("TEMP") or ".") .. "\\luavm-pwned-marker.txt"
+local MARK  = (os.getenv("TEMP") or ".") .. "\\clua-interp-pwned-marker.txt"
 
 local function sh(c) local ok, _, code = os.execute('"' .. c .. '"'); return (ok == true) or (ok == 0) or (code == 0) end
 local function fail(m) print("[-] FAIL test-pkgmgr-security: " .. m); os.exit(1) end
@@ -24,7 +24,7 @@ local function run_install(name)
   os.remove(MARK)
   local escaped = name:gsub('"', '\\"')
   -- outer-quote the whole command (os.execute -> cmd.exe), inner-quote the arg
-  local cmd = '""' .. LUAVM .. '" -i "' .. PKG .. '" install "' .. escaped .. '" >nul 2>nul"'
+  local cmd = '""' .. CLUA .. '" -i "' .. PKG .. '" install "' .. escaped .. '" >nul 2>nul"'
   local ok, _, code = os.execute(cmd)
   local rc = (type(code) == "number") and code or (ok == true and 0 or 1)
   return rc
@@ -63,7 +63,7 @@ end
 
 -- 4) name_ok unit table via the test hook (covers the data-sourced boundary too).
 sh('set ROVER_PKG_TEST=1')   -- noop on this shell; we set it via the child env below
-local driver = (os.getenv("TEMP") or ".") .. "\\luavm-secdriver.lua"
+local driver = (os.getenv("TEMP") or ".") .. "\\clua-interp-secdriver.lua"
 do
   local f = io.open(driver, "wb")
   f:write([[
@@ -78,7 +78,7 @@ print("UNIT_OK")
 ]])
   f:close()
 end
-local p = io.popen('set "ROVER_PKG_TEST=1" && "' .. LUAVM .. '" -i "' .. driver .. '" 2>nul')
+local p = io.popen('set "ROVER_PKG_TEST=1" && "' .. CLUA .. '" -i "' .. driver .. '" 2>nul')
 local out = p and p:read("*a") or ""
 if p then p:close() end
 os.remove(driver)

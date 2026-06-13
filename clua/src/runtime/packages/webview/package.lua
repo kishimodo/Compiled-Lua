@@ -1,4 +1,4 @@
--- LuaVM webview package manifest.
+-- CLua webview package manifest.
 return {
     name        = "webview",
     version     = "0.1",

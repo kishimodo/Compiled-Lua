@@ -3,8 +3,8 @@
  *  Module-name → file-path resolution with a search list.
  */
 
-#ifndef LUAVM_COMPILER_PATHS_H
-#define LUAVM_COMPILER_PATHS_H
+#ifndef CLUA_COMPILER_PATHS_H
+#define CLUA_COMPILER_PATHS_H
 
 #include <stddef.h>
 
@@ -31,4 +31,4 @@ int Paths_InstalledInStore( const char *ModuleName );
    Returns 1 + path in Out, 0 if no root exists. Out may be NULL to probe. */
 int Paths_BuiltinPackagesRoot( char *Out, size_t OutSize );
 
-#endif /* LUAVM_COMPILER_PATHS_H */
+#endif /* CLUA_COMPILER_PATHS_H */

@@ -7,8 +7,8 @@
  *  the stack — caller's responsibility to raise it).
  */
 
-#ifndef LUAVM_FFI_MARSHAL_H
-#define LUAVM_FFI_MARSHAL_H
+#ifndef CLUA_FFI_MARSHAL_H
+#define CLUA_FFI_MARSHAL_H
 
 #include "ffi/ctype.h"
 
@@ -20,4 +20,4 @@ int Marshal_LuaToC( lua_State *L, int StackIdx, PCType_T TargetType, void *Dst )
 
 int Marshal_CToLua( lua_State *L, PCType_T SourceType, const void *Src );
 
-#endif /* LUAVM_FFI_MARSHAL_H */
+#endif /* CLUA_FFI_MARSHAL_H */

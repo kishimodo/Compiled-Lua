@@ -2,28 +2,28 @@
 -- (rover/registry-mv, with index.json + vpkg 1.0.0/2.0.0) as a REMOTE
 -- registry via a file:// URL (curl supports file://, so the full remote code
 -- path -- index fetch, version resolve, download, install -- runs with no
--- server). Run from the repo root by luavm.exe.
+-- server). Run from the repo root by clua-interp.exe.
 
 local function abscwd()
   local p = io.popen("cd"); if not p then return "." end
   local d = p:read("*a") or ""; p:close(); return (d:gsub("%s+$", ""))
 end
 local ROOT  = abscwd()
-local LUAVM = ROOT .. "\\build\\bin\\luavm.exe"
+local CLUA = ROOT .. "\\build\\bin\\clua-interp.exe"
 local PKG   = ROOT .. "\\rover\\src\\rover.lua"
 local URL   = "file:///" .. ROOT:gsub("\\", "/") .. "/rover/registry-mv"
-local PROJ  = (os.getenv("TEMP") or ".") .. "\\luavm-remotetest"
+local PROJ  = (os.getenv("TEMP") or ".") .. "\\clua-interp-remotetest"
 local STORE = (os.getenv("LOCALAPPDATA") or ".") .. "\\clua\\packages"
 
 local function sh(cmd) local ok, _, c = os.execute('"' .. cmd .. '"'); return (ok == true) or (ok == 0) or (c == 0) end
-local function pk(args) local ok, _, c = os.execute('cd /d "' .. PROJ .. '" && "' .. LUAVM .. '" -i "' .. PKG .. '" ' .. args); return (ok == true) or (ok == 0) or (c == 0) end
-local function capture_proj(args) local p = io.popen('cd /d "' .. PROJ .. '" && "' .. LUAVM .. '" -i "' .. PKG .. '" ' .. args .. ' 2>&1'); if not p then return "" end local o = p:read("*a") or ""; p:close(); return o end
+local function pk(args) local ok, _, c = os.execute('cd /d "' .. PROJ .. '" && "' .. CLUA .. '" -i "' .. PKG .. '" ' .. args); return (ok == true) or (ok == 0) or (c == 0) end
+local function capture_proj(args) local p = io.popen('cd /d "' .. PROJ .. '" && "' .. CLUA .. '" -i "' .. PKG .. '" ' .. args .. ' 2>&1'); if not p then return "" end local o = p:read("*a") or ""; p:close(); return o end
 local function slurp(p) local f = io.open(p, "rb"); if not f then return nil end local s = f:read("*a"); f:close(); return s end
 local function spit(p, s) local f = io.open(p, "wb"); if not f then return false end f:write(s); f:close(); return true end
-local function fail(m) print("[-] FAIL test-pkgmgr-remote: " .. m); sh(LUAVM .. ' -i ' .. PKG .. ' remove vpkg >nul 2>&1'); os.exit(1) end
+local function fail(m) print("[-] FAIL test-pkgmgr-remote: " .. m); sh(CLUA .. ' -i ' .. PKG .. ' remove vpkg >nul 2>&1'); os.exit(1) end
 
 sh('rmdir /S /Q "' .. PROJ .. '" >nul 2>&1'); sh('mkdir "' .. PROJ .. '" >nul 2>&1')
-sh(LUAVM .. ' -i ' .. PKG .. ' remove vpkg >nul 2>&1')
+sh(CLUA .. ' -i ' .. PKG .. ' remove vpkg >nul 2>&1')
 
 -- 1) add from the REMOTE (file://) registry, exact 1.0.0 -> downloaded + locked
 if not pk('add vpkg "' .. URL .. '" "1.0.0" >nul 2>&1') then fail("remote add vpkg 1.0.0") end
@@ -50,7 +50,7 @@ if not pk('gc >nul 2>&1') then fail("gc") end
 if slurp(STORE .. "\\vpkg\\1.0.0\\init.lua") then fail("gc should have pruned unreferenced 1.0.0") end
 if not slurp(STORE .. "\\vpkg\\2.0.0\\init.lua") then fail("gc must keep the locked/latest 2.0.0") end
 
-sh(LUAVM .. ' -i ' .. PKG .. ' remove vpkg >nul 2>&1')
+sh(CLUA .. ' -i ' .. PKG .. ' remove vpkg >nul 2>&1')
 sh('rmdir /S /Q "' .. PROJ .. '" >nul 2>&1')
 print("[+] PASS test-pkgmgr-remote (file:// remote add + outdated + update bump + gc prune)")
 os.exit(0)

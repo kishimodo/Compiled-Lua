@@ -5,8 +5,8 @@
  *  cdata machinery.
  */
 
-#ifndef LUAVM_FFI_LOAD_H
-#define LUAVM_FFI_LOAD_H
+#ifndef CLUA_FFI_LOAD_H
+#define CLUA_FFI_LOAD_H
 
 #include "ffi/cdata.h"
 #include "ffi/ctype.h"
@@ -48,4 +48,4 @@ void Ffi_RegisterModule( void *Hm );
  */
 void *Ffi_LookupSymAcrossModules( const char *Sym );
 
-#endif /* LUAVM_FFI_LOAD_H */
+#endif /* CLUA_FFI_LOAD_H */

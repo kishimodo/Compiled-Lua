@@ -86,7 +86,7 @@ local function radix2_fft(re, im, n, inverse)
             local w_re, w_im = 1, 0
             for j = 0, half - 1 do
                 -- Hoist the array reads into locals before the writes. The
-                -- LuaVM JIT mis-traces repeated `re[k + j + half + 1]` reads
+                -- CLua JIT mis-traces repeated `re[k + j + half + 1]` reads
                 -- that get reused after a same-index write in the same loop
                 -- iteration -- using one local per slot avoids it.
                 local idx1 = k + j + 1

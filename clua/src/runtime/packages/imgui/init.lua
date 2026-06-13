@@ -36,15 +36,15 @@ local function MakeImGui()
     -- get dllexport'd through the same --export-all-symbols path so ffi.C
     -- finds them on the main module.
     ffi.cdef[[
-    int   LuaVM_ImGuiHost_Init(const char *title_utf8, int width, int height);
-    int   LuaVM_ImGuiHost_PumpEvents(void);
-    void  LuaVM_ImGuiHost_NewFrame(void);
-    void  LuaVM_ImGuiHost_Render(float r, float g, float b, float a);
-    void  LuaVM_ImGuiHost_Shutdown(void);
-    int   LuaVM_ImGuiHost_Version(void);
-    void *LuaVM_ImGuiHost_GetD3DDevice(void);
-    void *LuaVM_ImGuiHost_GetD3DContext(void);
-    void  LuaVM_ImGuiHost_RebuildFontAtlas(void);
+    int   CLua_ImGuiHost_Init(const char *title_utf8, int width, int height);
+    int   CLua_ImGuiHost_PumpEvents(void);
+    void  CLua_ImGuiHost_NewFrame(void);
+    void  CLua_ImGuiHost_Render(float r, float g, float b, float a);
+    void  CLua_ImGuiHost_Shutdown(void);
+    int   CLua_ImGuiHost_Version(void);
+    void *CLua_ImGuiHost_GetD3DDevice(void);
+    void *CLua_ImGuiHost_GetD3DContext(void);
+    void  CLua_ImGuiHost_RebuildFontAtlas(void);
     ]]
 
     -- Known FFI gap: cimgui declares ImGuiViewport as a forward-only
@@ -87,7 +87,7 @@ local function MakeImGui()
     -- Shared scratch ImVec2 used to bit-pack into a uint64 for the
     -- by-value-ImVec2-as-uint64 ABI hack. The aliasing int64_t* is
     -- cached so M.ImVec2 doesn't allocate or call ffi.cast per frame.
-    -- Use SIGNED int64_t* (not uint64_t*): LuaVM's marshal returns
+    -- Use SIGNED int64_t* (not uint64_t*): CLua's marshal returns
     -- signed int64 reads as lua_Integer (primitive, no cdata), but
     -- unsigned int64 boxes into a fresh cdata per read. The bit
     -- pattern is identical to the C-side uint64_t param.
@@ -282,7 +282,7 @@ local function MakeImGui()
     -- ---- 5. Lifecycle ----------------------------------------------------
 
     function M.init(title, w, h)
-        local rc = C.LuaVM_ImGuiHost_Init(title or "LuaVM ImGui",
+        local rc = C.CLua_ImGuiHost_Init(title or "CLua ImGui",
                                           w or 800, h or 600)
         if rc ~= 0 then
             error("imgui.init failed (code " .. tostring(rc) .. ")")
@@ -290,23 +290,23 @@ local function MakeImGui()
     end
 
     function M.pump_events()
-        return C.LuaVM_ImGuiHost_PumpEvents() ~= 0
+        return C.CLua_ImGuiHost_PumpEvents() ~= 0
     end
 
-    function M.new_frame() C.LuaVM_ImGuiHost_NewFrame() end
+    function M.new_frame() C.CLua_ImGuiHost_NewFrame() end
 
     function M.render(r, g, b, a)
-        C.LuaVM_ImGuiHost_Render(r or 0.1, g or 0.1, b or 0.1, a or 1.0)
+        C.CLua_ImGuiHost_Render(r or 0.1, g or 0.1, b or 0.1, a or 1.0)
     end
 
-    function M.shutdown() C.LuaVM_ImGuiHost_Shutdown() end
+    function M.shutdown() C.CLua_ImGuiHost_Shutdown() end
 
-    function M.host_version() return tonumber(C.LuaVM_ImGuiHost_Version()) end
+    function M.host_version() return tonumber(C.CLua_ImGuiHost_Version()) end
 
     -- Tell the DX11 backend to drop its current font texture and rebuild
     -- it from the current ImGuiIO.Fonts atlas. Call after loading new
     -- fonts at runtime.
-    function M.rebuild_font_atlas() C.LuaVM_ImGuiHost_RebuildFontAtlas() end
+    function M.rebuild_font_atlas() C.CLua_ImGuiHost_RebuildFontAtlas() end
 
     -- ---- 6. Ergonomic conveniences --------------------------------------
     -- Common shortcuts so users don't have to remember every cimgui-
