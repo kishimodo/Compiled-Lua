@@ -1,4 +1,14 @@
--- thread -- OS-thread spawn with an isolated lua_State per thread.
+-- thread -- worker spawn with a coroutine-backed handle.
+--
+-- NOTE ON CONCURRENCY: real OS threads (one isolated lua_State each) are not
+-- shipped in this build -- the native bootstrap that brings a worker lua_State
+-- up on a new OS thread was never wired in, and in a closed-world AOT program
+-- a function cannot be handed to another state via string.dump/load. So
+-- thread.spawn runs the worker COOPERATIVELY: the function is driven on a
+-- coroutine and executed when the handle is joined. The handle surface is
+-- unchanged; only the timing differs. Native mode is a documented future step
+-- (resolve the worker through its compile-time function-id, then bootstrap the
+-- state with the proto registry).
 --
 -- Public surface:
 --   thread.spawn(fn, args?, opts?)   -> thread handle
@@ -7,14 +17,9 @@
 --   thread.lua_api_available()       -> bool, reason?
 --
 -- spawn parameters:
---   fn       function value compiled into bytecode via string.dump
---            (must not close over upvalues; the worker re-loads from bytes)
---            OR a Lua source string or filesystem path ending in ".lua"
---   args     table of arguments; serialized via msgpack (preferred) or
---            channel.serialize (fallback) and unpacked into varargs
---   opts     { stack_size = 2 * 1024 * 1024,    initial commit
---              name       = nil,                SetThreadDescription
---            }
+--   fn       function value (run cooperatively, may close over upvalues)
+--   args     table of arguments unpacked into the function's varargs
+--   opts     { name = nil }   reserved for the future native path
 --
 -- Thread handle methods:
 --   :join(timeout_ms?)  -> result | nil, err           blocks until exit
@@ -140,17 +145,6 @@ function M.lua_api_available()
     return LUA_API_AVAILABLE, LUA_API_REASON
 end
 
-local NATIVE_BOOTSTRAP, NATIVE_BOOTSTRAP_PTR
-do
-    local ok, addr = pcall(function() return C._clua_thread_bootstrap end)
-    if ok then
-        NATIVE_BOOTSTRAP = true
-        NATIVE_BOOTSTRAP_PTR = ffi.cast("void *", addr)
-    else
-        NATIVE_BOOTSTRAP = false
-    end
-end
-
 -- ===== Helpers =================================================
 
 local thread_mt = { __index = {} }
@@ -161,122 +155,30 @@ local WAIT_OBJECT_0 = 0
 local WAIT_TIMEOUT  = 0x102
 local STILL_ACTIVE  = 259  -- STATUS_PENDING when GetExitCodeThread is called
 
--- Convert a function / source / path argument into a (bytes, name) pair
--- suitable for luaL_loadbufferx. Functions are string.dump'd to bytecode.
-local function materialize_chunk(fn_or_source)
-    if type(fn_or_source) == "function" then
-        local ok, bytecode = pcall(string.dump, fn_or_source, true)
-        if not ok then
-            return nil, "thread.spawn: cannot dump function: " .. tostring(bytecode)
-        end
-        return bytecode, "=thread-fn"
-    elseif type(fn_or_source) ~= "string" then
-        return nil, "thread.spawn: fn must be function, source string, or path"
-    end
-    -- Heuristic for "this is a path": short, no newline, .lua suffix.
-    if #fn_or_source < 260
-       and not fn_or_source:find("\n", 1, true)
-       and fn_or_source:sub(-4) == ".lua" then
-        local f, ferr = io.open(fn_or_source, "rb")
-        if not f then
-            return nil, "thread.spawn: cannot open " .. fn_or_source .. ": " .. (ferr or "?")
-        end
-        local body = f:read("*a"); f:close()
-        return body, fn_or_source
-    end
-    return fn_or_source, "=thread-chunk"
-end
-
-local spawn_native, spawn_cooperative
+-- ===== spawn ===================================================
+-- Real OS-thread spawning needs two pieces this build does not ship: a native
+-- bootstrap (`_clua_thread_bootstrap`) that brings up a fresh lua_State on the
+-- new OS thread, and a way to hand the worker function to that state. The
+-- interpreter would do the latter with string.dump + load, but a closed-world
+-- AOT program has neither the bytecode dumper nor the loader -- the function
+-- must instead be resolved through its compile-time function-id in the proto
+-- registry, which is the documented next step for native mode.
+--
+-- Until that lands, thread.spawn runs the worker COOPERATIVELY: the function is
+-- driven on a coroutine and executed when the handle is joined. The handle API
+-- is identical (:join / :alive / :detach / :id); only the timing differs
+-- (join() performs the work). This is exactly what every build did before --
+-- the native path was never wired up -- now without the pointless
+-- string.dump -> load round-trip that broke AOT compilation.
 
 function M.spawn(fn, args, opts)
-    local chunk, name = materialize_chunk(fn)
-    if not chunk then return nil, name end
+    if type(fn) ~= "function" then
+        return nil, "thread.spawn: fn must be a function"
+    end
     args = args or {}
     if type(args) ~= "table" then
         return nil, "thread.spawn: args must be a table (becomes varargs)"
     end
-    opts = opts or {}
-
-    local args_blob = pack(args)
-
-    if NATIVE_BOOTSTRAP and LUA_API_AVAILABLE then
-        return spawn_native(chunk, name, args_blob, opts)
-    end
-    return spawn_cooperative(chunk, name, args_blob, opts)
-end
-
--- ===== native spawn path ======================================
-
-spawn_native = function(chunk, name, args_blob, opts)
-    local result = ffi.cast("thread_result_t *", C.malloc(ffi.sizeof("thread_result_t")))
-    if result == nil then return nil, "thread.spawn: malloc result_slot failed" end
-    result.status = 0; result.payload_ptr = nil
-    result.payload_len = 0; result.payload_kind = 0
-
-    local done_ev = C.CreateEventW(nil, 1, 0, nil)
-    if done_ev == nil then
-        C.free(result)
-        return nil, "thread.spawn: CreateEventW failed"
-    end
-
-    local ctx = ffi.cast("thread_ctx_t *", C.malloc(ffi.sizeof("thread_ctx_t")))
-    if ctx == nil then
-        C.CloseHandle(done_ev); C.free(result)
-        return nil, "thread.spawn: malloc ctx failed"
-    end
-    ctx.chunk_bytes = ffi.cast("char *", C.malloc(#chunk))
-    ffi.copy(ctx.chunk_bytes, chunk, #chunk); ctx.chunk_len = #chunk
-    ctx.chunk_name = ffi.cast("char *", C.malloc(#name + 1))
-    ffi.copy(ctx.chunk_name, name, #name + 1)
-    ctx.args_blob = ffi.cast("char *", C.malloc(#args_blob))
-    ffi.copy(ctx.args_blob, args_blob, #args_blob); ctx.args_len = #args_blob
-    ctx.result_slot = result
-    ctx.done_event  = done_ev
-
-    local stack_size = opts.stack_size or (2 * 1024 * 1024)
-    local tid = ffi.new("DWORD[1]")
-    local h = C.CreateThread(nil, stack_size,
-        ffi.cast("LPVOID", NATIVE_BOOTSTRAP_PTR),
-        ffi.cast("LPVOID", ctx), 0, tid)
-    if h == nil then
-        local e = tonumber(C.GetLastError())
-        C.free(ctx.chunk_bytes); C.free(ctx.chunk_name); C.free(ctx.args_blob)
-        C.free(ctx); C.free(result); C.CloseHandle(done_ev)
-        return nil, "CreateThread failed: " .. e
-    end
-
-    -- SetThreadDescription is available since Windows 10 1607. Best-effort:
-    -- ignore failure (older OS or no permission).
-    if opts.name then
-        local nlen = C.MultiByteToWideChar(65001, 0, opts.name, -1, nil, 0)
-        if nlen > 0 then
-            local wbuf = ffi.new("unsigned short[?]", nlen)
-            C.MultiByteToWideChar(65001, 0, opts.name, -1, wbuf, nlen)
-            local ok, _ = pcall(function()
-                C.SetThreadDescription(h, ffi.cast("LPWSTR", wbuf))
-            end)
-        end
-    end
-
-    return setmetatable({
-        handle    = h,
-        tid       = tonumber(tid[0]),
-        ctx       = ctx,
-        result    = result,
-        done_ev   = done_ev,
-        joined    = false,
-        detached  = false,
-        mode      = "native",
-    }, thread_mt)
-end
-
--- ===== cooperative fallback ===================================
-
-spawn_cooperative = function(chunk, name, args_blob, opts)
-    local fn, err = load(chunk, name, "bt")
-    if not fn then return nil, "load failed: " .. err end
-    local args = unpack_blob(args_blob)
     local co = coroutine.create(function() return fn(table.unpack(args)) end)
     return setmetatable({
         co       = co,

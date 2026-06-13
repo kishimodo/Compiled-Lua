@@ -322,18 +322,56 @@ The new coverage surfaced a batch of real bugs.
   end-to-end in AOT-compiled exes (atomic / queue / semaphore / event / mutex
   / channel) and pinned at the product level by
   `tests/differential/aot_concurrency.lua` (compiled-vs-interpreter at O0+O1).
-  Note: `pool`/`thread` remain host-only — they `string.dump` worker
-  functions to ship across OS threads, which the closed world forbids.
+  Note: `pool`/`thread` now compile AOT too — see POOL-THREAD-AOT-001 below.
 - **CAB-FFI-001** — the FFI can't CALL a `ffi.cast`'d function pointer ("function
   pointer not resolved"), which blocks every functional `cab` op (they drive a
   cast `SetupIterateCabinetA`/FCI pointer). `cab` test SKIPs the round-trip.
-- **XPRESS-SMALL-001** — `RtlCompressBuffer` returns `STATUS_BUFFER_TOO_SMALL`
-  for XPRESS and LZNT1 on a 1-byte input (not the output buffer — likely a
-  format minimum); XPRESS_HUFF works after R5-006. XFAIL.
-- **NET-FFINEW-001 (ULONG path) / NET-ROUTE-002** — `network_info` adapters/
-  dns_servers/default_gateway still hit an `ffi.new` integer→pointer conversion
-  on the `ULONG[1]` path (the `DWORD[1]` path was fixed by R5-003); routing-table
-  shape. XFAIL.
+- **XPRESS-SMALL-001 — FIXED (2026-06-13).** XPRESS and LZNT1 cannot represent
+  an input below their minimum block (`RtlCompressBuffer` returns
+  `STATUS_BUFFER_TOO_SMALL`); it is a genuine format minimum, not an output-buffer
+  size. `xpress.compress`/`decompress` now store such inputs verbatim for those
+  two formats — the decision is a pure function of `(format, original_size)`, so
+  decompress recovers them with no marker and no ambiguity. XPRESS_HUFF is
+  unaffected (it already handled tiny inputs after R5-006).
+  `clua/src/runtime/packages/xpress/init.lua`; round-trip asserted in
+  `tests/packages/test_xpress.lua` (1- and 3-byte inputs, both formats).
+- **NET-ROUTE-002 — FIXED (2026-06-13).** `network_info.routing_table()` decoded
+  garbage rows because `MIB_IPFORWARD_ROW2_NI` was not byte-exact with the
+  platform ABI: `SOCKADDR_INET_NI` was modelled as `{ u16; char[26] }` (align 2),
+  but the real union is 28 bytes / **align 4**, which shrank `IP_ADDRESS_PREFIX`
+  from 32 to 30 bytes; and the four route booleans were `BOOL` (int, 4 bytes)
+  where the API uses `BOOLEAN` (1 byte). Both errors moved the row stride, so
+  `Table[i>=1]` drifted into garbage (out-of-range prefix lengths, nil
+  destinations). The cdef now forces `SOCKADDR_INET_NI` to size 28 / align 4 and
+  uses `BYTE` for the booleans, making the struct (size 104) and every field
+  offset match. `clua/src/runtime/packages/network_info/init.lua`; the
+  prefix-range probe is asserted in `tests/packages/test_network_info.lua`.
+  (NET-FFINEW-001's `ULONG[1]` path was already fixed by R5-003; this was the
+  remaining routing-decode bug.)
+- **SECRET-WIPE-DEFAULTLEN-001 — FIXED (2026-06-13).** `secret.wipe(buf)` with no
+  explicit length no-op'd because `ffi.sizeof` returned 0 for a variable-length
+  array cdata (`unsigned char[?]`): it read the array *type*'s size (0), not the
+  instance. `LuaFn_Sizeof` now returns `ElemType->Size * Cd->FlexN` for a VLA
+  cdata, matching LuaJIT — so the documented `ffi.sizeof(buf)` default actually
+  zeroes the buffer, and every other VLA caller gets a correct size too.
+  `clua/src/ffi/ffi_lib.c`; asserted in `tests/packages/test_secret.lua`.
+- **PROP-STRLEN-001 — FIXED (2026-06-13).** `property.string` passed two
+  independent random indices to `string.sub`, yielding variable-length slices
+  that broke the `[min_len, max_len]` contract. It now picks one index and uses
+  `alphabet:sub(j, j)`. `clua/src/runtime/packages/property/init.lua`; asserted
+  in `tests/packages/test_property.lua`.
+- **POOL-THREAD-AOT-001 — FIXED (2026-06-13).** `pool` and `thread` referenced
+  `string.dump`/`load` to ship a worker function to another lua_State, a
+  closed-world violation that made any program requiring them fail to compile.
+  Real OS threading was never wired up (the native `_clua_thread_bootstrap` does
+  not exist anywhere), so both only ever ran cooperatively/inline — the
+  bytecode round-trip was dead code. They now run that actual behavior without
+  it: `thread.spawn` drives the worker on a coroutine (keeping the closure, so
+  upvalues survive), `pool` dispatches inline. Both compile AOT and match the
+  interpreter — pinned by `tests/differential/aot_pool_thread.lua` at O0+O1.
+  Native OS threads remain a documented future step (resolve the worker through
+  its compile-time function-id, then bring the worker state up from the proto
+  registry). `clua/src/runtime/packages/{pool,thread}/init.lua`.
 
 ## FIXED — AOT-MULTIMOD-001 (2026-06-12): GC swept Protos during startup build
 
@@ -423,16 +461,19 @@ note above:
   flag. Regression tests: `tests/differential/aot_forlimit.lua`,
   `tests/differential/aot_mm_dispatch.lua` (run under both engines).
 
-### Known bounded divergence (not a bug to fix per-test; use pcall in tests)
+### AOT-ERRBANNER-001 — RESOLVED (2026-06-13)
 
-- **AOT-ERRBANNER-001** — an UNCAUGHT runtime error prints
-  `clua: runtime error: <msg>` (no traceback) from a compiled exe, vs
-  `clua-interp: <msg>` + `stack traceback: …` under `clua-interp -i`. The `<msg>` itself
-  (including `source:line:` and operand annotations) matches. Differential
-  tests must assert error behavior through `pcall` (messages compare exactly);
-  byte-equality of the top-level banner is inherently impossible (different
-  program names). A traceback-printing msghandler in the AOT entry would
-  narrow (not close) this; tracked as a polish item.
+An uncaught runtime error from a compiled exe now prints
+`<progname>: <message>` followed by a `stack traceback: …`, the SAME format the
+reference interpreter uses (`clua_interp_main.c` `Clua_PrintError`). The message
+body and traceback match; the leading name token is the program's own basename
+(`AotProgName(argv[0])` in `clua/src/runtime/aot_entry.c`) rather than a fixed
+string, which is correct — a standalone exe reports under its own name, not the
+compiler's. The earlier traceback-handler work (`AotMsgHandler`) plus this
+progname banner close the divergence in format; only the name token differs, by
+design (different programs have different names). Differential tests may still
+assert error *messages* through `pcall`, but the top-level banner is no longer a
+documented divergence.
 
 ### Round 6 (2026-06-10, post-`66f4b66`) — three more, FIXED in `80ec826`
 
@@ -455,15 +496,24 @@ note above:
 
 Regression test: `tests/differential/aot_errpath_fidelity.lua` (both engines).
 
-### Known bounded divergence (in addition to AOT-ERRBANNER-001)
+### AOT-DEBUGREFLECT-001 — RESOLVED (2026-06-13)
 
-- **AOT-DEBUGREFLECT-001** — a debug table fetched WITHOUT the literal string
-  `"debug"` anywhere in the chunk (e.g. `_G["de".."bug"]`, `pairs(_G)`
-  harvesting) evades the constant-scan guard, so `debug.setlocal` under such
-  a chunk can still falsify -O1 type proofs. This is the standard optimizing-
-  compiler reflection caveat (LuaJIT behaves analogously); a fully sound guard
-  would require killing proofs on any dynamic `_ENV`/`_G` indexing. Documented,
-  accepted at -O1; `-O0` is always reflection-exact.
+A debug table fetched WITHOUT the literal string `"debug"` (e.g. `_G["de".."bug"]`,
+`pairs(_G)` harvesting) used to evade the constant-scan guard, so `debug.setlocal`
+under such a chunk could falsify a -O1 type proof. The fix closes the hole at its
+source: the proof-producing inference is now also disabled for any module that
+**materializes the global environment as a first-class value**, which is the
+precise moment a dynamic key could reach `debug`. In bytecode that is exactly two
+shapes — `OP_GETUPVAL` of the `_ENV` upvalue (`_ENV[expr]`, `pairs(_ENV)`,
+`e = _ENV`) and `OP_GETTABUP _ENV "_G"`/`"_ENV"` (naming the global table). Plain
+global *reads* (`OP_GETTABUP` with a constant non-`_G`/`_ENV` key) and local table
+indexing (`OP_GETTABLE` on a non-`_ENV` register) do NOT trip it, so ordinary hot
+loops keep their proofs; only code that hoists the global env loses them,
+module-wide. Sound because the gate is module-wide (a helper indexing a passed-in
+env is covered by the caller that materialized it). `lc_module_reflects_globals`
+in `clua/src/opt/passes.c`, gating `lc_pass_ip_typeprop`. Pinned by
+`tests/differential/aot_debugreflect.lua` at O0+O1. `-O0` was always
+reflection-exact.
 
 - **AOT-CLOSEDWORLD-002** (2026-06-12) — compiled exes no longer link the Lua
   front-end: `aot_entry.c` defines closed-world stubs for `luaY_parser` /

@@ -6,11 +6,11 @@
 -- 2026-06-09: hostname/domain_name/adapters/dns_servers/default_gateway are
 -- asserted unconditionally below.
 --
--- KNOWN BUG (NET-ROUTE-002): routing_table()/arp_table() run, but the
--- SOCKADDR_INET / MIB_IPFORWARD_ROW2 struct decode is misaligned in this
--- build: most rows return destination=nil and out-of-range prefix_length
--- values (e.g. 255, 224). The rows' *types* are correct, but the *values* are
--- garbage, so value-correctness is XFAIL'd while shape is asserted normally.
+-- NET-ROUTE-002 is FIXED: the MIB_IPFORWARD_ROW2 / SOCKADDR_INET cdefs are now
+-- byte-exact with the platform ABI (SOCKADDR_INET forced to size 28 / align 4,
+-- and the four route booleans are 1-byte BOOLEAN, not 4-byte BOOL). The row
+-- stride matches, so every Table[i] decodes correctly and prefix_length is in
+-- range; the value-correctness probe is asserted unconditionally below.
 local ok_req, ni = pcall(require, "network_info")
 if not ok_req then
     print("[~] SKIP test_network_info (" .. tostring(ni) .. ")")
@@ -64,7 +64,7 @@ for _, r in ipairs(rt) do
     end
 end
 ok(mask_conv_ok,                            "ipv4 prefix->mask conversion is canonical")
-xfail(prefix_in_range, "every route prefix_length is in valid range (struct decode)", "NET-ROUTE-002")
+ok(prefix_in_range, "every route prefix_length is in valid range (struct decode, NET-ROUTE-002)")
 
 -- ===== arp_table: runs, shape correct ======================================
 local arp = ni.arp_table()

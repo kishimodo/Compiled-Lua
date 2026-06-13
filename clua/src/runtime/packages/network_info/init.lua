@@ -125,11 +125,22 @@ DWORD GetAdaptersAddresses(ULONG Family, ULONG Flags, PVOID Reserved,
 
 BOOL GetComputerNameExW(int NameType, LPWSTR lpBuffer, DWORD *nSize);
 
-/* Routing table (Vista+). */
+/* Routing table (Vista+).
+   SOCKADDR_INET is a union of SOCKADDR_IN / SOCKADDR_IN6; its largest arm
+   (IN6) carries ULONG fields, so the real type is 28 bytes with 4-byte
+   alignment. Modelling it as { u16; char[26] } gives only 2-byte alignment,
+   which shrinks IP_ADDRESS_PREFIX from 32 to 30 bytes and so mis-sizes every
+   struct that embeds it -- the routing-row stride drifts and Table[i>=1]
+   decodes garbage (bug NET-ROUTE-002). The members below reproduce the IN6
+   byte layout (family@0, addr@4 for IPv4 / @8 for IPv6) and force size 28 /
+   align 4 to match the platform ABI exactly. */
 typedef struct _SOCKADDR_INET_NI {
-    unsigned short si_family;
-    char           si_pad[26];
-} SOCKADDR_INET_NI;
+    unsigned short si_family;    /* offset 0  (sa_family)                    */
+    unsigned short si_port;      /* offset 2  (IPv4 addr begins at offset 4) */
+    unsigned long  si_flowinfo;  /* offset 4  -- forces 4-byte alignment     */
+    unsigned char  si_addr[16];  /* offset 8  (IPv6 addr lives here)         */
+    unsigned long  si_scope;     /* offset 24                                */
+} SOCKADDR_INET_NI;              /* size 28, align 4                          */
 
 typedef struct _IP_ADDRESS_PREFIX_NI {
     SOCKADDR_INET_NI Prefix;
@@ -146,10 +157,13 @@ typedef struct _MIB_IPFORWARD_ROW2_NI {
     ULONG     PreferredLifetime;
     ULONG     Metric;
     ULONG     Protocol;
-    BOOL      Loopback;
-    BOOL      AutoconfigureAddress;
-    BOOL      Publish;
-    BOOL      Immortal;
+    /* The real fields are BOOLEAN (1 byte each), not BOOL (int, 4 bytes).
+       Using BOOL added 12 bytes and pushed Age/Origin past the row, blowing
+       the array stride (NET-ROUTE-002). */
+    BYTE      Loopback;
+    BYTE      AutoconfigureAddress;
+    BYTE      Publish;
+    BYTE      Immortal;
     ULONG     Age;
     ULONG     Origin;
 } MIB_IPFORWARD_ROW2_NI;

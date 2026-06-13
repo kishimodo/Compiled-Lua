@@ -116,24 +116,6 @@ end
 local pool_mt = { __index = {} }
 local pool_methods = pool_mt.__index
 
--- Build the worker function source. We embed it as a string (rather
--- than a closure) because closures can't survive crossing into another
--- lua_State -- the worker re-loads via load().
-
-local WORKER_SRC = [[
-local task_ch_addr, control_ch_addr = ...
-local channel = require "channel"
--- The pool encodes the task channel + control channel descriptors as
--- their internal CRITICAL_SECTION addresses + event handles. In native
--- mode we'd reattach via a sharable handle table; until that lands the
--- worker reads tasks via a simple polling loop using its own channel
--- handle that the pool passed by reference.
--- For now the worker just exits cleanly -- the real dispatching happens
--- in pool.submit which runs the function inline when threads aren't
--- available. The worker exists so the API surface is correct.
-return true
-]]
-
 -- Inline-execute a single task in the calling Lua state. Used when:
 --   * thread package falls back to cooperative mode (no real threads), OR
 --   * pool is run in single-worker mode for tests
@@ -170,33 +152,12 @@ function M.new(opts)
         closed      = atomic.flag(),
         inflight    = atomic.int(0),
         worker_count = workers,
-        -- Inline mode: when the thread package falls back to cooperative
-        -- coroutines (no real OS threads available), there's no point
-        -- spawning workers -- submit() just runs the fn synchronously.
-        -- We detect this lazily on first submit.
-        inline      = false,
+        -- Tasks run inline (synchronously on the caller's thread). Real OS
+        -- worker threads need a native bootstrap + a cross-lua_State function
+        -- handoff that no current build ships; see the note in submit().
+        inline      = true,
     }, pool_mt)
 
-    -- Detect inline mode: if the native thread bootstrap isn't available
-    -- we can't make a worker pool that actually parallelizes. Switch to
-    -- inline dispatch -- submit() runs the fn on the caller's thread and
-    -- returns an already-resolved future.
-    local lua_api_ok = thread.lua_api_available()
-    if not lua_api_ok then
-        self.inline = true
-        return self
-    end
-
-    -- Real worker threads. Each runs a simple loop pulling from task_ch.
-    -- The task is a table { fn_bytes, args, future_ref }. The worker
-    -- reconstructs fn via load() then invokes it.
-    --
-    -- NOTE: passing the future across threads requires the result channel
-    -- itself to be shareable. Until the runtime exports the bootstrap +
-    -- a channel-attach helper, we fall back to inline mode by default
-    -- when the channel-cross-state pathway isn't proven; once those are
-    -- in place flip self.inline=false unconditionally and start workers.
-    self.inline = true
     return self
 end
 
@@ -212,38 +173,15 @@ function pool_methods:submit(fn, args)
     end
     local fut = new_future()
     self.inflight:inc()
-    if self.inline then
-        -- Synchronous dispatch -- run the fn on the caller's thread.
-        -- The future is born already-resolved; result() will return
-        -- immediately on the first call.
-        exec_inline(fn, args, fut)
-        self.inflight:dec()
-    else
-        -- Real-pool path: serialize fn + args, push to task_ch.
-        local fn_bytes
-        if type(fn) == "function" then
-            local ok, bc = pcall(string.dump, fn, true)
-            if not ok then
-                fut.state:set(FUT_ERROR)
-                fut.result_ch:send({ ok = false, err = "cannot dump fn: " .. tostring(bc) })
-                self.inflight:dec()
-                return fut
-            end
-            fn_bytes = bc
-        else
-            error("pool:submit: fn must be a function", 0)
-        end
-        -- For now route through inline anyway -- see note in pool.new.
-        local fn2, lerr = load(fn_bytes, "=pool-task", "b")
-        if not fn2 then
-            fut.state:set(FUT_ERROR)
-            fut.result_ch:send({ ok = false, err = "load failed: " .. tostring(lerr) })
-            self.inflight:dec()
-            return fut
-        end
-        exec_inline(fn2, args, fut)
-        self.inflight:dec()
-    end
+    -- Tasks execute inline on the calling thread; the future is born
+    -- resolved. A real cross-thread worker pool needs a native thread
+    -- bootstrap plus a way to hand a function to another lua_State -- which
+    -- in a closed-world AOT build cannot go through string.dump/load, so it
+    -- is gated on the compile-time function-id proto registry (see the notes
+    -- in thread/init.lua). Until that lands, submit() is synchronous, which
+    -- is exactly what every supported build does today.
+    exec_inline(fn, args, fut)
+    self.inflight:dec()
     return fut
 end
 

@@ -22,6 +22,7 @@
 #ifdef LUAC_CLUA_STANDALONE
 
 #include "aotc.h"
+#include "common/version.h"   /* CLUA_VERSION_STRING -- the single source of truth */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,7 +30,7 @@
 #include <process.h>   /* _getpid, _spawnv */
 #include <direct.h>    /* _getcwd (clua init project name) */
 
-#define CLUA_VERSION "0.1.0"
+#define CLUA_VERSION CLUA_VERSION_STRING
 
 static void usage( FILE *to ) {
     fprintf( to,

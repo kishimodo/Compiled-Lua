@@ -32,8 +32,8 @@ end
 -- UncompressedBufferSize=0 ntdll's RtlCompressBuffer faults rather than producing
 -- an empty/short frame. A segfault cannot be pcall-trapped, so the empty input is
 -- deliberately excluded; the package should clamp/short-circuit #bytes==0.
--- These samples are all >= a few bytes so the out_cap heuristic is sufficient for
--- every format (see XPRESS-SMALL-001 below for the tiny-input failure).
+-- These samples are all >= a few bytes; tiny XPRESS/LZNT1 inputs are covered
+-- by the verbatim-store round-trip checks below (XPRESS-SMALL-001).
 local samples = {
   "hello, world",                             -- short ASCII
   string.rep("abcabcabc", 200),               -- highly compressible
@@ -51,13 +51,19 @@ end
 -- XPRESS_HUFF handles a 1-byte input fine:
 ok(xpress.decompress(xpress.compress("A", xpress.XPRESS_HUFF), xpress.XPRESS_HUFF, 1) == "A",
    "XPRESS_HUFF round-trips a single byte")
--- but XPRESS and LZNT1 fail on a 1-byte input with STATUS_BUFFER_TOO_SMALL:
--- out_cap = #bytes + floor(#bytes/16) + 64 = 65 bytes is below those formats'
--- minimum compressed-block size, so RtlCompressBuffer returns 0xC0000023.
-xfail(pcall(xpress.compress, "A", xpress.XPRESS),
-      "XPRESS should compress a 1-byte input (out_cap slack too small)", "XPRESS-SMALL-001")
-xfail(pcall(xpress.compress, "A", xpress.LZNT1),
-      "LZNT1 should compress a 1-byte input (out_cap slack too small)", "XPRESS-SMALL-001")
+-- XPRESS and LZNT1 cannot represent an input below their minimum block, so a
+-- tiny input is stored verbatim and still round-trips (XPRESS-SMALL-001 fixed:
+-- the package short-circuits inputs under the format floor instead of handing
+-- RtlCompressBuffer a payload it rejects with STATUS_BUFFER_TOO_SMALL).
+ok(xpress.decompress(xpress.compress("A", xpress.XPRESS), xpress.XPRESS, 1) == "A",
+   "XPRESS round-trips a 1-byte input (stored verbatim)")
+ok(xpress.decompress(xpress.compress("A", xpress.LZNT1), xpress.LZNT1, 1) == "A",
+   "LZNT1 round-trips a 1-byte input (stored verbatim)")
+-- a few-byte input (still under the floor) round-trips for both too
+ok(xpress.decompress(xpress.compress("hi!", xpress.XPRESS), xpress.XPRESS, 3) == "hi!",
+   "XPRESS round-trips a 3-byte input")
+ok(xpress.decompress(xpress.compress("hi!", xpress.LZNT1), xpress.LZNT1, 3) == "hi!",
+   "LZNT1 round-trips a 3-byte input")
 
 -- ===== default format (no fmt arg) is XPRESS_HUFF and round-trips =====
 local d_in = "default-format payload exercises XPRESS_HUFF"

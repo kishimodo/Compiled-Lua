@@ -28,11 +28,11 @@ ok(buf[0] == 65 and buf[1] == 66 and buf[2] == 67 and buf[3] == 68, "bytes_to_bu
 ok(pcall(secret.bytes_to_buffer, 123) == false, "bytes_to_buffer errors on non-string")
 
 local nb = secret.new_buffer(8)
--- NOTE: ffi.sizeof() on a variable-length-array cdata (unsigned char[?])
--- returns 0 in this FFI, so we verify usability (all 8 indices writable +
--- readable) rather than the reported sizeof.
+-- ffi.sizeof() now reports the allocated length of a variable-length-array
+-- cdata (it reads the instance's element count, not the type's zero size).
 nb[0] = 1; nb[7] = 9
 ok(nb[0] == 1 and nb[7] == 9, "new_buffer is writable across requested length")
+ok(ffi.sizeof(nb) == 8, "ffi.sizeof reports the VLA buffer length")
 ok(pcall(secret.new_buffer, 0) == false, "new_buffer rejects size 0")
 ok(pcall(secret.new_buffer, -3) == false, "new_buffer rejects negative size")
 
@@ -42,16 +42,14 @@ secret.wipe(wb, 6)
 local all_zero = true
 for i = 0, 5 do if wb[i] ~= 0 then all_zero = false end end
 ok(all_zero == true, "wipe zeroes the whole buffer")
--- wipe is documented to default n to ffi.sizeof(buf) when omitted, but
--- ffi.sizeof() returns 0 for the variable-length buffers new_buffer /
--- bytes_to_buffer create, so wipe(buf) silently zeroes nothing. This is a
--- real, user-visible bug in secret.wipe (the documented default no-ops).
+-- wipe defaults n to ffi.sizeof(buf) when omitted. ffi.sizeof now reports the
+-- real length of a variable-length buffer (new_buffer / bytes_to_buffer), so
+-- the documented default works (SECRET-WIPE-DEFAULTLEN-001 fixed).
 local wb2 = secret.new_buffer(4)
 wb2[0] = 9; wb2[1] = 9; wb2[2] = 9; wb2[3] = 9
 secret.wipe(wb2)
-xfail(wb2[0] == 0 and wb2[3] == 0,
-      "wipe(buf) with no explicit length zeroes the buffer (sizeof default)",
-      "SECRET-WIPE-DEFAULTLEN-001")
+ok(wb2[0] == 0 and wb2[3] == 0,
+   "wipe(buf) with no explicit length zeroes the buffer (sizeof default)")
 -- explicit length always works:
 local wb3 = secret.new_buffer(4)
 wb3[0] = 9; wb3[1] = 9; wb3[2] = 9; wb3[3] = 9

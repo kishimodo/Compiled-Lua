@@ -6,9 +6,9 @@
 -- ops here are single-threaded and deterministic, so the compiled exe and
 -- `clua-interp -i` must print identical stdout.
 --
--- (`pool`/`thread` are intentionally absent: they string.dump worker
--- functions to ship across OS threads, which the closed world forbids, so
--- they are host-only — see their package tests under the compiler path.)
+-- (`pool` and `thread` are covered separately by
+-- `tests/differential/aot_pool_thread.lua` — they now compile AOT too, running
+-- inline / cooperatively rather than the never-wired native OS-thread path.)
 --
 -- The path prepend serves the interpreter oracle (CWD = repo root); the
 -- compiled exe satisfies each require from package.preload.

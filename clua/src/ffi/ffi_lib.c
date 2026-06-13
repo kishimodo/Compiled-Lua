@@ -162,6 +162,21 @@ static int LuaFn_New( lua_State *L ) {
 }
 
 static int LuaFn_Sizeof( lua_State *L ) {
+    /* A VLA instance -- ffi.new("T[?]", n) -- carries its element count in
+       Cd->FlexN; the array *type* has Size 0 (the length isn't part of the
+       type), so resolve the real byte size from the instance. This matches
+       LuaJIT, where ffi.sizeof(vla_cdata) returns the allocated size. Without
+       it, ffi.sizeof of every variable-length buffer returned 0 (e.g.
+       secret.wipe(buf) with no explicit length silently zeroed nothing). */
+    if ( FfiIsCData( L, 1 ) ) {
+        PCData_T Cd = FfiGetCData( L, 1 );
+        if ( Cd != NULL && Cd->Type != NULL && Cd->Type->Kind == CT_ARRAY &&
+             Cd->Type->IsFlex && Cd->Type->ElemType != NULL ) {
+            lua_pushinteger( L, ( lua_Integer )( Cd->Type->ElemType->Size *
+                                                 ( size_t )Cd->FlexN ) );
+            return 1;
+        }
+    }
     PCType_T T = ArgToType( L, 1 );
     int N = ( int )luaL_optinteger( L, 2, 1 );
     lua_pushinteger( L, ( lua_Integer )( T->Size * ( size_t )N ) );

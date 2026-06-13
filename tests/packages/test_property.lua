@@ -51,20 +51,16 @@ local res_type = property.check(function(s) return type(s) == "string" end,
                                 { g_str }, { seed = SEED, num_tests = 40 })
 ok(res_type.ok == true,       "string generator always yields a string value")
 
--- BUG (PROP-STRLEN-001): string() ignores BOTH length bounds. In string's
--- generator the char picker is `alphabet:sub(rng.int(1,alen), rng.int(1,alen))`
--- -- it passes TWO independent random indices to string.sub, so each "char" is
--- actually a variable-length slice: empty when stop<start, multi-char when
--- stop>start. The element count n is bounded to [min_len,max_len] but the final
--- string length is not, so strings undershoot min_len (observed 0 for min=2)
--- AND overshoot max_len (observed 144 for max=6). Fix: pick one index j and use
--- alphabet:sub(j, j).
--- CORRECT: every generated string satisfies min_len <= #s <= max_len.
+-- PROP-STRLEN-001 fixed: string()'s char picker now uses ONE random index
+-- (alphabet:sub(j, j)), so each element is exactly one character and the final
+-- length respects [min_len, max_len]. (The old code passed two independent
+-- indices to string.sub, yielding variable-length slices that undershot min_len
+-- and overshot max_len.)
 local res_bounds = property.check(function(s)
     return type(s) == "string" and #s >= 2 and #s <= 6
 end, { g_str }, { seed = SEED, num_tests = 40 })
-xfail(res_bounds.ok == true,
-      "string(min=2,max=6) must keep 2 <= #s <= 6", "PROP-STRLEN-001")
+ok(res_bounds.ok == true,
+   "string(min=2,max=6) keeps 2 <= #s <= 6 (PROP-STRLEN-001)")
 
 -- array_of generator honors length bounds and element type.
 local g_arr = property.array_of(property.int(0, 5), 1, 4)

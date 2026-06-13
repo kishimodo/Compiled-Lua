@@ -41,6 +41,20 @@ M.formats = {
     XPRESS_HUFF = 4,
 }
 
+-- XPRESS and LZNT1 (unlike XPRESS_HUFF) cannot represent an input smaller than
+-- their minimum block -- RtlCompressBuffer rejects it with
+-- STATUS_BUFFER_TOO_SMALL (bug XPRESS-SMALL-001). Inputs this small never
+-- compress usefully anyway, so we store them verbatim for those two formats.
+-- The floor sits safely above the largest input the OS refuses (a 1-byte input
+-- fails; the test corpus proves a 12-byte one compresses), and the choice is a
+-- pure function of (format, original_size), so decompress recovers the bytes
+-- with no marker and no ambiguity.
+local XPRESS_RAW_FLOOR = 16
+
+local function stores_raw(format, len)
+    return (format == M.XPRESS or format == M.LZNT1) and len < XPRESS_RAW_FLOOR
+end
+
 -- Frame format magic. 4 ASCII bytes 'LVX1' little-endian = 0x3158564C.
 -- Distinct from the C package loader's 'LVC1' = 0x3143564C so callers
 -- can't accidentally feed one to the other.
@@ -117,6 +131,8 @@ function M.compress(bytes, format)
     -- Empty input: RtlCompressBuffer faults on a zero-length buffer, so encode
     -- it as the empty string (decompress mirrors this for original_size 0).
     if #bytes == 0 then return "" end
+    -- Tiny XPRESS / LZNT1 inputs are stored verbatim (XPRESS-SMALL-001).
+    if stores_raw(format, #bytes) then return bytes end
     local main_ws = get_workspace(format)
     -- Output slack must cover the format's FIXED per-block overhead, which
     -- dominates on tiny inputs: XPRESS_HUFF always emits a 256-byte Huffman
@@ -156,6 +172,10 @@ function M.decompress(bytes, format, original_size)
     -- fault in RtlDecompressBuffer).
     if original_size == 0 or #bytes == 0 then return "" end
     format = format or M.XPRESS_HUFF
+    -- Mirror compress's verbatim store for tiny XPRESS / LZNT1 inputs
+    -- (XPRESS-SMALL-001): the decision is the same (format, original_size)
+    -- function, so the stored bytes are returned as-is.
+    if stores_raw(format, original_size) then return bytes end
     local in_len  = #bytes
     local in_buf  = ffi.new("unsigned char[?]", in_len > 0 and in_len or 1)
     if in_len > 0 then ffi.copy(in_buf, bytes, in_len) end

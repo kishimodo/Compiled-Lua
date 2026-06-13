@@ -75,10 +75,25 @@ static void *AotLookupHook( lua_State *L, void *proto ) {
  * the anchor isn't in the link. */
 extern void Clua_OpenFfi( lua_State *L ) __attribute__(( weak ));
 
+/* Basename of argv[0]: drop any directory / drive prefix, keep the file name.
+ * Used for the uncaught-error banner so a compiled program reports under its
+ * own name, exactly as reference Lua prints "<progname>: <msg>". */
+static const char *AotProgName( const char *argv0 ) {
+    const char *base = argv0;
+    const char *p;
+    if ( argv0 == NULL || argv0[ 0 ] == '\0' ) return "clua";
+    for ( p = argv0; *p != '\0'; p++ ) {
+        if ( *p == '\\' || *p == '/' || *p == ':' ) base = p + 1;
+    }
+    return ( *base != '\0' ) ? base : "clua";
+}
+
 /* Message handler installed under the entry call: appends a stack traceback
  * to the error object while the call chain is still live, so an uncaught
- * runtime error reports like the reference interpreter does
- * (AOT-ERRBANNER-001 narrowed; the banner prefix still differs). */
+ * runtime error reports exactly like the reference interpreter does -- same
+ * "<name>: <message>\n<traceback>" shape (AOT-ERRBANNER-001 resolved). The
+ * leading name token is the program's own basename rather than a fixed
+ * string, which is correct: a standalone exe is not the compiler. */
 static int AotMsgHandler( lua_State *L ) {
     const char *msg = lua_tostring( L, 1 );
     if ( msg == NULL ) {
@@ -172,7 +187,9 @@ int main( int argc, char **argv ) {
     int status = lua_pcall( L, 0, 0, -2 );
     if ( status != LUA_OK ) {
         const char *msg = lua_tostring( L, -1 );
-        fprintf( stderr, "clua: runtime error: %s\n",
+        /* "<progname>: <message>\n<traceback>" -- reference-Lua format. msg
+         * already carries the traceback (AotMsgHandler ran under the call). */
+        fprintf( stderr, "%s: %s\n", AotProgName( argv[ 0 ] ),
                  msg ? msg : "(unknown)" );
         lua_close( L );
         return 1;

@@ -54,6 +54,48 @@ bool lc_module_uses_ffi(LcModule *m) {
   return false;
 }
 
+/* TRUE iff any function MATERIALIZES the global environment as a first-class
+   value. The "debug" constant scan above misses a debug table fetched without
+   the literal string -- _ENV["de".."bug"], _G[k], pairs(_G) -- and once that
+   table is in hand, debug.setlocal/setupvalue can rewrite a live local and
+   falsify a static type proof at -O1 (bug AOT-DEBUGREFLECT-001). The hole is
+   precisely the moment globals become a value a dynamic key can index, which
+   shows up in bytecode as exactly two shapes:
+
+     - OP_GETUPVAL of the _ENV upvalue  (`_ENV[expr]`, `pairs(_ENV)`, `e=_ENV`)
+     - OP_GETTABUP _ENV "_G" / "_ENV"   (naming the global table itself)
+
+   Plain global *reads* compile to OP_GETTABUP with a constant non-_G/_ENV key
+   and never materialize the table; local table indexing is OP_GETTABLE on a
+   non-_ENV register. Neither trips this, so ordinary hot loops keep their
+   proofs -- only code that actually hoists the global env as a value loses
+   them, module-wide, just like a literal "debug" mention. Sound because the
+   gate is module-wide: a helper that indexes a passed-in env is covered by the
+   caller that materialized it. Relies on upvalue debug names, which are
+   present on the freshly parsed Protos this pass runs over. */
+static bool lc_module_reflects_globals(LcModule *m) {
+  for (uint32_t i = 0; i < m->nfuncs; i++) {
+    Proto *p = m->funcs[i] ? m->funcs[i]->source : NULL;
+    if (!p) continue;
+    for (int pc = 0; pc < p->sizecode; pc++) {
+      Instruction ins = p->code[pc];
+      OpCode op = GET_OPCODE(ins);
+      if (op == OP_GETUPVAL) {
+        int b = GETARG_B(ins);
+        if (b >= 0 && b < p->sizeupvalues && p->upvalues[b].name != NULL &&
+            strcmp(getstr(p->upvalues[b].name), "_ENV") == 0) return true;
+      } else if (op == OP_GETTABUP) {
+        int c = GETARG_C(ins);
+        if (c >= 0 && c < p->sizek && ttisstring(&p->k[c])) {
+          const char *key = getstr(tsvalue(&p->k[c]));
+          if (strcmp(key, "_G") == 0 || strcmp(key, "_ENV") == 0) return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
 
 bool lc_optimize(LcModule *m, const LcPassConfig *cfg) {
   if (!m || !cfg) return false;
@@ -72,7 +114,11 @@ bool lc_optimize(LcModule *m, const LcPassConfig *cfg) {
   }
 
   if (cfg->opt_level >= 1) {
-    bool no_proofs = lc_module_uses_debug(m);
+    /* Disable proof-producing inference when the module mentions debug OR
+       hoists the global env as a value (either path can reach debug.setlocal
+       and falsify a proof -- AOT-DEBUGREFLECT-001). The checked fastpaths,
+       which re-verify tags at run time, are unaffected. */
+    bool no_proofs = lc_module_uses_debug(m) || lc_module_reflects_globals(m);
     /* M2: interprocedural argument/return type propagation runs the local
        inference in three phases (baseline -> callee param entries -> callers
        with return summaries); the final phase leaves the same per-inst

@@ -1,6 +1,63 @@
 # CLua changelog
 
-## Unreleased
+All notable changes are recorded here. The format follows Keep a Changelog and
+the project uses semantic versioning. `clua version` reports the current string;
+it is rewritten only by `tools/bump-version.ps1`, which keeps the single source
+of truth — `clua/src/common/version.h` — and this file in step.
+
+## [Unreleased]
+
+## [0.2.0-beta.1] - 2026-06-13
+
+The first beta. The toolchain is now self-contained (a built-in COFF→PE64
+linker, no gcc needed out of the box), the JIT is gone entirely, and the last
+peripheral correctness gaps are closed.
+
+### Fixed
+
+- **All five remaining package XFAILs are fixed** at the root — they were
+  peripheral FFI / OS-API quirks:
+  - `network_info` routing decode (NET-ROUTE-002): the `MIB_IPFORWARD_ROW2` /
+    `SOCKADDR_INET` cdefs are now byte-exact with the platform ABI
+    (`SOCKADDR_INET` forced to size 28 / align 4, and the four route booleans
+    are 1-byte `BOOLEAN`, not 4-byte `BOOL`), so the row stride matches and every
+    `Table[i]` decodes correctly instead of drifting into garbage.
+  - `xpress` tiny inputs (XPRESS-SMALL-001): XPRESS and LZNT1 cannot represent an
+    input below their minimum block, so inputs under a safe floor are stored
+    verbatim and still round-trip — the decision is a pure function of format +
+    original size, so decompress recovers them with no marker.
+  - `secret.wipe(buf)` with no length (SECRET-WIPE-DEFAULTLEN-001): `ffi.sizeof`
+    now reports the real length of a variable-length-array cdata, so the
+    documented default actually zeroes the buffer.
+  - `property.string` length bounds (PROP-STRLEN-001): the character picker used
+    two independent random indices, producing variable-length slices that broke
+    the `[min_len, max_len]` contract; it now picks a single index.
+- **`ffi.sizeof` on a variable-length array** returns the allocated byte size
+  rather than 0, matching LuaJIT (benefits every VLA caller, not just `secret`).
+- **Uncaught-error banner (AOT-ERRBANNER-001)** — a compiled program prints
+  `<progname>: <message>` followed by a stack traceback, the same shape the
+  reference interpreter uses; the name token is the exe's own basename, which is
+  correct (a standalone program is not the compiler).
+- **Debug-reflection soundness (AOT-DEBUGREFLECT-001)** — at `-O1` the
+  proof-producing type inference is disabled for any module that materializes
+  the global environment as a value (`_ENV[expr]`, `_G[k]`, `pairs(_G)`),
+  closing the path by which a dynamically fetched `debug.setlocal` could falsify
+  a static type proof. Plain global reads and local table indexing are
+  unaffected, so ordinary hot loops keep their proofs.
+
+### Changed
+
+- **`pool` and `thread` compile under AOT.** Both previously referenced
+  `string.dump`/`load` to ship a worker function to another lua_State — a
+  closed-world violation that made any program requiring them fail to compile.
+  Real OS threading was never wired up (the native bootstrap does not exist), so
+  both now run their actual behavior — cooperative for `thread`, inline for
+  `pool` — without the dead bytecode round-trip. Native OS threads remain a
+  documented future step (resolve the worker through its compile-time
+  function-id and bring the worker state up from the proto registry).
+- **Version tracking.** `clua/src/common/version.h` is the single source of
+  truth; `clua version` reads it, the release zip derives its name from it, and
+  `tools/bump-version.ps1` is the only thing that moves it.
 
 ### clua
 
@@ -64,9 +121,8 @@
   resolver binds `ffi.C.Interlocked*` to them. The whole concurrency cluster
   (`atomic`, `queue`, `semaphore`, `event`, `mutex`, `channel`) now compiles
   AOT and matches the interpreter byte-for-byte — pinned by
-  `tests/differential/aot_concurrency.lua` at O0+O1. (`pool`/`thread` stay
-  host-only: they `string.dump` worker functions, which the closed world
-  forbids.)
+  `tests/differential/aot_concurrency.lua` at O0+O1. (`pool` and `thread` now
+  compile AOT too — see the 0.2.0-beta.1 "Changed" notes above.)
 
 - **No JIT: CLua is purely AOT.** The only execution engines are compiled
   native exes and the reference bytecode interpreter (`clua-interp.exe`, the

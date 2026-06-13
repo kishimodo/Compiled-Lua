@@ -145,7 +145,9 @@ dist: $(BUILD_DIR)/clua.exe $(BUILD_DIR)/rover.exe $(BUILD_DIR)/aot_entry.o
 	@echo [+] dist\ ready (clua.exe + rover.exe + lib\)
 
 # --- release — versioned zip + SHA-256, from a fresh dist ---------------------
-CLUA_RELEASE_VERSION := 0.1.0
+# The version is read straight out of clua/src/common/version.h so there is one
+# source of truth (tools/bump-version.ps1 rewrites that header). Do NOT hardcode
+# a version here.
 .PHONY: release
 release: dist
-	powershell -NoProfile -Command "Compress-Archive -Force -Path '$(ROOT)/dist/*' -DestinationPath '$(ROOT)/clua-v$(CLUA_RELEASE_VERSION)-windows-x64.zip'; $$h = (Get-FileHash '$(ROOT)/clua-v$(CLUA_RELEASE_VERSION)-windows-x64.zip' -Algorithm SHA256).Hash.ToLower(); \"$$h  clua-v$(CLUA_RELEASE_VERSION)-windows-x64.zip\" | Out-File -Encoding ascii '$(ROOT)/clua-v$(CLUA_RELEASE_VERSION)-windows-x64.zip.sha256'; Write-Host ('[+] release: clua-v$(CLUA_RELEASE_VERSION)-windows-x64.zip  sha256=' + $$h)"
+	powershell -NoProfile -ExecutionPolicy Bypass -File build/make-release.ps1 -VersionHeader "$(SRC_DIR)/common/version.h" -DistDir "$(ROOT)/dist" -OutDir "$(ROOT)"

@@ -133,7 +133,13 @@ function M.string(opts)
             if n <= 0 then return "" end
             local out = {}
             for i = 1, n do
-                out[i] = alphabet:sub(rng.int(1, alen), rng.int(1, alen))
+                -- One random index, used for both bounds: sub(j, j) yields
+                -- exactly one character. Two independent indices would give a
+                -- variable-length slice (empty when stop < start, multi-char
+                -- when stop > start), letting the final string break the
+                -- [min_len, max_len] contract (bug PROP-STRLEN-001).
+                local j = rng.int(1, alen)
+                out[i] = alphabet:sub(j, j)
             end
             return table.concat(out)
         end,
