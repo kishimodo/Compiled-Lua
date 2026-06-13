@@ -126,6 +126,8 @@ typedef struct {
     uint32_t    common_size;
     int         weak;
     char       *weak_default;     /* fallback symbol name, if weak          */
+    int         force_resolve;    /* -u root: drive archive extraction even
+                                  ** if only weak-referenced elsewhere       */
     int         synth;            /* SYN_*                                   */
     int         syn_sec;          /* OS_* for SYN_SEC_*                      */
 } GSym;
@@ -180,6 +182,7 @@ typedef struct {
 
     const char  *entry;
     uint64_t     image_base;
+    int          gc_sections;   /* run dead-section elimination (default 1)  */
 
     char        err[512];
 } Linker;
@@ -559,12 +562,17 @@ static int load_object_file( Linker *L, const char *path ) {
     return 1;
 }
 
-/* Has this symbol got an unresolved reference we must satisfy? */
+/* Has this symbol got an unresolved reference we must satisfy by pulling an
+** archive member? Mirrors ld: a WEAK undefined reference does NOT drive
+** archive extraction (it resolves to its default / 0 if never strongly
+** defined). A `-u` force-undef root DOES drive extraction even when only
+** weak-referenced (force_resolve). */
 static int sym_unresolved( const GSym *g ) {
     if ( g->defined ) return 0;
     if ( g->is_import_thunk || g->is_import_iat ) return 0;
     if ( g->is_common ) return 0;          /* committed to .bss later        */
     if ( g->is_abs ) return 0;
+    if ( g->weak && !g->force_resolve ) return 0; /* weak: don't pull archives */
     return 1;
 }
 
@@ -843,6 +851,204 @@ done:
     return rc;
 }
 
+/* ===================================================================
+** --gc-sections: dead-section elimination.
+**
+** The CLua runtime + Lua archives are built -ffunction-sections (and the Lua
+** archive -fdata-sections), so every function/data item lives in its own COFF
+** section. After the fixpoint has pulled members and COMDAT dedup has run, we
+** mark the sections reachable from the roots and DROP the rest before RVA
+** assignment — exactly like ld's --gc-sections. A wrongly-dropped section is a
+** silent crash, so the mark phase follows EXACTLY the relocation edges that
+** apply_relocations() will later resolve (same target resolution), guaranteeing
+** no live relocation can ever point at a dropped section.
+**
+** ROOTS:
+**   * every section of the FIRST explicit object (the user object: its single
+**     .text holds the luac_fn_* bodies reached via the luac_fn_table, and
+**     .rdata$L is the ProtoInit blob — both always live);
+**   * the section defining the entry symbol, each force-undef root, _tls_used,
+**     and __ImageBase;
+**   * KEEP-by-name sections that must survive even when no live relocation
+**     targets them: CRT ctor/dtor + .CRT XC/XI/XT init arrays, the mingw
+**     pseudo-reloc list, the TLS template/callback sections, and the SEH
+**     unwind sections (.pdata/.xdata) — these are reached by the loader / CRT
+**     startup walkers, not by ordinary relocations. They are tiny.
+**
+** MARK: worklist to a fixpoint — a section becomes live when a live section
+** has a relocation whose target symbol is DEFINED in it.
+=================================================================== */
+
+/* (obj,sec_index) -> contrib index, open-addressing hash for the mark walk. */
+typedef struct { LcCoffObj *obj; uint32_t sec; int contrib; } GcSlot;
+typedef struct { GcSlot *slots; uint32_t cap; } GcMap;
+
+static uint32_t gc_hash( const LcCoffObj *o, uint32_t sec ) {
+    uint64_t h = ( uint64_t )( uintptr_t )o * 1099511628211ull;
+    h ^= ( uint64_t )sec + 0x9e3779b97f4a7c15ull + ( h << 6 ) + ( h >> 2 );
+    return ( uint32_t )( h ^ ( h >> 32 ) );
+}
+static int gc_map_init( GcMap *m, int ncontribs ) {
+    uint32_t cap = 16;
+    while ( cap < ( uint32_t )ncontribs * 2u + 16u ) cap <<= 1;
+    m->slots = ( GcSlot * )calloc( cap, sizeof( GcSlot ) );
+    if ( !m->slots ) return 0;
+    m->cap = cap;
+    return 1;
+}
+static void gc_map_put( GcMap *m, LcCoffObj *o, uint32_t sec, int contrib ) {
+    uint32_t i = gc_hash( o, sec ) & ( m->cap - 1 );
+    for ( ;; ) {
+        if ( m->slots[i].obj == NULL ) {
+            m->slots[i].obj = o; m->slots[i].sec = sec; m->slots[i].contrib = contrib;
+            return;
+        }
+        if ( m->slots[i].obj == o && m->slots[i].sec == sec ) {
+            return; /* first contribution for this (obj,sec) wins */
+        }
+        i = ( i + 1 ) & ( m->cap - 1 );
+    }
+}
+static int gc_map_get( const GcMap *m, const LcCoffObj *o, uint32_t sec ) {
+    uint32_t i = gc_hash( o, sec ) & ( m->cap - 1 );
+    for ( ;; ) {
+        if ( m->slots[i].obj == NULL ) return -1;
+        if ( m->slots[i].obj == o && m->slots[i].sec == sec ) return m->slots[i].contrib;
+        i = ( i + 1 ) & ( m->cap - 1 );
+    }
+}
+
+/* Sections kept even when no live relocation targets them. */
+static int gc_keep_by_name( const char *n ) {
+    if ( strncmp( n, ".ctors", 6 ) == 0 ) return 1;
+    if ( strncmp( n, ".dtors", 6 ) == 0 ) return 1;
+    if ( strncmp( n, ".CRT",   4 ) == 0 ) return 1;  /* .CRT XC/XI/XL/XT init  */
+    if ( strncmp( n, ".tls",   4 ) == 0 ) return 1;  /* TLS template/callbacks*/
+    if ( strncmp( n, ".pdata", 6 ) == 0 ) return 1;  /* SEH unwind (loader)   */
+    if ( strncmp( n, ".xdata", 6 ) == 0 ) return 1;
+    /* mingw pseudo-reloc list bracket sections */
+    if ( strstr( n, "RUNTIME_PSEUDO_RELOC_LIST" ) ) return 1;
+    return 0;
+}
+
+/* Mark the contribution that defines symbol `sy` (referenced from object `o`)
+** live, enqueueing it. Mirrors reloc_target_rva()'s resolution so the mark and
+** the later relocation pass agree on which section a symbol lands in. */
+static void gc_mark_target( Linker *L, GcMap *map, int *queue, int *qn,
+                            LcCoffObj *o, const LcCoffSymbol *sy ) {
+    int ci;
+    /* local definition in THIS object (covers STATIC section symbols and
+    ** ordinary local refs) — unless it is a dropped COMDAT dup, in which case
+    ** fall through to the kept copy by name. */
+    if ( sy->section >= 1 && ( uint32_t )sy->section <= o->nsections ) {
+        ci = gc_map_get( map, o, ( uint32_t )( sy->section - 1 ) );
+        if ( ci >= 0 ) {
+            if ( !L->contribs[ci].dropped ) return;       /* already live     */
+            L->contribs[ci].dropped = 0; queue[ (*qn)++ ] = ci; return;
+        }
+        /* not contributed (dropped COMDAT) -> resolve by name below */
+    }
+    if ( sy->name[0] ) {
+        GSym *g = gsym_find( L, sy->name );
+        if ( g && g->defined && g->obj ) {
+            ci = gc_map_get( map, g->obj, g->sec_index );
+            if ( ci >= 0 && L->contribs[ci].dropped ) {
+                L->contribs[ci].dropped = 0; queue[ (*qn)++ ] = ci;
+            }
+        }
+    }
+}
+
+/* Walk a live contribution's relocations, marking each target's section live. */
+static void gc_scan_contrib( Linker *L, GcMap *map, int *queue, int *qn, int ci ) {
+    Contrib *c = &L->contribs[ci];
+    LcCoffObj *o = c->obj;
+    LcCoffSection *sc = &o->sections[ c->sec_index ];
+    uint32_t r;
+    for ( r = 0; r < sc->nrelocs; r++ ) {
+        const LcCoffSymbol *sy = LcCoff_SymByIndex( o, sc->relocs[r].symidx );
+        if ( !sy ) continue;
+        gc_mark_target( L, map, queue, qn, o, sy );
+    }
+}
+
+/* Mark a named symbol's defining section live (entry / force-undef / linker
+** anchors). No-op if it resolves to an import/common/synth (no section). */
+static void gc_root_symbol( Linker *L, GcMap *map, int *queue, int *qn,
+                            const char *name ) {
+    GSym *g = gsym_find( L, name );
+    int ci;
+    if ( !g || !g->defined || !g->obj ) return;
+    ci = gc_map_get( map, g->obj, g->sec_index );
+    if ( ci >= 0 && L->contribs[ci].dropped ) {
+        L->contribs[ci].dropped = 0; queue[ (*qn)++ ] = ci;
+    }
+}
+
+static int gc_sections( Linker *L, const char *const *force_undef, int nforce ) {
+    GcMap map;
+    int *queue;
+    int qn = 0, i;
+    size_t nc;
+
+    if ( !L->gc_sections || L->ncontribs <= 0 ) return 1;
+    nc = ( size_t )L->ncontribs;
+
+    if ( !gc_map_init( &map, L->ncontribs ) ) return lerr( L, "oom (gc map)", NULL );
+    for ( i = 0; i < L->ncontribs; i++ )
+        gc_map_put( &map, L->contribs[i].obj, L->contribs[i].sec_index, i );
+
+    /* each contribution enqueues at most once (guarded by the dropped flag), so
+    ** the worklist never exceeds ncontribs entries. */
+    queue = ( int * )malloc( nc * sizeof( int ) );
+    if ( !queue ) { free( map.slots ); return lerr( L, "oom (gc queue)", NULL ); }
+
+    /* Start everything dead; roots flip live + enqueue. */
+    for ( i = 0; i < L->ncontribs; i++ ) L->contribs[i].dropped = 1;
+
+    /* ROOT 1: every section of the user object (objs[0]) + KEEP-by-name. */
+    for ( i = 0; i < L->ncontribs; i++ ) {
+        Contrib *c = &L->contribs[i];
+        const char *n = c->obj->sections[ c->sec_index ].name_long
+                      ? c->obj->sections[ c->sec_index ].name_long
+                      : c->obj->sections[ c->sec_index ].name;
+        int is_user = ( L->nobjs > 0 && c->obj == L->objs[0] );
+        if ( is_user || gc_keep_by_name( n ) ) {
+            if ( c->dropped ) { c->dropped = 0; queue[ qn++ ] = i; }
+        }
+    }
+
+    /* ROOT 2: entry, force-undef roots (e.g. Clua_OpenFfi for FFI programs),
+    ** and the linker anchors the loader / data directories consume. */
+    gc_root_symbol( L, &map, queue, &qn, L->entry );
+    gc_root_symbol( L, &map, queue, &qn, "_tls_used" );
+    for ( i = 0; i < nforce; i++ )
+        gc_root_symbol( L, &map, queue, &qn, force_undef[i] );
+
+    /* MARK to fixpoint. */
+    while ( qn > 0 ) {
+        int ci = queue[ --qn ];
+        gc_scan_contrib( L, &map, queue, &qn, ci );
+    }
+
+    /* CLUA_GC_DEBUG: one-line tally of what the sweep kept vs dropped. */
+    if ( getenv( "CLUA_GC_DEBUG" ) ) {
+        int live = 0, dead = 0; size_t deadsz = 0;
+        for ( i = 0; i < L->ncontribs; i++ ) {
+            Contrib *c = &L->contribs[i];
+            LcCoffSection *sc = &c->obj->sections[ c->sec_index ];
+            if ( c->dropped ) { dead++; deadsz += sc->size_raw ? sc->size_raw : sc->virtual_size; }
+            else live++;
+        }
+        fprintf( stderr, "[gc] kept %d, dropped %d sections (%zu B of dead code)\n",
+                 live, dead, deadsz );
+    }
+
+    free( queue );
+    free( map.slots );
+    return 1;
+}
+
 /* section alignment encoded in characteristics (default 16) */
 static uint32_t sec_align( const LcCoffSection *sc ) {
     uint32_t a = ( sc->characteristics & LC_IMAGE_SCN_ALIGN_MASK ) >> LC_IMAGE_SCN_ALIGN_SHIFT;
@@ -908,6 +1114,8 @@ static int layout_sections( Linker *L ) {
         OutSec *os = &L->out[ c->out ];
         uint32_t align = sec_align( sc );
         uint32_t size = sc->size_raw ? sc->size_raw : sc->virtual_size;
+
+        if ( c->dropped ) continue;   /* gc-sections: dead, contributes nothing */
 
         /* align within the output section */
         while ( os->virt_size % align ) {
@@ -1181,6 +1389,7 @@ static int sym_rva( Linker *L, GSym *g, uint32_t *out, ImportLayout *il ) {
         int i;
         for ( i = 0; i < L->ncontribs; i++ ) {
             Contrib *c = &L->contribs[i];
+            if ( c->dropped ) continue;
             if ( c->obj == g->obj && c->sec_index == g->sec_index ) {
                 *out = L->out[ c->out ].rva + c->out_off + g->value;
                 return 1;
@@ -1226,17 +1435,21 @@ static int resolve_addrs( Linker *L, ImportLayout *il ) {
 }
 
 /* Resolve a relocation's target symbol to an RVA + a flag telling whether it's
-** a defined symbol (vs an absolute/weak-zero). Returns 0 if genuinely
-** unresolved. For local section symbols (STATIC class), the value is the
-** section's placed RVA + the symbol Value. */
+** a genuine ABSOLUTE value (a weak-undefined symbol that fell back to 0, or an
+** IMAGE_SYM_ABSOLUTE symbol) vs an image-relative address. Returns 0 if
+** genuinely unresolved. For local section symbols (STATIC class), the value is
+** the section's placed RVA + the symbol Value. An absolute target must NOT get
+** image_base added and must NOT generate a base relocation. */
 static int reloc_target_rva( Linker *L, LcCoffObj *o, const LcCoffSymbol *sy,
-                             ImportLayout *il, uint32_t *out_rva ) {
+                             ImportLayout *il, uint32_t *out_rva, int *is_abs ) {
+    if ( is_abs ) *is_abs = 0;
     /* defined in THIS object's section? (covers local .text/.rdata refs and
     ** STATIC section symbols) */
     if ( sy->section >= 1 && ( uint32_t )sy->section <= o->nsections ) {
         int i;
         for ( i = 0; i < L->ncontribs; i++ ) {
             Contrib *c = &L->contribs[i];
+            if ( c->dropped ) continue;
             if ( c->obj == o && c->sec_index == ( uint32_t )( sy->section - 1 ) ) {
                 *out_rva = L->out[ c->out ].rva + c->out_off + sy->value;
                 return 1;
@@ -1247,7 +1460,13 @@ static int reloc_target_rva( Linker *L, LcCoffObj *o, const LcCoffSymbol *sy,
     /* otherwise resolve by name through the global table */
     if ( sy->name[0] ) {
         GSym *g = gsym_find( L, sy->name );
-        if ( g && ( g->defined || ( g->weak ) ) ) { *out_rva = g->rva; return 1; }
+        if ( g && ( g->defined || g->weak ) ) {
+            *out_rva = g->rva;
+            /* a weak symbol that never got a real definition resolves to an
+            ** absolute 0 (NULL) — ld semantics. So does an explicit absolute. */
+            if ( is_abs && ( g->is_abs || ( g->weak && !g->defined ) ) ) *is_abs = 1;
+            return 1;
+        }
     }
     (void)il;
     return 0;
@@ -1263,12 +1482,14 @@ static int apply_relocations( Linker *L, ImportLayout *il ) {
         LcCoffSection *sc = &o->sections[ c->sec_index ];
         OutSec *os = &L->out[ c->out ];
         uint32_t r;
+        if ( c->dropped ) continue;       /* gc-sections: not placed          */
         if ( c->out == OS_BSS ) continue; /* no raw to patch */
         for ( r = 0; r < sc->nrelocs; r++ ) {
             const LcCoffReloc *rl = &sc->relocs[r];
             const LcCoffSymbol *sy = LcCoff_SymByIndex( o, rl->symidx );
             uint32_t patch_off;     /* offset within os->raw */
             uint32_t target_rva;
+            int      tgt_abs = 0;   /* target is an absolute value (weak NULL) */
             uint8_t *p;
             if ( !sy ) return lerr( L, "reloc references aux/oob symbol in %s", o->origin );
 
@@ -1278,7 +1499,7 @@ static int apply_relocations( Linker *L, ImportLayout *il ) {
             }
             p = os->raw.p + patch_off;
 
-            if ( !reloc_target_rva( L, o, sy, il, &target_rva ) ) {
+            if ( !reloc_target_rva( L, o, sy, il, &target_rva, &tgt_abs ) ) {
                 snprintf( L->err, sizeof L->err,
                           "unresolved symbol '%s' (reloc type %u in %s)",
                           sy->name, rl->type, o->origin );
@@ -1287,19 +1508,23 @@ static int apply_relocations( Linker *L, ImportLayout *il ) {
 
             switch ( rl->type ) {
             case LC_IMAGE_REL_AMD64_ADDR64: {
-                uint64_t va = L->image_base + target_rva;
+                /* absolute target (weak-NULL): write the bare value, NO base
+                ** reloc — so &weak_undef == 0 (NULL), matching ld. */
+                uint64_t base = tgt_abs ? 0 : L->image_base;
+                uint64_t va = base + target_rva;
                 /* addend already in place (usually 0) */
                 uint64_t add = ( uint64_t )p[0] | ((uint64_t)p[1]<<8) | ((uint64_t)p[2]<<16)
                              | ((uint64_t)p[3]<<24) | ((uint64_t)p[4]<<32) | ((uint64_t)p[5]<<40)
                              | ((uint64_t)p[6]<<48) | ((uint64_t)p[7]<<56);
                 w64( p, va + add );
-                if ( !reloc_add( L, os->rva + patch_off ) ) return lerr( L, "oom", NULL );
+                if ( !tgt_abs && !reloc_add( L, os->rva + patch_off ) ) return lerr( L, "oom", NULL );
                 break;
             }
             case LC_IMAGE_REL_AMD64_ADDR32: {
                 uint32_t add = (uint32_t)p[0]|((uint32_t)p[1]<<8)|((uint32_t)p[2]<<16)|((uint32_t)p[3]<<24);
-                w32( p, ( uint32_t )( L->image_base + target_rva ) + add );
-                if ( !reloc_add( L, os->rva + patch_off ) ) return lerr( L, "oom", NULL );
+                uint32_t base = tgt_abs ? 0 : ( uint32_t )L->image_base;
+                w32( p, base + target_rva + add );
+                if ( !tgt_abs && !reloc_add( L, os->rva + patch_off ) ) return lerr( L, "oom", NULL );
                 break;
             }
             case LC_IMAGE_REL_AMD64_ADDR32NB: {
@@ -1713,6 +1938,7 @@ int LcPe_Link( const LcPeLinkInputs *in, char *err, size_t errlen ) {
     memset( &il, 0, sizeof il );
     L.entry = ( in->entry && in->entry[0] ) ? in->entry : PE_DEF_ENTRY;
     L.image_base = PE_IMAGE_BASE;
+    L.gc_sections = !in->no_gc_sections;   /* default ON; escape via input flag */
 
     /* open archives first (kept open for the fixpoint) */
     if ( in->narchives > 0 ) {
@@ -1741,10 +1967,19 @@ int LcPe_Link( const LcPeLinkInputs *in, char *err, size_t errlen ) {
         if ( !load_object_file( &L, in->objects[i] ) ) { snprintf( err, errlen, "%s", L.err ); goto out; }
     }
 
-    /* force-undefined roots (e.g. Clua_OpenFfi, the entry symbol) */
-    if ( !gsym_intern( &L, L.entry ) ) { snprintf( err, errlen, "oom" ); goto out; }
-    for ( i = 0; i < in->nforce_undef; i++ )
-        if ( !gsym_intern( &L, in->force_undef[i] ) ) { snprintf( err, errlen, "oom" ); goto out; }
+    /* force-undefined roots (e.g. Clua_OpenFfi, the entry symbol). These are
+    ** `-u` requests: they drive archive extraction even if the only other
+    ** reference is weak (aot_entry weak-calls Clua_OpenFfi). */
+    {
+        GSym *eg = gsym_intern( &L, L.entry );
+        if ( !eg ) { snprintf( err, errlen, "oom" ); goto out; }
+        eg->force_resolve = 1;
+    }
+    for ( i = 0; i < in->nforce_undef; i++ ) {
+        GSym *fg = gsym_intern( &L, in->force_undef[i] );
+        if ( !fg ) { snprintf( err, errlen, "oom" ); goto out; }
+        fg->force_resolve = 1;
+    }
 
     /* define linker-provided symbols (__ImageBase etc.) so the fixpoint treats
     ** them as satisfied rather than chasing them through the archives */
@@ -1755,6 +1990,11 @@ int LcPe_Link( const LcPeLinkInputs *in, char *err, size_t errlen ) {
 
     /* collect contributions (COMDAT-deduped) */
     if ( !collect_contribs( &L ) ) { snprintf( err, errlen, "%s", L.err[0]?L.err:"collect failed" ); goto out; }
+
+    /* --gc-sections: drop unreachable function/data sections before layout. */
+    if ( !gc_sections( &L, in->force_undef, in->nforce_undef ) ) {
+        snprintf( err, errlen, "%s", L.err ); goto out;
+    }
 
     /* lay sections (no RVA yet) */
     if ( !layout_sections( &L ) ) { snprintf( err, errlen, "%s", L.err ); goto out; }
@@ -1770,8 +2010,10 @@ int LcPe_Link( const LcPeLinkInputs *in, char *err, size_t errlen ) {
     {
         int ci; int will_reloc = 0;
         for ( ci = 0; ci < L.ncontribs && !will_reloc; ci++ ) {
-            LcCoffSection *sc = &L.contribs[ci].obj->sections[ L.contribs[ci].sec_index ];
+            LcCoffSection *sc;
             uint32_t r;
+            if ( L.contribs[ci].dropped ) continue;
+            sc = &L.contribs[ci].obj->sections[ L.contribs[ci].sec_index ];
             for ( r = 0; r < sc->nrelocs; r++ ) {
                 uint16_t t = sc->relocs[r].type;
                 if ( t == LC_IMAGE_REL_AMD64_ADDR64 || t == LC_IMAGE_REL_AMD64_ADDR32 ) { will_reloc = 1; break; }

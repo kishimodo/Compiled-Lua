@@ -46,6 +46,11 @@ typedef struct LcPeLinkInputs {
     int                nforce_undef;
     const char        *entry;       /* entry symbol; NULL = "mainCRTStartup" */
     const char        *out_path;    /* output PE path                        */
+    int                no_gc_sections; /* 1 = disable --gc-sections dead-code
+                                       ** elimination (debug escape hatch);
+                                       ** 0 (default) drops unreachable
+                                       ** function/data sections like ld's
+                                       ** --gc-sections.                      */
 } LcPeLinkInputs;
 
 /* Link. Returns 1 on success, 0 + a message in err. */
