@@ -4,6 +4,17 @@
 
 ### clua
 
+- **Atomics work in compiled programs (ATOMIC-INTERLOCKED-SYMS-001).** x64
+  `Interlocked*` are compiler intrinsics with no exported symbol;
+  `clua/src/ffi/ffi_atomics.c` supplies built-in machine-code thunks (GCC
+  `__atomic` SEQ_CST builtins → LOCK-prefixed x64 forms) and the FFI symbol
+  resolver binds `ffi.C.Interlocked*` to them. The whole concurrency cluster
+  (`atomic`, `queue`, `semaphore`, `event`, `mutex`, `channel`) now compiles
+  AOT and matches the interpreter byte-for-byte — pinned by
+  `tests/differential/aot_concurrency.lua` at O0+O1. (`pool`/`thread` stay
+  host-only: they `string.dump` worker functions, which the closed world
+  forbids.)
+
 - **No JIT: CLua is purely AOT.** The only execution engines are compiled
   native exes and the reference bytecode interpreter (`clua-interp.exe`, the
   differential oracle — `-i` is a no-op; clua-interp always interprets).

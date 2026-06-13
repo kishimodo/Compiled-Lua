@@ -310,14 +310,20 @@ The new coverage surfaced a batch of real bugs.
   errors clearly instead of misleading the caller).
 
 ### Known bugs (documented, XFAIL/SKIP — not yet fixed)
-- **ATOMIC-INTERLOCKED-SYMS-001 — x64 `Interlocked*` intrinsics aren't FFI-
-  callable.** kernel32 on x64 exports only the SList variants; `InterlockedOr`,
-  `InterlockedIncrement`, `InterlockedCompareExchange64`, … are compiler
-  intrinsics with no exported symbol, so `ffi.C.InterlockedXxx` fails. This makes
-  the `atomic` package (and `queue`/`pool`/`semaphore`, which use it) non-
-  functional; their tests SKIP the atomic ops cleanly. **Proper fix:** built-in
-  machine-code atomic stubs (`lock xadd`/`lock cmpxchg`/…) injected by the FFI
-  symbol resolver — a focused feature for its own pass.
+- **ATOMIC-INTERLOCKED-SYMS-001 — FIXED.** x64 `Interlocked*` are compiler
+  intrinsics with no exported symbol, so `ffi.C.InterlockedXxx` could not
+  resolve, leaving `atomic` (and `queue`/`semaphore`, which use it)
+  non-functional. **Fix:** `clua/src/ffi/ffi_atomics.c` supplies built-in
+  machine-code thunks for every Interlocked variant (GCC `__atomic` builtins
+  with `__ATOMIC_SEQ_CST` lower to the LOCK-prefixed `xchg`/`xadd`/`cmpxchg`/
+  `or`/`and` x64 forms — identical semantics to the Win32 intrinsics), and
+  `Ffi_AtomicsLookup` is wired into the FFI symbol resolver
+  (`clua/src/ffi/ffi_load.c`) so `ffi.C.Interlocked*` binds to them. Verified
+  end-to-end in AOT-compiled exes (atomic / queue / semaphore / event / mutex
+  / channel) and pinned at the product level by
+  `tests/differential/aot_concurrency.lua` (compiled-vs-interpreter at O0+O1).
+  Note: `pool`/`thread` remain host-only — they `string.dump` worker
+  functions to ship across OS threads, which the closed world forbids.
 - **CAB-FFI-001** — the FFI can't CALL a `ffi.cast`'d function pointer ("function
   pointer not resolved"), which blocks every functional `cab` op (they drive a
   cast `SetupIterateCabinetA`/FCI pointer). `cab` test SKIPs the round-trip.
