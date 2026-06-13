@@ -103,14 +103,24 @@ $(BUILD_DIR)/rover.exe: $(BUILD_DIR)/clua.exe $(BUILD_DIR)/aot_entry.o $(ROOT)/r
 .PHONY: rover
 rover: $(BUILD_DIR)/rover.exe
 
+# --- sysroot — the CRT snapshot the internal linker (--ld=internal) links ----
+# Locates each MinGW CRT piece ONCE via gcc -print-file-name and copies it into
+# build/bin/sysroot, so internal-mode builds run with no gcc on PATH. pe_link_v2.c
+# discovers this dir as <archives-dir>\sysroot (build\bin\sysroot in the repo,
+# lib\sysroot in a dist).
+.PHONY: sysroot
+sysroot:
+	powershell -NoProfile -ExecutionPolicy Bypass -File build/make-sysroot.ps1 -DestDir "$(BUILD_DIR)/sysroot"
+
 # --- dist — the user-facing distribution layout ------------------------------
 #   dist\clua.exe  dist\rover.exe  dist\lib\{runtime-aot.a,liblua54-embedded.a,
-#   aot_entry.o}  dist\README.txt
+#   aot_entry.o}  dist\README.txt  dist\lib\sysroot\ (for --ld=internal)
 # No headers ship: the ProtoInit blob killed the generated-C compile step, so
 # a user build is front-end + in-process codegen + ONE native link.
 .PHONY: dist
 dist: $(BUILD_DIR)/clua.exe $(BUILD_DIR)/rover.exe $(BUILD_DIR)/aot_entry.o
 	if not exist "$(ROOT)\dist\lib" mkdir "$(ROOT)\dist\lib"
+	powershell -NoProfile -ExecutionPolicy Bypass -File build/make-sysroot.ps1 -DestDir "$(ROOT)/dist/lib/sysroot"
 	copy /Y "$(BUILD_DIR)\clua.exe"            "$(ROOT)\dist\clua.exe" >nul
 	copy /Y "$(BUILD_DIR)\rover.exe"           "$(ROOT)\dist\rover.exe" >nul
 	copy /Y "$(BUILD_DIR)\runtime-aot.a"       "$(ROOT)\dist\lib\runtime-aot.a" >nul

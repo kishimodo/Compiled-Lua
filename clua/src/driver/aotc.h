@@ -21,6 +21,9 @@ typedef struct LcDriverOptions {
   bool         shared_rt;    /* link against clua-rt.dll instead of the
                                 static archives (--shared-rt; small exe,
                                 needs the DLL beside it at run time)       */
+  int          ld_internal;  /* link with the built-in COFF->PE linker
+                                instead of gcc/ld: -1 = unset (env decides),
+                                0 = force gcc, 1 = force internal           */
   const char **force_pkgs;   /* -L forced packages                          */
   int          nforce_pkgs;
 } LcDriverOptions;
