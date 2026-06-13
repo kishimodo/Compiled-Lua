@@ -27,12 +27,15 @@ registry, open a Pull Request at
 <https://github.com/kishimodo/CLua-Packages> (submissions are reviewed and
 accepted or denied).
 
-The pipeline is in-memory, rustc-style: front-end, optimizer, codegen and the
-COFF object (including the serialized ProtoInit blob — no generated C) all
-happen inside `clua.exe`; the only external step is one native link. A
-hello-world builds in ~190 ms and weighs **~182 KB** stripped — the emitted
+The pipeline is in-memory, rustc-style: front-end, optimizer, codegen, the
+COFF object (including the serialized ProtoInit blob — no generated C) AND the
+final COFF→PE64 link all happen inside `clua.exe` — by default there is no
+external toolchain step at all (a built-in linker; gcc is optional, see below).
+A hello-world weighs **~137 KB** stripped — the emitted
 exe links a dedicated `runtime-aot.a` carrying **no JIT, no Lua
-front-end** (`load`-family symbols are closed-world stubs), **no FFI**
+front-end** (`load`-family symbols are closed-world stubs), only the
+standard-library modules the program actually uses (a compile-time scan opens
+string/table/math/io/os/utf8/debug on demand), **no FFI**
 unless the program references `ffi`/`bit` (opt-in link anchor), **no
 winpthread** (no emulated TLS), and — for
 programs that never mention `debug` — **no bytecode interpreter** (debug
@@ -46,7 +49,8 @@ product) and a reference bytecode interpreter that exists only as the
 **differential test oracle**. There is no JIT anywhere in the tree. Every
 compiled program must match `clua-interp.exe -i` byte-for-byte (the
 interpreter always interprets; `-i` is accepted as a no-op), and the suite
-enforces that across the whole corpus at both `-O0` and `-O1`.
+enforces that across the whole corpus at every optimization level —
+`-O0`, `-O1`, `-O2` and `-O3`.
 
 ## Status
 
@@ -115,8 +119,11 @@ build\bin\clua.exe run program.lua -- args    # compile + run
 pipeline, flag-compatible with the original CLI: `-O0` default, `-o out.exe`).
 For a shippable user layout run `make -f build/Makefile.luac dist` from
 `build-luac.bat`'s environment — it produces `dist\` with `clua.exe`,
-`rover.exe`, `lib\` and a README; the only external requirement on a user
-machine is a MinGW-w64 gcc on PATH (or `CLUA_GCC`) for the final link.
+`rover.exe`, `lib\` (the runtime archives plus a CRT `sysroot` snapshot) and a
+README. **The default needs no external toolchain**: the built-in COFF→PE64
+linker assembles the PE from the sysroot snapshot. gcc is optional — used only
+for `--ld=gcc`, `--shared-rt`, or a cold-tree entry compile (`CLUA_GCC` /
+`CLUA_LD` override the choice).
 
 - Build spec & implementation prompt: [`PROMPT.md`](PROMPT.md)
 - Working notes & testing discipline: [`CLAUDE.md`](CLAUDE.md)
@@ -124,14 +131,24 @@ machine is a MinGW-w64 gcc on PATH (or `CLUA_GCC`) for the final link.
 
 ## Roadmap
 
-- **M4**: builtin-package bundling for compiled exes, self-contained PE
-  writer (drop the MinGW `ld` dependency — the last external step). The
-  interpreter strip is DONE for debug-free programs (`lvm_nointerp.o`,
-  AOT-NODEBUG-001); `luaV_execute` itself is now a thin native-dispatch
-  entry (`clua_dispatch_hook`), not an interpreter.
-- **Toolchain slimming**: emitted exes exclude any JIT (there is none in the
-  tree) and the Lua front-end (closed-world stubs). The behavioral,
-  differential, conformance and fuzz layers all run aotc-compiled exes
-  against the interpreter (the interpreter stays — it *is* the oracle).
-- **Workload-gated**: scalar replacement of non-escaping tables (see the
-  status doc for the honest valuation).
+The M4 self-containment goals are **done**: the built-in COFF→PE64 linker is
+the default (no MinGW `ld` needed), builtin packages bundle into compiled exes,
+FFI links in only on demand, native OS threads run on real threads
+(`thread.spawn`), and emitted exes carry no JIT, no Lua front-end and only the
+stdlib modules a program uses. The interpreter strip is done for debug-free
+programs (`lvm_nointerp.o`); `luaV_execute` is a thin native-dispatch entry, not
+an interpreter.
+
+What remains is depth, not scaffolding:
+
+- **More optimizer surface that fires on real code** — the `-O1` type-inference
+  elision is the broad win (17×+ on tight loops); extending its reach is higher
+  value than the narrow M3 memory passes. `-O3` scalar replacement of
+  non-escaping constant-key tables is shipped (slice 1) but, by measurement, has
+  tiny real-world surface — see the
+  [status doc](docs/superpowers/plans/2026-06-10-luac-optimizer-status.md) and
+  [scalar-replacement spec](docs/superpowers/specs/2026-06-13-scalar-replacement-o3-design.md)
+  for the honest valuations.
+- **Continuous fidelity hardening** — the differential + conformance corpus runs
+  every compiled test against the interpreter at O0–O3; the adversarial attack
+  harness keeps probing for miscompiles.
