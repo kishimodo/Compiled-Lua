@@ -1208,12 +1208,18 @@ static void sr_try_func(LcFunc *f) {
             continue;
           }
           wr = ip_write_range(in, nregs, &lo, &hi);
-          if (wr < 0 || (wr == 1 && R >= lo && R <= hi)) { ok = 0; break; }
-          if (ip_reads_slot(in, R, nregs))              { ok = 0; break; }
+          if (wr < 0 || (wr == 1 && R >= lo && R <= hi)) {
+            if (dbg) fprintf(stderr, "[SR] R=%d bail(use-write) bc_op=%d\n", R, in->bc_op);
+            ok = 0; break;
+          }
+          if (ip_reads_slot(in, R, nregs)) {
+            if (dbg) fprintf(stderr, "[SR] R=%d bail(use-read) bc_op=%d\n", R, in->bc_op);
+            ok = 0; break;
+          }
         }
       }
       if (!ok || ks.n == 0) {
-        if (dbg) fprintf(stderr, "[SR] R=%d bail(uses) ok=%d nkeys=%d\n", R, ok, ks.n);
+        if (dbg && ks.n == 0) fprintf(stderr, "[SR] R=%d bail(nokeys)\n", R);
         continue;
       }
 

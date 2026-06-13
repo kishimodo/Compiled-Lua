@@ -248,11 +248,32 @@ past `last_pc`).
   CONFIRMS (and quantifies) the original "no measured surface" assessment: the
   mechanism is real and large, but only on a narrow shape.
 
-**Slice 2 (what would give real surface):** the GC-safepoint bail is the binding
-constraint, and it is fundamental to placing slots at the top of the frame. To
-let a table whose live range crosses a call fire, the field values must live in
-GC-safe storage (slots interleaved as proper low locals, kept below `L->top`),
-which is a larger codegen change; plus interprocedural escape (so escaping
-tables can still be partially replaced). Until then slice 1 ships as a sound,
-validated, default-on-at-`-O3` foundation that costs nothing when it does not
-fire (`-O2` is the user default, so default builds are unaffected).
+**Slice 2 was investigated and DECLINED on the data (2026-06-13).** A bail-reason
+breakdown over rover + the conformance corpus (658 candidate `NEWTABLE`s, via
+`SR_DEBUG=1`) shows the GC-safepoint bail I expected to be the binding constraint
+is only ~7 cases. The real distribution:
+
+- **~280 (~43%) are not structs at all** -- `nokeys` (no constant-key access),
+  `SETLIST` list-constructors, variable-key `GETTABLE`/`SETTABLE`, `#t`. Scalar
+  replacement is fundamentally inapplicable: these are dicts/arrays, not records.
+- **~100 are register reuse** -- the home register is rewritten later in the
+  function (`MOVE`/`LOADI`/`LOADK`/`NEWTABLE`/`VARARG`/`FOR*`). Addressable only
+  by a real CFG + liveness/reaching-defs (the project deliberately has no SSA/CFG).
+- **~80 genuinely escape** -- `CALL`/`RETURN`/`SELF`/stored-into-another-table/
+  `SETUPVAL`. Addressable only by interprocedural escape analysis (`lc_build_callgraph`
+  is a stub).
+- **~7 GC-safepoint**, **1 back-edge**.
+
+Crucially, **none of the addressable candidates are in hot per-iteration
+allocation loops** -- they are scattered one-shot tables in cold/setup code. The
+38x win only materializes when a table is allocated every iteration of a tight
+loop, a shape real Lua code (rover, the corpus) essentially never has. So a full
+slice 2 (CFG + liveness + interprocedural escape, weeks of high-risk work) would
+raise the *fire count* but not measurably the *runtime* of any real program.
+
+Conclusion: scalar replacement's real-world runtime surface is fundamentally
+tiny, and slice 2 is not worth its cost. Slice 1 ships as a sound, validated,
+default-on-at-`-O3` mechanism that costs nothing when it does not fire (`-O2` is
+the user default). The escape-analysis scaffolding (`lc_pass_escape`) remains
+for a future consumer; the higher-value optimizer work is extending the `-O1`
+type-inference elision, which actually fires on real code.
