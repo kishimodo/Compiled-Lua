@@ -93,6 +93,7 @@ static int parse_build_args( CluaArgs *a, int argc, char **argv, int from,
 
     memset( a, 0, sizeof( *a ) );
     a->opt.opt_level = 1;                       /* clua default: optimize */
+    a->opt.ld_internal = -1;                    /* env (CLUA_LD) decides   */
 
     for ( i = from; i < argc; i++ ) {
         const char *s = argv[ i ];
@@ -109,6 +110,10 @@ static int parse_build_args( CluaArgs *a, int argc, char **argv, int from,
             a->opt.keep_temps = true;
         } else if ( strcmp( s, "--shared-rt" ) == 0 ) {
             a->opt.shared_rt = true;
+        } else if ( strcmp( s, "--ld=internal" ) == 0 ) {
+            a->opt.ld_internal = 1;
+        } else if ( strcmp( s, "--ld=gcc" ) == 0 ) {
+            a->opt.ld_internal = 0;
         } else if ( ( strcmp( s, "-L" ) == 0 || strcmp( s, "--link" ) == 0 )
                     && i + 1 < argc ) {
             if ( nforce < 63 ) {

@@ -4,6 +4,32 @@
 
 ### clua
 
+- **Built-in COFF→PE64 linker — opt-in, no external toolchain.** A new
+  self-contained linker (`clua/src/link/{coff_read,ar_read,pe_emit}.c`,
+  `LcPe_Link`) reads the codegen object + the CLua runtime/Lua archives + a
+  snapshot of the MinGW CRT and emits a runnable stripped console PE directly,
+  replacing the gcc/ld subprocess. Implements the input set's full link
+  semantics: GNU-archive symbol-index pull to a fixpoint (first-definition-wins;
+  explicit objects shadow archive members so `aot_entry.o`'s closed-world stubs
+  hide the Lua parser), COMDAT select-any dedup, weak externals, COMMON into
+  `.bss`, all seven AMD64 relocations (ADDR64/ADDR32/ADDR32NB, REL32 +
+  REL32_1..5, SECREL, SECTION), `$`-suffix grouped/sorted sections, per-DLL
+  import directory + IAT + jmp thunks SYNTHESIZED from dlltool long members
+  (real export name read from `.idata$6`, so moldname aliases like
+  `__set_app_type`→`_set_app_type` resolve), the TLS data directory from
+  `_tls_used`, base relocations (DIR64), and `__ImageBase`. The mixed `libucrt.a`
+  (import stubs for a dozen `api-ms-win-crt-*.dll` plus real objects like
+  `ucrt_fprintf.o`) is handled by per-member classification + a normalized
+  head-symbol→DLL map. Opt-in behind `clua build --ld=internal` and
+  `CLUA_LD=internal` (flag wins; default + fallback stay gcc). Sysroot snapshot
+  via `make -f build/Makefile.luac sysroot` → `build/bin/sysroot` and
+  `dist/lib/sysroot`, discovered relocatably next to the runtime archives.
+  The full suite passes with `CLUA_LD=internal` forced (499/0). Link time
+  drops from ~132 ms to ~76 ms (no gcc subprocess). Validated by
+  `tests/unit/test_lc_pe_emit.c` and a `--ld=internal` section in
+  `tools/test-clua-cli.lua`. Known gap: no `--gc-sections`, so internal exes
+  run ~50 KB larger than gcc's (235 KB vs 187 KB hello), behavior identical.
+
 - **Atomics work in compiled programs (ATOMIC-INTERLOCKED-SYMS-001).** x64
   `Interlocked*` are compiler intrinsics with no exported symbol;
   `clua/src/ffi/ffi_atomics.c` supplies built-in machine-code thunks (GCC

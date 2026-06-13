@@ -22,6 +22,7 @@
 ** Runtime_GetPackages blob symbols).
 */
 #include "link/pe_link_v2.h"
+#include "link/pe_emit.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -56,6 +57,7 @@ typedef struct {
     char inc_src[ LC_PATH_MAX ];      /* -I dir containing jit/, runtime/     */
     char inc_lua[ LC_PATH_MAX ];      /* -I dir containing lua.h              */
     char aot_entry_c[ LC_PATH_MAX ];  /* fallback source ("" if not found)    */
+    char sysroot[ LC_PATH_MAX ];      /* CRT sysroot dir ("" if not found)    */
 } LcToolchain;
 
 static int FileExists( const char *path ) {
@@ -96,6 +98,16 @@ static int TryRoot( LcToolchain *tc, const char *root, const char *lib,
     snprintf( tc->protoinit_o, sizeof( tc->protoinit_o ),
               "%s\\%s%sprotoinit_rt.o", root, lib, sep );
     if ( !FileExists( tc->protoinit_o ) ) tc->protoinit_o[0] = '\0';
+
+    /* CRT sysroot (internal-linker mode): <archives-dir>\sysroot, probed by a
+    ** representative member (libkernel32.a). Empty if the snapshot isn't here. */
+    {
+        char probe[ LC_PATH_MAX ];
+        snprintf( tc->sysroot, sizeof( tc->sysroot ),
+                  "%s\\%s%ssysroot", root, lib, sep );
+        snprintf( probe, sizeof( probe ), "%s\\libkernel32.a", tc->sysroot );
+        if ( !FileExists( probe ) ) tc->sysroot[0] = '\0';
+    }
 
     /* cold-tree fallback inputs (optional — only needed when aot_entry.o is
     ** absent): include dirs + the entry source, given relative to root. */
@@ -172,14 +184,90 @@ static const char *GccCommand( void ) {
     return ( g && g[0] ) ? g : "x86_64-w64-mingw32-gcc";
 }
 
+/* Decide whether to use the internal linker: explicit flag wins, else the
+** CLUA_LD env var (CLUA_LD=internal). The gcc path is the default + fallback. */
+static int WantInternalLinker( int ld_internal ) {
+    if ( ld_internal == 1 ) return 1;
+    if ( ld_internal == 0 ) return 0;
+    {
+        const char *e = getenv( "CLUA_LD" );
+        return ( e && ( strcmp( e, "internal" ) == 0 || strcmp( e, "lcpe" ) == 0 ) );
+    }
+}
+
+/* The full MinGW CRT archive set the internal linker links, in the order gcc's
+** spec emits them (objects first so closed-world stubs shadow archive members;
+** the lib group is order-insensitive thanks to the fixpoint pull). Names are
+** resolved against the sysroot dir. */
+static const char *kCrtArchives[] = {
+    "libmingw32.a", "libgcc.a", "libmoldname.a", "libmingwex.a", "libmsvcrt.a",
+    "libadvapi32.a", "libshell32.a", "libuser32.a", "libkernel32.a", "libucrt.a"
+};
+#define N_CRT_ARCHIVES ( (int)( sizeof(kCrtArchives)/sizeof(kCrtArchives[0]) ) )
+
+/* Link the program with the built-in COFF->PE64 linker (no gcc). */
+static int LinkInternal( const LcToolchain *tc, const char *userObj,
+                         const char *outExe, const char *entry_obj,
+                         int no_interp, int require_ffi,
+                         char *err, size_t errlen ) {
+    char  objbuf[ 6 ][ LC_PATH_MAX ];
+    char  arcbuf[ N_CRT_ARCHIVES + 2 ][ LC_PATH_MAX ];
+    const char *objs[ 6 ];
+    const char *arcs[ N_CRT_ARCHIVES + 2 ];
+    const char *undef[ 2 ];
+    int   nobj = 0, narc = 0, nundef = 0, i;
+    LcPeLinkInputs in;
+
+    if ( tc->sysroot[0] == '\0' ) {
+        set_errv( err, errlen,
+                  "--ld=internal: CRT sysroot not found (expected a 'sysroot' "
+                  "dir next to the runtime archives). Run `make -f "
+                  "build/Makefile.luac sysroot` or install a dist with "
+                  "lib\\sysroot." );
+        return 0;
+    }
+
+    /* explicit objects, in link order: user, entry, optional nointerp lvm,
+    ** then the CRT startup objects (crt2/crtbegin first, crtend last). */
+    snprintf( objbuf[nobj], LC_PATH_MAX, "%s", userObj );   objs[nobj] = objbuf[nobj]; nobj++;
+    snprintf( objbuf[nobj], LC_PATH_MAX, "%s", entry_obj ); objs[nobj] = objbuf[nobj]; nobj++;
+    if ( no_interp && tc->lvm_nointerp_o[0] ) {
+        snprintf( objbuf[nobj], LC_PATH_MAX, "%s", tc->lvm_nointerp_o ); objs[nobj] = objbuf[nobj]; nobj++;
+    }
+    snprintf( objbuf[nobj], LC_PATH_MAX, "%s\\crt2.o",     tc->sysroot ); objs[nobj] = objbuf[nobj]; nobj++;
+    snprintf( objbuf[nobj], LC_PATH_MAX, "%s\\crtbegin.o", tc->sysroot ); objs[nobj] = objbuf[nobj]; nobj++;
+    snprintf( objbuf[nobj], LC_PATH_MAX, "%s\\crtend.o",   tc->sysroot ); objs[nobj] = objbuf[nobj]; nobj++;
+
+    /* archives: the CLua runtime + Lua core first (so aot_entry's stubs
+    ** already shadowed the parser members), then the CRT archive set. */
+    snprintf( arcbuf[narc], LC_PATH_MAX, "%s", tc->runtime_a ); arcs[narc] = arcbuf[narc]; narc++;
+    snprintf( arcbuf[narc], LC_PATH_MAX, "%s", tc->lualib_a );  arcs[narc] = arcbuf[narc]; narc++;
+    for ( i = 0; i < N_CRT_ARCHIVES; i++ ) {
+        snprintf( arcbuf[narc], LC_PATH_MAX, "%s\\%s", tc->sysroot, kCrtArchives[i] );
+        arcs[narc] = arcbuf[narc]; narc++;
+    }
+
+    if ( require_ffi ) undef[nundef++] = "Clua_OpenFfi";
+
+    memset( &in, 0, sizeof in );
+    in.objects     = objs;  in.nobjects     = nobj;
+    in.archives    = arcs;  in.narchives    = narc;
+    in.force_undef = undef; in.nforce_undef = nundef;
+    in.entry       = "mainCRTStartup";
+    in.out_path    = outExe;
+
+    return LcPe_Link( &in, err, errlen );
+}
+
 int LuacLink_LinkProgram( const char *userObj, const char *outExe,
                           int no_interp, int require_ffi, int shared_rt,
-                          char *err, size_t errlen ) {
+                          int ld_internal, char *err, size_t errlen ) {
     char        cmd[ 4096 ];
     char        entry_obj[ LC_PATH_MAX ];
     char        lvm_obj[ LC_PATH_MAX + 4 ];
     LcToolchain tc;
     int         rc;
+    int         use_internal = WantInternalLinker( ld_internal );
 
     if ( err && errlen ) err[ 0 ] = '\0';
     if ( userObj == NULL || outExe == NULL ) {
@@ -218,6 +306,15 @@ int LuacLink_LinkProgram( const char *userObj, const char *outExe,
                       "compiling aot_entry.c failed (gcc rc=%d): %s", rc, cmd );
             return 0;
         }
+    }
+
+    /* ---- internal linker (--ld=internal / CLUA_LD=internal) ----
+    ** The built-in COFF->PE64 linker against the CRT sysroot — no gcc/ld.
+    ** Static link only (shared_rt stays on the gcc path; the DLL build needs
+    ** the import-lib + auto-import pseudo-reloc machinery gcc provides). */
+    if ( use_internal && !shared_rt ) {
+        return LinkInternal( &tc, userObj, outExe, entry_obj,
+                             no_interp, require_ffi, err, errlen );
     }
 
     /* ---- the shared-runtime link (--shared-rt) ----

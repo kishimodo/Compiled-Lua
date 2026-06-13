@@ -321,6 +321,7 @@ int lc_drive( const LcDriverOptions *opt ) {
                                     !lc_module_uses_debug( m ),
                                     res.RequiresFfi || lc_module_uses_ffi( m ),
                                     opt->shared_rt,
+                                    opt->ld_internal,
                                     err, sizeof( err ) ) ) {
             fprintf( stderr, "aotc: error: link failed: %s\n",
                      err[0] ? err : "(unknown)" );
@@ -363,6 +364,7 @@ int main( int argc, char **argv ) {
 
     memset( &opt, 0, sizeof( opt ) );
     opt.opt_level = 0;
+    opt.ld_internal = -1;          /* env (CLUA_LD) decides unless flagged */
 
     for ( i = 1; i < argc; i++ ) {
         const char *a = argv[ i ];
@@ -376,6 +378,10 @@ int main( int argc, char **argv ) {
             opt.emit_dll = true;
         } else if ( strcmp( a, "--shared-rt" ) == 0 ) {
             opt.shared_rt = true;
+        } else if ( strcmp( a, "--ld=internal" ) == 0 ) {
+            opt.ld_internal = 1;
+        } else if ( strcmp( a, "--ld=gcc" ) == 0 ) {
+            opt.ld_internal = 0;
         } else if ( ( strcmp( a, "-L" ) == 0 || strcmp( a, "--link" ) == 0 )
                     && i + 1 < argc ) {
             if ( nforce < 63 ) {

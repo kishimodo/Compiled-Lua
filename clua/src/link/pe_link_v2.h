@@ -37,9 +37,14 @@
 **               ~30 KB exes that need clua-rt.dll beside them (or on PATH)
 **               at run time. Zero (the default) keeps the fully static
 **               single-file link, byte-for-byte as before.
+**   ld_internal — link selection: -1 = honor %CLUA_LD% (internal iff
+**               CLUA_LD=internal), 0 = force the gcc/ld path (default and
+**               fallback), 1 = force the built-in COFF->PE64 linker
+**               (LcPe_Link; needs the CRT sysroot under lib\sysroot, no gcc).
+**               Ignored under shared_rt (the DLL path stays gcc-only).
 */
 int LuacLink_LinkProgram( const char *userObj, const char *outExe,
                           int no_interp, int require_ffi, int shared_rt,
-                          char *err, size_t errlen );
+                          int ld_internal, char *err, size_t errlen );
 
 #endif /* LUAC_LINK_PE_LINK_V2_H */

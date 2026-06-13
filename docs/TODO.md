@@ -20,17 +20,29 @@ the honest valuation from the optimizer status doc), and **stale markers**
    force-pulled via `-Wl,--undefined`; `aot_entry` weak-calls it (callback
    dispatch state included). FFI-free exes keep zero FFI bytes. Guarded by
    `tests/differential/aot_ffi` + the compiled behavioral layer.
-3. **M4: self-contained PE writer — THE ONE REMAINING ITEM.** Drop the
-   MinGW gcc/ld dependency (~170 ms of a ~190 ms build, and the only
-   external tool a user machine needs). DESIGNED: `clua/src/link/pe_emit.h`
-   specifies the full COFF→PE64 link semantics required (archive index
-   fixpoint with first-definition-wins, COMDAT, weak externals, COMMON,
-   the seven AMD64 reloc types, $-sorted grouped sections with ld-script
-   synthesis for the MinGW CRT, long + short import members, .pdata sort,
-   TLS, base relocs). Implementation plan: `LcPe_Link` behind
-   `--ld=internal` / `CLUA_LD`, sysroot snapshot of the CRT pieces shipped
-   in `dist\lib\sysroot`, default flips only when the full suite passes
-   with the internal linker forced.
+3. ~~**M4: self-contained PE writer.**~~ **DONE 2026-06-13 (opt-in):** the
+   built-in COFF→PE64 linker (`clua/src/link/{coff_read,ar_read,pe_emit}.c`,
+   `LcPe_Link`) links a runnable console PE with NO external toolchain —
+   GNU-archive symbol-index fixpoint (first-definition-wins; explicit objects
+   shadow archive members), COMDAT select-any dedup, weak externals, COMMON
+   into .bss, all seven AMD64 relocs (ADDR64/32/32NB, REL32 + REL32_1..5,
+   SECREL, SECTION), $-suffix grouped+sorted sections, the MinGW CRT assembled
+   from a sysroot snapshot (crt2/crtbegin/crtend + the ucrt mixed archive:
+   dlltool long-member imports SYNTHESIZED per-DLL with the real export name
+   from `.idata$6`, code sections force-routed to .text, TLS directory from
+   `_tls_used`, `__ImageBase` synthesized), base relocs (DIR64) + import
+   directory + IAT built from scratch. Wired behind `--ld=internal` /
+   `CLUA_LD=internal` (flag wins; `LuacLink_LinkProgram` routes to `LcPe_Link`
+   or the gcc path). Sysroot via `make -f build/Makefile.luac sysroot` →
+   `build/bin/sysroot` (and `dist/lib/sysroot`); discovered exe-relative.
+   Tests: `tests/unit/test_lc_pe_emit.c` (reader + archive + end-to-end PE
+   invariants) and a `--ld=internal` section in `tools/test-clua-cli.lua`.
+   **The ENTIRE suite passes with `CLUA_LD=internal` forced (499/0).** The
+   DEFAULT stays gcc — flipping it unconditionally would couple every build
+   (and a fresh checkout) to the generated 16 MB sysroot artifact and drop the
+   gcc fallback, which the posture forbids. Internal ships fully-validated
+   opt-in. **Remaining gap:** no `--gc-sections` yet, so internal exes are
+   ~50 KB larger than gcc's (235 KB vs 187 KB hello); behavior is identical.
 4. ~~**lvm strip, the remainder.**~~ **DONE 2026-06-12:** native dispatch
    happens directly in `ldo.c`'s `ccall` (hook-gated; the oracle path is
    untouched), so the `luaV_execute` entry hop is gone; debug-free programs
