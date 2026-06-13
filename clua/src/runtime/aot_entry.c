@@ -82,6 +82,35 @@ static void *AotLookupHook( lua_State *L, void *proto ) {
  * the anchor isn't in the link. */
 extern void Clua_OpenFfi( lua_State *L ) __attribute__(( weak ));
 
+/* Optional standard-library anchors (stdlib_anchors.c). Each is force-undef'd
+ * by the driver only when the program references that library (lc_module_used_libs),
+ * so an unused one is swept by --gc-sections and is a null weak symbol here. */
+extern void Clua_OpenStrlib ( lua_State *L ) __attribute__(( weak ));
+extern void Clua_OpenTablib ( lua_State *L ) __attribute__(( weak ));
+extern void Clua_OpenMathlib( lua_State *L ) __attribute__(( weak ));
+extern void Clua_OpenIolib  ( lua_State *L ) __attribute__(( weak ));
+extern void Clua_OpenOslib  ( lua_State *L ) __attribute__(( weak ));
+extern void Clua_OpenUtf8lib( lua_State *L ) __attribute__(( weak ));
+extern void Clua_OpenDbglib ( lua_State *L ) __attribute__(( weak ));
+
+/* Open the standard library selectively: base + package always (the closed
+ * world needs package.preload for bundled modules), then each optional library
+ * whose anchor the driver linked. Replaces luaL_openlibs, which references
+ * EVERY luaopen_* and so forces the whole stdlib into the exe even for a
+ * `print` program. coroutine is provided by Coro_OpenLib (the fiber version),
+ * called separately. Used by both the main bring-up and each worker. */
+static void Clua_OpenUsedLibs( lua_State *L ) {
+    luaL_requiref( L, LUA_GNAME,       luaopen_base,    1 ); lua_pop( L, 1 );
+    luaL_requiref( L, LUA_LOADLIBNAME, luaopen_package, 1 ); lua_pop( L, 1 );
+    if ( &Clua_OpenStrlib  != NULL ) Clua_OpenStrlib ( L );
+    if ( &Clua_OpenTablib  != NULL ) Clua_OpenTablib ( L );
+    if ( &Clua_OpenMathlib != NULL ) Clua_OpenMathlib( L );
+    if ( &Clua_OpenIolib   != NULL ) Clua_OpenIolib  ( L );
+    if ( &Clua_OpenOslib   != NULL ) Clua_OpenOslib  ( L );
+    if ( &Clua_OpenUtf8lib != NULL ) Clua_OpenUtf8lib( L );
+    if ( &Clua_OpenDbglib  != NULL ) Clua_OpenDbglib ( L );
+}
+
 /* Basename of argv[0]: drop any directory / drive prefix, keep the file name.
  * Used for the uncaught-error banner so a compiled program reports under its
  * own name, exactly as reference Lua prints "<progname>: <msg>". */
@@ -275,7 +304,7 @@ static unsigned __stdcall Clua_ThreadBootstrap( void *Param ) {
         Jit_WorkerCacheEnd( );
         return 1;
     }
-    luaL_openlibs( L );
+    Clua_OpenUsedLibs( L );
     /* NOTE: the worker deliberately does NOT install the fiber-based coroutine
        lib -- it runs straight-line worker functions, and ConvertThreadToFiber
        per worker is both unnecessary and a concurrency hazard. (A worker that
@@ -594,7 +623,7 @@ int main( int argc, char **argv ) {
         fprintf( stderr, "clua: cannot create state\n" );
         return 1;
     }
-    luaL_openlibs( L );                       /* installs print, etc. into _G */
+    Clua_OpenUsedLibs( L );                   /* base+package always; optional libs as referenced */
 
     /* Build the `arg` global exactly as v1's PushArgTable does
      * (runtime_init.c): arg[1..argc-1], no arg[0] -- interpreter parity. */

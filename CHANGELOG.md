@@ -7,6 +7,31 @@ of truth -- `clua/src/common/version.h` -- and this file in step.
 
 ## [Unreleased]
 
+## [0.2.0-beta.3] - 2026-06-13
+
+### Changed
+
+- **Leaner exes: the standard library is opened selectively, and the dispatch
+  cache is right-sized.** Two size wins with no capability or behavior change --
+  a `print` hello-world drops from 189 KB / 77 KB .bss to 139 KB / 3 KB .bss.
+  - `luaL_openlibs` opened the WHOLE stdlib unconditionally, forcing every
+    `luaopen_*` (and its archive member -- `lstrlib.o` alone is 16 KB) into the
+    exe even for a program that uses none of them. The AOT entry now opens base
+    + package + coroutine always, and each optional library (string / table /
+    math / io / os / utf8 / debug) only when a compile-time scan
+    (`lc_module_used_libs`, opt/passes.c) sees the program reference it -- via
+    weak anchors (runtime/stdlib_anchors.c) that the driver force-undefs, so
+    `--gc-sections` drops the rest. string is special (it backs the string
+    metatable): it is kept whenever the program indexes a value or does
+    metamethod arithmetic (the `"10" + 1` coercion path), so it matches the
+    reference interpreter exactly. A hello-world sheds ~41 KB of .text. Works on
+    the internal linker, gcc, and `--shared-rt`.
+  - The dispatch cache was a fixed 1024-entry static array -- ~72 KB of .bss per
+    exe, plus a hard 1024-function ceiling. It is now a heap array grown
+    geometrically and sized to the program, so a small program reserves a few
+    hundred bytes and the function ceiling is gone. Per-worker-thread caches
+    (native threads) grow the same way.
+
 ## [0.2.0-beta.2] - 2026-06-13
 
 ### Added

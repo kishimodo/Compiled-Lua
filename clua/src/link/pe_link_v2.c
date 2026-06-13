@@ -23,11 +23,34 @@
 */
 #include "link/pe_link_v2.h"
 #include "link/pe_emit.h"
+#include "common/stdlib_libs.h"   /* LCLIB_* bits of the used-libs mask */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
+
+#define CLUA_STDLIB_ANCHOR_MAX 7   /* string/table/math/io/os/utf8/debug */
+
+/* Map a used-libs mask to the stdlib_anchors.c symbols the link must force-undef
+   so each referenced library's luaopen_* survives gc-sections. Writes the names
+   into out[] (sized >= CLUA_STDLIB_ANCHOR_MAX) and returns the count. */
+static int StdlibAnchorUndefs( unsigned used_libs, const char *out[] ) {
+    static const struct { unsigned bit; const char *sym; } kMap[] = {
+        { LCLIB_STRING, "Clua_OpenStrlib"  },
+        { LCLIB_TABLE,  "Clua_OpenTablib"  },
+        { LCLIB_MATH,   "Clua_OpenMathlib" },
+        { LCLIB_IO,     "Clua_OpenIolib"   },
+        { LCLIB_OS,     "Clua_OpenOslib"   },
+        { LCLIB_UTF8,   "Clua_OpenUtf8lib" },
+        { LCLIB_DEBUG,  "Clua_OpenDbglib"  },
+    };
+    int n = 0, i;
+    for ( i = 0; i < ( int )( sizeof( kMap ) / sizeof( kMap[0] ) ); i++ ) {
+        if ( used_libs & kMap[ i ].bit ) out[ n++ ] = kMap[ i ].sym;
+    }
+    return n;
+}
 
 #include <windows.h>   /* GetModuleFileNameA */
 
@@ -215,13 +238,13 @@ static const char *kCrtArchives[] = {
 /* Link the program with the built-in COFF->PE64 linker (no gcc). */
 static int LinkInternal( const LcToolchain *tc, const char *userObj,
                          const char *outExe, const char *entry_obj,
-                         int no_interp, int require_ffi, int no_gc_sections,
-                         char *err, size_t errlen ) {
+                         int no_interp, int require_ffi, unsigned used_libs,
+                         int no_gc_sections, char *err, size_t errlen ) {
     char  objbuf[ 6 ][ LC_PATH_MAX ];
     char  arcbuf[ N_CRT_ARCHIVES + 2 ][ LC_PATH_MAX ];
     const char *objs[ 6 ];
     const char *arcs[ N_CRT_ARCHIVES + 2 ];
-    const char *undef[ 2 ];
+    const char *undef[ 1 + CLUA_STDLIB_ANCHOR_MAX ];   /* Clua_OpenFfi + stdlib anchors */
     int   nobj = 0, narc = 0, nundef = 0, i;
     LcPeLinkInputs in;
 
@@ -255,6 +278,7 @@ static int LinkInternal( const LcToolchain *tc, const char *userObj,
     }
 
     if ( require_ffi ) undef[nundef++] = "Clua_OpenFfi";
+    nundef += StdlibAnchorUndefs( used_libs, &undef[ nundef ] );
 
     memset( &in, 0, sizeof in );
     in.objects        = objs;  in.nobjects     = nobj;
@@ -268,16 +292,29 @@ static int LinkInternal( const LcToolchain *tc, const char *userObj,
 }
 
 int LuacLink_LinkProgram( const char *userObj, const char *outExe,
-                          int no_interp, int require_ffi, int shared_rt,
-                          int ld_internal, int no_gc_sections,
+                          int no_interp, int require_ffi, unsigned used_libs,
+                          int shared_rt, int ld_internal, int no_gc_sections,
                           char *err, size_t errlen ) {
     char        cmd[ 4096 ];
     char        entry_obj[ LC_PATH_MAX ];
     char        lvm_obj[ LC_PATH_MAX + 4 ];
+    char        libundef[ 512 ];   /* -Wl,--undefined= for each used stdlib anchor */
+    const char *libnames[ CLUA_STDLIB_ANCHOR_MAX ];
+    int         nlib, li;
     LcToolchain tc;
     int         rc;
     int         ld_choice = WantInternalLinker( ld_internal );
     int         use_internal;
+
+    /* Build the gcc force-undef string for the optional stdlib anchors (the
+       internal linker takes them as an array inside LinkInternal instead). */
+    libundef[0] = '\0';
+    nlib = StdlibAnchorUndefs( used_libs, libnames );
+    for ( li = 0; li < nlib; li++ ) {
+        size_t have = strlen( libundef );
+        snprintf( libundef + have, sizeof( libundef ) - have,
+                  "-Wl,--undefined=%s ", libnames[ li ] );
+    }
 
     if ( err && errlen ) err[ 0 ] = '\0';
     if ( userObj == NULL || outExe == NULL ) {
@@ -346,7 +383,7 @@ int LuacLink_LinkProgram( const char *userObj, const char *outExe,
     ** the import-lib + auto-import pseudo-reloc machinery gcc provides). */
     if ( use_internal && !shared_rt ) {
         return LinkInternal( &tc, userObj, outExe, entry_obj,
-                             no_interp, require_ffi, no_gc_sections,
+                             no_interp, require_ffi, used_libs, no_gc_sections,
                              err, errlen );
     }
 
@@ -368,11 +405,16 @@ int LuacLink_LinkProgram( const char *userObj, const char *outExe,
                       tc.runtime_a );
             return 0;
         }
+        /* The DLL carries every luaopen_*, but aot_entry's weak references to the
+           stdlib anchors do NOT trigger MinGW auto-import, so force-undef the
+           used ones to pull their import thunks (otherwise &Clua_OpenStrlib is
+           null and the library is never opened). */
         snprintf( cmd, sizeof( cmd ),
-                  "%s -o \"%s\" \"%s\" \"%s\" \"%s\" %s\"%s\" "
+                  "%s -o \"%s\" \"%s\" \"%s\" \"%s\" %s%s\"%s\" "
                   "-Wl,--subsystem,console -s -lm -lkernel32 -ladvapi32",
                   GccCommand( ), outExe, userObj, entry_obj, tc.protoinit_o,
                   require_ffi ? "-Wl,--undefined=Clua_OpenFfi " : "",
+                  libundef,
                   tc.rt_implib );
         rc = run_cmd( cmd );
         if ( rc != 0 ) {
@@ -407,11 +449,12 @@ int LuacLink_LinkProgram( const char *userObj, const char *outExe,
     ** registration tables live in .rdata and keep every reachable lib
     ** function alive). */
     snprintf( cmd, sizeof( cmd ),
-              "%s -o \"%s\" \"%s\" \"%s\" %s%s\"%s\" \"%s\" "
+              "%s -o \"%s\" \"%s\" \"%s\" %s%s%s\"%s\" \"%s\" "
               "-Wl,--subsystem,console -Wl,--gc-sections -s "
               "-lm -lkernel32 -ladvapi32",
               GccCommand( ), outExe, userObj, entry_obj, lvm_obj,
               require_ffi ? "-Wl,--undefined=Clua_OpenFfi " : "",
+              libundef,
               tc.runtime_a, tc.lualib_a );
     rc = run_cmd( cmd );
     if ( rc != 0 ) {

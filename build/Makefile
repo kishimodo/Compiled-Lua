@@ -179,6 +179,7 @@ RUNTIME_SRCS := \
     $(SRC_DIR)/runtime/native_loader.c    \
     $(SRC_DIR)/runtime/protoinit_rt.c     \
     $(SRC_DIR)/runtime/ffi_anchor.c       \
+    $(SRC_DIR)/runtime/stdlib_anchors.c   \
     $(SRC_DIR)/jit/exec_mem.c             \
     $(SRC_DIR)/jit/runtime.c              \
     $(SRC_DIR)/jit/dispatch.c             \

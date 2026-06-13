@@ -40,23 +40,28 @@ typedef struct _JIT_CACHE_ENTRY {
     int              FuncId;       /* protoblob index (stable across states); -1 unknown */
 } JIT_CACHE_ENTRY_T, *PJIT_CACHE_ENTRY_T;
 
-/* Open-addressing Proto* -> cache-index map so lookup is O(1) instead of an
-   O(Count) linear scan. Lookup runs on the per-call hot path (Rt_Call does
-   Jit_LookupCached on every native-to-native call, and the tail-call drive loop
-   looks up per iteration). Power-of-two size > 2*JIT_CACHE_MAX keeps the load
-   factor <= 0.5; the cache is never evicted, so linear probing needs no
-   tombstones. -1 = empty. */
-#define JIT_CACHE_MAX 1024
-#define JIT_HASH_SIZE 2048
+/* A registered-Proto cache. Entries is a heap array grown geometrically; Hash
+   is an open-addressing Proto* -> entry-index map (power-of-two, -1 = empty)
+   sized at 4x the entry capacity so the load factor stays <= 0.25 and linear
+   probing needs no tombstones (the cache is never evicted). Both arrays are
+   allocated lazily on the first registration and reallocated on growth, so a
+   small program reserves almost nothing -- the old fixed 1024-entry / 2048-slot
+   arrays cost ~72 KB of .bss per cache regardless of program size. Growth also
+   removes the old hard 1024-function ceiling. Lookup is on the per-call hot
+   path (Rt_Call, the tail-call drive loop). */
+#define JIT_CACHE_INIT_CAP 16   /* first allocation; Hash = 4 * Cap */
 
 typedef struct _JIT_CACHE {
-    JIT_CACHE_ENTRY_T Entries[ JIT_CACHE_MAX ];
-    size_t            Count;
-    int32_t           Hash[ JIT_HASH_SIZE ];
-    int               HashReady;
+    JIT_CACHE_ENTRY_T *Entries;     /* heap; Cap slots                          */
+    size_t             Count;
+    size_t             Cap;
+    int32_t           *Hash;        /* heap; (HashMask+1) pow2 slots, -1 = empty */
+    size_t             HashMask;    /* HashSize - 1 (0 until first allocation)   */
 } JIT_CACHE_T;
 
-/* The default (main-thread) cache. Workers get their own heap-allocated one. */
+/* The default (main-thread) cache: a few pointers in .bss, not a 72 KB array.
+   Populated once at startup, then read-only (no growth races with workers).
+   Workers get their own heap-allocated cache. */
 static JIT_CACHE_T g_GlobalCache;
 
 /* TLS slot holding the current thread's worker cache (NULL => use global).
@@ -82,9 +87,7 @@ static JIT_CACHE_T *CurrentCache( void ) {
 void *Jit_WorkerCacheBegin( void ) {
     if ( g_TlsSlot == TLS_OUT_OF_INDEXES ) return NULL;   /* InitWorkerTls not done */
     JIT_CACHE_T *C = ( JIT_CACHE_T * )calloc( 1, sizeof( JIT_CACHE_T ) );
-    if ( C == NULL ) return NULL;
-    memset( C->Hash, 0xFF, sizeof( C->Hash ) );           /* all -1 */
-    C->HashReady = 1;
+    if ( C == NULL ) return NULL;                         /* Entries/Hash NULL: grows on first register */
     TlsSetValue( g_TlsSlot, C );
     InterlockedExchange( &g_WorkerThreadsExist, 1 );
     return C;
@@ -94,6 +97,8 @@ void Jit_WorkerCacheEnd( void ) {
     if ( g_TlsSlot == TLS_OUT_OF_INDEXES ) return;
     JIT_CACHE_T *C = ( JIT_CACHE_T * )TlsGetValue( g_TlsSlot );
     if ( C != NULL ) {
+        free( C->Entries );
+        free( C->Hash );
         free( C );
         TlsSetValue( g_TlsSlot, NULL );
     }
@@ -102,27 +107,48 @@ void Jit_WorkerCacheEnd( void ) {
 static size_t HashProto( Proto *P ) {
     uintptr_t X = ( uintptr_t )P >> 4;          /* drop allocator alignment bits */
     X *= 0x9E3779B97F4A7C15u;                    /* Fibonacci hashing multiplier */
-    return ( size_t )( X >> ( 64 - 11 ) );       /* top 11 bits -> [0, 2048) */
+    return ( size_t )( X >> 32 );                /* high 32 bits; caller masks    */
 }
 
-static void CacheHashInsert( JIT_CACHE_T *C, int32_t Index, Proto *P ) {
-    if ( !C->HashReady ) {
-        memset( C->Hash, 0xFF, sizeof( C->Hash ) );  /* all -1 */
-        C->HashReady = 1;
+/* Grow (or first-allocate) Entries + Hash, then rehash all live entries. The
+   hash is kept at 4x the entry capacity. Returns 0 on OOM (leaving the cache
+   usable at its previous size). */
+static int CacheGrow( JIT_CACHE_T *C ) {
+    size_t             newCap  = C->Cap ? C->Cap * 2 : JIT_CACHE_INIT_CAP;
+    size_t             newHash = newCap * 4;     /* power of two (Cap is) */
+    JIT_CACHE_ENTRY_T *ne;
+    int32_t           *nh;
+    size_t             i, mask;
+
+    ne = ( JIT_CACHE_ENTRY_T * )realloc( C->Entries, newCap * sizeof( JIT_CACHE_ENTRY_T ) );
+    if ( ne == NULL ) return 0;
+    C->Entries = ne;
+    C->Cap     = newCap;
+
+    nh = ( int32_t * )realloc( C->Hash, newHash * sizeof( int32_t ) );
+    if ( nh == NULL ) return 0;
+    C->Hash     = nh;
+    C->HashMask = newHash - 1;
+
+    memset( C->Hash, 0xFF, newHash * sizeof( int32_t ) );   /* all -1 */
+    mask = C->HashMask;
+    for ( i = 0; i < C->Count; i++ ) {                       /* rehash live entries */
+        size_t H = HashProto( C->Entries[ i ].P ) & mask;
+        size_t Probe;
+        for ( Probe = 0; Probe <= mask; Probe++ ) {
+            size_t S = ( H + Probe ) & mask;
+            if ( C->Hash[ S ] < 0 ) { C->Hash[ S ] = ( int32_t )i; break; }
+        }
     }
-    size_t Mask = JIT_HASH_SIZE - 1;
-    size_t H    = HashProto( P );
-    for ( size_t Probe = 0; Probe < JIT_HASH_SIZE; Probe++ ) {
-        size_t S = ( H + Probe ) & Mask;
-        if ( C->Hash[ S ] < 0 ) { C->Hash[ S ] = Index; return; }
-    }
+    return 1;
 }
 
 static PJIT_CACHE_ENTRY_T CacheFindIn( JIT_CACHE_T *C, Proto *P ) {
-    if ( !C->HashReady ) { return NULL; }       /* nothing registered yet */
-    size_t Mask = JIT_HASH_SIZE - 1;
-    size_t H    = HashProto( P );
-    for ( size_t Probe = 0; Probe < JIT_HASH_SIZE; Probe++ ) {
+    if ( C->Count == 0 || C->Hash == NULL ) { return NULL; }
+    size_t Mask  = C->HashMask;
+    size_t H     = HashProto( P ) & Mask;
+    size_t Probe;
+    for ( Probe = 0; Probe <= Mask; Probe++ ) {
         int32_t Slot = C->Hash[ ( H + Probe ) & Mask ];
         if ( Slot < 0 ) { return NULL; }                        /* empty -> absent */
         if ( C->Entries[ Slot ].P == P ) { return &C->Entries[ Slot ]; }
@@ -136,20 +162,30 @@ JIT_FUNC_T Jit_LookupCached( Proto *P ) {
 }
 
 static int RegisterIn( JIT_CACHE_T *C, Proto *P, JIT_FUNC_T Entry, int FuncId ) {
+    JIT_CACHE_ENTRY_T *Slot;
+    size_t             H, Probe, Mask;
     if ( P == NULL || Entry == NULL ) { return 0; }
     if ( CacheFindIn( C, P ) != NULL ) { return 1; }     /* idempotent */
-    if ( C->Count >= JIT_CACHE_MAX ) {
-        fprintf( stderr, "[-] jit: cache full (aot register)\n" );
-        return 0;
+    if ( C->Count >= C->Cap ) {
+        if ( !CacheGrow( C ) ) {
+            fprintf( stderr, "[-] jit: cache alloc failed (aot register)\n" );
+            return 0;
+        }
     }
-    JIT_CACHE_ENTRY_T *Slot = &C->Entries[ C->Count ];
+    Slot = &C->Entries[ C->Count ];
     memset( Slot, 0, sizeof( *Slot ) );
     Slot->P          = P;
     Slot->Entry      = Entry;          /* points into the PE .text, not exec-mem */
     Slot->PcToOffset = NULL;           /* no pc-map for AOT bodies (M0) */
     Slot->PcCount    = P->sizecode;
     Slot->FuncId     = FuncId;
-    CacheHashInsert( C, ( int32_t )C->Count, P );
+    /* hash-insert C->Count */
+    Mask = C->HashMask;
+    H    = HashProto( P ) & Mask;
+    for ( Probe = 0; Probe <= Mask; Probe++ ) {
+        size_t S = ( H + Probe ) & Mask;
+        if ( C->Hash[ S ] < 0 ) { C->Hash[ S ] = ( int32_t )C->Count; break; }
+    }
     C->Count++;
     return 1;
 }

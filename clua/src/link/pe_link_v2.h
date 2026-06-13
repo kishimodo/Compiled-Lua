@@ -49,8 +49,8 @@
 **               gcc path (it always passes -Wl,--gc-sections).
 */
 int LuacLink_LinkProgram( const char *userObj, const char *outExe,
-                          int no_interp, int require_ffi, int shared_rt,
-                          int ld_internal, int no_gc_sections,
+                          int no_interp, int require_ffi, unsigned used_libs,
+                          int shared_rt, int ld_internal, int no_gc_sections,
                           char *err, size_t errlen );
 
 #endif /* LUAC_LINK_PE_LINK_V2_H */

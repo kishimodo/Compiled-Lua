@@ -37,6 +37,18 @@ bool lc_module_uses_debug(LcModule *m);
 ** driver links the FFI anchor so the runtime globals exist in the exe. */
 bool lc_module_uses_ffi(LcModule *m);
 
+/* Which OPTIONAL standard libraries the program references, so the AOT exe
+** opens (and links) only those -- a `print` hello-world drops table/io/os/math/
+** utf8/string (~38 KB). Bit i set => the matching luaopen_* is needed. base,
+** package and coroutine are always opened (not represented here). string is
+** special: it backs the string metatable, so any value-indexing opcode
+** (GETFIELD/GETI/GETTABLE/SELF) could hit a string and forces it on; a program
+** that indexes nothing (and never names "string") drops it. The others are
+** reached only through their global, so naming the constant suffices
+** (conservative, like lc_module_uses_ffi). Bit values: common/stdlib_libs.h. */
+#include "common/stdlib_libs.h"
+unsigned lc_module_used_libs(LcModule *m);
+
 /* ---- Analyses (no IR mutation; populate side tables) ---- */
 void lc_analyze_dominators(LcFunc *f);
 void lc_analyze_liveness(LcFunc *f);

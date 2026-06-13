@@ -54,6 +54,46 @@ bool lc_module_uses_ffi(LcModule *m) {
   return false;
 }
 
+unsigned lc_module_used_libs(LcModule *m) {
+  unsigned mask = 0;
+  for (uint32_t i = 0; i < m->nfuncs; i++) {
+    Proto *p = m->funcs[i] ? m->funcs[i]->source : NULL;
+    if (!p) continue;
+    /* The table/math/io/os/utf8/debug libraries are reached only through their
+       global, so naming the constant (conservatively, any matching string
+       constant) is sufficient. */
+    for (int k = 0; k < p->sizek; k++) {
+      const TValue *kv = &p->k[k];
+      const char   *s;
+      if (!ttisstring(kv)) continue;
+      s = getstr(tsvalue(kv));
+      if      (strcmp(s, "string") == 0) mask |= LCLIB_STRING;
+      else if (strcmp(s, "table")  == 0) mask |= LCLIB_TABLE;
+      else if (strcmp(s, "math")   == 0) mask |= LCLIB_MATH;
+      else if (strcmp(s, "io")     == 0) mask |= LCLIB_IO;
+      else if (strcmp(s, "os")     == 0) mask |= LCLIB_OS;
+      else if (strcmp(s, "utf8")   == 0) mask |= LCLIB_UTF8;
+      else if (strcmp(s, "debug")  == 0) mask |= LCLIB_DEBUG;
+    }
+    /* string is special: luaopen_string installs the string metatable, which
+       backs BOTH string indexing (s:m(), s.m, s[k]) and string->number
+       arithmetic coercion ("10" + 1 dispatches the string metatable's __add).
+       So force string on for any value-index opcode OR any arith-metamethod
+       opcode (OP_MMBIN/MMBINI/MMBINK, emitted after an arith op that may fall to
+       a metamethod). A script that does neither and never names "string" -- a
+       pure print of constants, say -- safely drops it. */
+    if (!(mask & LCLIB_STRING)) {
+      for (int pc = 0; pc < p->sizecode; pc++) {
+        OpCode op = GET_OPCODE(p->code[pc]);
+        if (op == OP_GETFIELD || op == OP_GETI || op == OP_GETTABLE ||
+            op == OP_SELF     || op == OP_MMBIN || op == OP_MMBINI  ||
+            op == OP_MMBINK) { mask |= LCLIB_STRING; break; }
+      }
+    }
+  }
+  return mask;
+}
+
 /* TRUE iff any function MATERIALIZES the global environment as a first-class
    value. The "debug" constant scan above misses a debug table fetched without
    the literal string -- _ENV["de".."bug"], _G[k], pairs(_G) -- and once that
