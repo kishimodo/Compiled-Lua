@@ -89,9 +89,22 @@ the honest valuation from the optimizer status doc), and **stale markers**
   `monomorphize`/`ip_devirt`/`dead_global` (M2): no measured surface —
   table fastpaths already live in the `Rt_*` helpers; `CollectReachable`
   leaves no tree-unreachable functions.
-- `lc_pass_escape`/`scalar_replace` (M3): workload-gated (build against a
-  concrete table-as-struct hot loop); `barrier_elide` (M3): NO SURFACE —
-  codegen emits no barriers (they live inside the runtime helpers).
+- `lc_pass_escape`/`scalar_replace` (M3): **slice 1 SHIPPED 2026-06-13**
+  (v0.2.0-beta.6, `clua/src/opt/passes.c`, spec
+  `docs/superpowers/specs/2026-06-13-scalar-replacement-o3-design.md`).
+  Intra-procedural: a `NEWTABLE` whose home register never escapes and is
+  touched only by constant-key field ops, with NO GC safepoint in its live
+  range (the reserved above-`L->top` slots can't survive a call/GC), is
+  replaced by plain stack slots. **~38x on an alloc-heavy struct-in-loop**
+  (per-iteration heap alloc + `Rt_GetField`/`Rt_SetField` removed), checksums
+  byte-identical. Validated: full suite green at O0-O3 + ~300 adversarial repros
+  (one back-edge GC-safety miscompile found and fixed). **BUT current real-code
+  surface is ~zero**: 0/86 candidates in rover, 0/182 in the conformance corpus
+  fire — real Lua tables escape, are called-around, or interleave field access
+  with arithmetic. The MECHANISM is proven; broad surface is slice 2:
+  interprocedural escape + GC-safe slot placement (so a table whose live range
+  crosses a call can fire). `barrier_elide` (M3): NO SURFACE — codegen emits no
+  barriers (they live inside the runtime helpers).
 - `lc_build_callgraph` stub: M2 ip_typeprop discovered call sites its own
   way; a general callgraph waits for a consumer (ip_devirt/dead_global).
 

@@ -126,12 +126,20 @@ called the per-opcode helper that hardcodes the wrong TM, so a metatable'd `a<<K
   write barriers — they live inside the `Rt_*` C helpers (`luaC_barrierback`
   in lvm/ltable code paths). There is nothing at codegen level to elide;
   the pass as specced is vacuous here. Recorded so it isn't re-planned.
-- **Escape analysis → scalar replacement**: the feasible slice is narrow and
-  large to build — non-escaping, constant-keyed, metatable-free NEWTABLE
-  locals rewritten into scalar slots (requires IR rewriting, maxstacksize
-  growth, and new soundness surface). Table field access already runs the
-  `luaV_fastget` C fast path. Build only against a concrete workload where
-  table-as-struct dominates a hot loop; it is its own plan-sized effort.
+- **Escape analysis → scalar replacement: slice 1 BUILT (2026-06-13,
+  v0.2.0-beta.6).** Non-escaping, constant-keyed, metatable-free NEWTABLE locals
+  are rewritten into scalar stack slots (`lc_pass_scalar_replace`, intra-
+  procedural). Confirmed exactly as predicted: narrow but real. **~38x** on an
+  alloc-heavy struct-in-loop (per-iteration heap alloc + `Rt_GetField`/
+  `Rt_SetField` removed; `struct_loop` 5.7s→0.149s), every checksum byte-exact.
+  Validated by the suite at O0–O3 + ~300 adversarial repros (one back-edge GC
+  miscompile found + fixed; see `SR_DEBUG=1`). **Real-code surface ~zero**: 0/86
+  rover, 0/182 conformance candidates fire. The binding constraint is GC safety —
+  the reserved slots sit above `L->top`, so any call/alloc/back-edge in the live
+  range must bail, which real code almost always has. Broad surface is slice 2:
+  GC-safe slot placement (slots interleaved as low locals, below `L->top`) +
+  interprocedural escape. Spec:
+  `docs/superpowers/specs/2026-06-13-scalar-replacement-o3-design.md`.
 
 ### `lc_pass_raw_table`, `lc_pass_devirt_local`, `lc_pass_inline_small`
 Table get/set already match v1 (the fast path lives inside `Rt_GetI`/

@@ -216,3 +216,43 @@ the `FOR`/`TFOR` family (when `A` is a control slot).
 - `docs/TODO.md`, `docs/superpowers/plans/2026-06-10-luac-optimizer-status.md` --
   update M3 status from "no surface" to "slice 1 shipped".
 - `CHANGELOG.md` + version bump on completion.
+
+## Measured outcome (slice 1, shipped 2026-06-13, v0.2.0-beta.6)
+
+Built as designed (`lc_pass_scalar_replace` in `clua/src/opt/passes.c`; analysis
+folded in for the intra-procedural slice, `lc_pass_escape` left as the slice-2
+interprocedural home). One design point the build forced that the spec did not
+foresee: the reserved slots sit at the TOP of the frame, ABOVE `L->top` during
+any nested call, so GC's atomic phase (`lgc.c traversethread` nils
+`[L->top, stack_end)`) clobbers them across a call. So the live range
+`(nt_pc, last_pc]` must additionally be **GC-safepoint-free** (no call/alloc/
+unproven-arith), and a backward branch may not re-enter it without re-running
+the home `NEWTABLE` (which re-nils the slots) -- the latter found by the
+adversarial round (a `goto` re-reading a field after a GC whose pc was textually
+past `last_pc`).
+
+- **Correctness:** full suite green at O0+O1+O2+O3 (655/0), plus ~300 adversarial
+  repros across escape / aliasing / closure-capture / metatable / shape /
+  nil-keys / register-reuse / control-flow / GC. One real O3-only miscompile
+  (the back-edge case) was found and fixed; the re-attack (143 loop/goto repros)
+  then found zero.
+- **Win when it fires:** ~38x on an alloc-heavy struct-in-loop
+  (`struct_loop` 5.7s -> 0.149s, `point_loop` 7.9s -> 0.210s at n=2e7), every
+  checksum byte-identical, approaching the table-free baseline (0.04s). The
+  per-iteration heap allocation and the `Rt_GetField`/`Rt_SetField` helper calls
+  are gone.
+- **Real-code surface: ~zero.** 0/86 candidate `NEWTABLE`s in rover and 0/182 in
+  the conformance corpus fire. Real Lua tables escape, are called-around, or
+  interleave field reads with arithmetic, so the GC-safepoint-free + batched-read
+  + non-escape + dedicated-register window is essentially never all met. This
+  CONFIRMS (and quantifies) the original "no measured surface" assessment: the
+  mechanism is real and large, but only on a narrow shape.
+
+**Slice 2 (what would give real surface):** the GC-safepoint bail is the binding
+constraint, and it is fundamental to placing slots at the top of the frame. To
+let a table whose live range crosses a call fire, the field values must live in
+GC-safe storage (slots interleaved as proper low locals, kept below `L->top`),
+which is a larger codegen change; plus interprocedural escape (so escaping
+tables can still be partially replaced). Until then slice 1 ships as a sound,
+validated, default-on-at-`-O3` foundation that costs nothing when it does not
+fire (`-O2` is the user default, so default builds are unaffected).

@@ -7,6 +7,42 @@ of truth -- `clua/src/common/version.h` -- and this file in step.
 
 ## [Unreleased]
 
+## [0.2.0-beta.6] - 2026-06-13
+
+### Added
+
+- **`-O3` escape analysis + scalar replacement (slice 1).** The first M3 memory
+  pass with real measured surface. A `NEWTABLE` whose home register never
+  escapes its function and is touched only by constant-key field ops
+  (`t.x` / `t[1]`) -- and whose live range holds no GC safepoint -- is replaced
+  by plain stack slots instead of a heap table (`lc_pass_scalar_replace`,
+  `clua/src/opt/passes.c`). The per-iteration heap allocation and the
+  `Rt_GetField`/`Rt_SetField` helper calls vanish: **~38x on an alloc-heavy
+  struct-in-loop** (`struct_loop` 5.7s -> 0.149s at n=2e7), every result
+  byte-identical to the interpreter. The rewrite reuses existing opcodes
+  (`MOVE`/`LOADK`/`LOADNIL`), so codegen is unchanged and the differential oracle
+  covers every emitted byte. Soundness keystone: a non-escaping fresh table can
+  never gain a metatable (`setmetatable` is a call = an escape), so constant-key
+  raw get/set is exactly one scalar slot per key.
+
+  Validated at O0+O1+O2+O3 (suite 655/0) plus an adversarial attack round
+  (~300 repros across escape / aliasing / closure-capture / metatable / shape /
+  nil-keys / register-reuse / control-flow / GC); it found one real O3-only
+  miscompile -- a backward `goto` re-reading a field after a GC whose pc was
+  textually past the last read, clobbering the reserved above-`L->top` slot --
+  now fixed (the live-range check follows back-edges) and pinned by
+  `tests/differential/aot_scalar_replace.lua`. Benchmark harness:
+  `tools/bench-optimizer.lua`.
+
+  **Honest scope:** the win is large but the firing window is narrow -- it fires
+  0/86 candidates in rover and 0/182 in the conformance corpus, because real
+  Lua tables escape, are called-around, or interleave field reads with
+  arithmetic (any of which puts a GC safepoint in the live range, which must
+  bail). This is the proven mechanism; broad real-code surface is slice 2
+  (GC-safe slot placement + interprocedural escape). It is default-on at `-O3`
+  only -- the `clua` default is `-O2`, so default builds are unaffected -- and
+  costs nothing when it does not fire.
+
 ## [0.2.0-beta.5] - 2026-06-13
 
 ### Changed

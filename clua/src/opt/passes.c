@@ -582,8 +582,12 @@ void lc_pass_monomorphize(LcModule *m)   { (void)m; /* TODO(M2) keep ANY fallbac
 void lc_pass_ip_devirt(LcModule *m)      { (void)m; /* TODO(M2) */ }
 void lc_pass_dead_global(LcModule *m)    { (void)m; /* TODO(M2) */ }
 
-void lc_pass_escape(LcModule *m)         { (void)m; /* TODO(M3) coro/pcall/ffi force escape */ }
-void lc_pass_scalar_replace(LcModule *m) { (void)m; /* TODO(M3) */ }
+/* M3 escape analysis: slice 2 will make this the INTERPROCEDURAL non-escape
+   summary that scalar replacement consumes. For the slice-1 intra-procedural
+   pass the candidate analysis is self-contained inside lc_pass_scalar_replace
+   (real implementation at the end of this file). */
+void lc_pass_escape(LcModule *m)         { (void)m; }
+/* lc_pass_scalar_replace: real implementation at the end of this file (M3). */
 void lc_pass_barrier_elide(LcFunc *f)    { (void)f; /* TODO(M3) HIGHEST RISK — prove or keep barrier */ }
 
 void lc_pass_lower(LcFunc *f)            { (void)f; /* TODO(M0) canonicalize for codegen */ }
@@ -1040,4 +1044,244 @@ next_fn:
 
   for (fi = 0; fi < m->nfuncs; fi++) { ti_state_free(&A[fi]); free(ip[fi].param_meet); }
   free(A); free(ip);
+}
+
+/* ================================================================== */
+/* M3 -- escape analysis + scalar replacement of non-escaping tables.  */
+/* slice 1: intra-procedural. Spec:                                     */
+/*   docs/superpowers/specs/2026-06-13-scalar-replacement-o3-design.md   */
+/*                                                                      */
+/* A table from OP_NEWTABLE whose home register never escapes its        */
+/* function and is touched ONLY by constant-key field ops can never gain */
+/* a metatable (setmetatable is a call = an escape, which bails), so its */
+/* raw get/set semantics are EXACTLY modeled by one fresh stack slot per */
+/* distinct key. Rewrite (reusing existing opcodes -- no codegen change, */
+/* so the differential oracle covers every emitted byte):               */
+/*   NEWTABLE A         -> LOADNIL slot_base .. slot_base+nkeys-1        */
+/*   GET{FIELD,I} d,A,k -> MOVE   d        <- slot[k]                    */
+/*   SET{FIELD,I} A,k,v -> MOVE   slot[k]  <- v       (v a register)     */
+/*                      -> LOADK  slot[k]  <- K[v]    (v a constant)     */
+/* removing the heap allocation (Rt_NewTable + GC) and the per-access    */
+/* Rt_GetField/Rt_SetField (hash lookup + barrier) on the hot path. The  */
+/* reserved slots live inside the (bumped) frame, so the GC treats them  */
+/* exactly like any Lua local. The whole soundness burden is the         */
+/* exhaustive "does any OTHER op touch register A?" test, discharged by   */
+/* reusing the audited operand model (ip_write_range + ip_reads_slot):    */
+/* any read or write of A outside the four allowed field ops bails.      */
+/* ================================================================== */
+
+#define SR_MAX_KEYS 8
+
+typedef struct { int is_int; int kval; } SrKey;   /* is_int 1=int imm, 0=K-idx */
+typedef struct { SrKey k[SR_MAX_KEYS]; int n; } SrKeySet;
+
+static int sr_key_find(const SrKeySet *ks, int is_int, int kval) {
+  int i;
+  for (i = 0; i < ks->n; i++)
+    if (ks->k[i].is_int == is_int && ks->k[i].kval == kval) return i;
+  return -1;
+}
+static int sr_key_intern(SrKeySet *ks, int is_int, int kval) {
+  int i = sr_key_find(ks, is_int, kval);
+  if (i >= 0) return i;
+  if (ks->n >= SR_MAX_KEYS) return -1;
+  ks->k[ks->n].is_int = is_int; ks->k[ks->n].kval = kval;
+  return ks->n++;
+}
+
+/* Allowed constant-key GET on table register R (d = R.k / R[k])?
+   GET{FIELD,I}: a=dst, b=table reg, c=key (FIELD: string K-idx; I: int imm). */
+static int sr_is_get(const LcInst *in, int R, int *is_int, int *kval, int *dst) {
+  if (in->b != R || in->a == R) return 0;        /* a==R would redefine R   */
+  if (in->bc_op == OP_GETFIELD) { *is_int = 0; *kval = in->c; *dst = in->a; return 1; }
+  if (in->bc_op == OP_GETI)     { *is_int = 1; *kval = in->c; *dst = in->a; return 1; }
+  return 0;
+}
+/* Allowed constant-key SET on table register R (R.k = v / R[k] = v, v != R)?
+   SET{FIELD,I}: a=table reg, b=key (FIELD: string K-idx; I: int imm),
+   c=value Ck-encoded by lift.c (c>=0 -> register c; c<0 -> constant K[-c-1]). */
+static int sr_is_set(const LcInst *in, int R, int *is_int, int *kval,
+                     int *valreg, int *valk) {
+  if (in->a != R) return 0;
+  if (in->bc_op != OP_SETFIELD && in->bc_op != OP_SETI) return 0;
+  if (in->c >= 0) {                              /* value is register in->c */
+    if (in->c == R) return 0;                    /* R[k]=R -> R escapes; bail */
+    *valreg = in->c; *valk = -1;
+  } else {                                       /* value is constant K[-c-1] */
+    *valreg = -1; *valk = -in->c - 1;
+  }
+  *is_int = (in->bc_op == OP_SETI);
+  *kval   = in->b;
+  return 1;
+}
+
+/* Rewrite one instruction in place into MOVE/LOADK/LOADNIL (all LC_OP_CONST;
+   codegen dispatches on bc_op). Drop stale proof/effect annotations. */
+static void sr_rewrite(LcInst *in, int bc_op, int a, int b) {
+  in->op = LC_OP_CONST; in->bc_op = bc_op;
+  in->a = a; in->b = b; in->c = 0;
+  in->known = 0; in->flags = LC_FX_PURE;
+}
+
+/* Does any nested closure capture parent register R on the stack? Such a slot
+   can be mutated to any type / observed elsewhere -> not scalar-replaceable. */
+static int sr_reg_captured(Proto *p, int R) {
+  int j, k;
+  for (j = 0; j < p->sizep; j++) {
+    Proto *ch = p->p[j];
+    if (!ch) continue;
+    for (k = 0; k < ch->sizeupvalues; k++)
+      if (ch->upvalues[k].instack && ch->upvalues[k].idx == R) return 1;
+  }
+  return 0;
+}
+
+/* Can this op execute inside the table's live range without risking a GC or a
+   nested call? The reserved slots sit at the TOP of the frame, so a GC (whose
+   atomic phase nils [L->top, stack_end)) or a call (which drops L->top below
+   them) while they hold live values would clobber them. Scalar replacement is
+   sound only when the live range is free of allocations, calls, GC-able throws
+   and metamethod dispatch. Proven-primitive arith (typeinfer `known` bits)
+   cannot dispatch a metamethod, so it stays safe; generic arith does not. */
+static int sr_op_is_gcsafe(const LcInst *in) {
+  unsigned k = (unsigned)in->known;
+  int bok = (k & (LC_KNOWN_B_INT | LC_KNOWN_B_FLT)) != 0;
+  int cok = (k & (LC_KNOWN_C_INT | LC_KNOWN_C_FLT)) != 0;
+  switch (in->bc_op) {
+    case OP_MOVE: case OP_LOADK: case OP_LOADKX: case OP_LOADI: case OP_LOADF:
+    case OP_LOADNIL: case OP_LOADFALSE: case OP_LOADTRUE: case OP_LFALSESKIP:
+    case OP_NOT: case OP_GETUPVAL: case OP_SETUPVAL:
+    case OP_JMP: case OP_FORLOOP: case OP_FORPREP:
+    case OP_EXTRAARG:                             /* inert; codegen emits 0 B  */
+      return 1;                                   /* no alloc/call/metamethod  */
+    case OP_ADD: case OP_SUB: case OP_MUL: case OP_DIV: case OP_MOD:
+    case OP_IDIV: case OP_POW: case OP_BAND: case OP_BOR: case OP_BXOR:
+    case OP_SHL: case OP_SHR:
+      return bok && cok;                          /* both operands proven num  */
+    case OP_ADDI: case OP_ADDK: case OP_SUBK: case OP_MULK: case OP_DIVK:
+    case OP_MODK: case OP_IDIVK: case OP_POWK: case OP_BANDK: case OP_BORK:
+    case OP_BXORK: case OP_SHRI: case OP_SHLI: case OP_UNM: case OP_BNOT:
+      return bok;                                 /* reg operand proven num    */
+    /* metamethod-fallback markers: each immediately follows its arith op and
+       runs ONLY if the fast path failed. Whenever this op is in range its arith
+       is in range too; if that arith is not proven-primitive we bail on it
+       first, so reaching here means the arith was proven and this marker is
+       statically dead -> no metamethod, no GC. */
+    case OP_MMBIN: case OP_MMBINI: case OP_MMBINK:
+      return 1;
+    default:
+      return 0;            /* calls, allocs, len, concat, compares, table ops  */
+  }
+}
+
+static void sr_try_func(LcFunc *f) {
+  Proto   *p   = f ? f->source : NULL;
+  int      dbg = getenv("SR_DEBUG") != NULL;
+  uint32_t bi, bj;
+  if (!p) return;
+
+  for (bi = 0; bi < f->nblocks; bi++) {
+    LcInst *nt;
+    for (nt = f->blocks[bi]->first; nt; nt = nt->next) {
+      int R, nregs, slot_base, ok, is_int, kval, dst, valreg, valk, lo, hi, wr;
+      int nt_pc, last_pc;
+      SrKeySet ks;
+      LcInst *in;
+
+      if (nt->bc_op != OP_NEWTABLE) continue;
+      R       = nt->a;
+      nregs   = p->maxstacksize;
+      nt_pc   = nt->bc_pc;
+      last_pc = nt_pc;
+      ks.n    = 0;
+      ok      = !sr_reg_captured(p, R);
+
+      /* (a) every OTHER use of R must be an allowed constant-key field op; any
+         read/write of R elsewhere disqualifies. Track the last field-use pc. */
+      for (bj = 0; ok && bj < f->nblocks; bj++) {
+        for (in = f->blocks[bj]->first; in; in = in->next) {
+          if (in == nt) continue;
+          if (sr_is_get(in, R, &is_int, &kval, &dst) ||
+              sr_is_set(in, R, &is_int, &kval, &valreg, &valk)) {
+            if (sr_key_intern(&ks, is_int, kval) < 0) { ok = 0; break; }
+            if (in->bc_pc > last_pc) last_pc = in->bc_pc;
+            continue;
+          }
+          wr = ip_write_range(in, nregs, &lo, &hi);
+          if (wr < 0 || (wr == 1 && R >= lo && R <= hi)) { ok = 0; break; }
+          if (ip_reads_slot(in, R, nregs))              { ok = 0; break; }
+        }
+      }
+      if (!ok || ks.n == 0) {
+        if (dbg) fprintf(stderr, "[SR] R=%d bail(uses) ok=%d nkeys=%d\n", R, ok, ks.n);
+        continue;
+      }
+
+      /* (a2) the live range (nt_pc, last_pc] must contain no GC safepoint -- the
+         reserved slots are above L->top, so a GC/call there would nil them. */
+      for (bj = 0; ok && bj < f->nblocks; bj++) {
+        for (in = f->blocks[bj]->first; in; in = in->next) {
+          if (in == nt) continue;
+          if (in->bc_pc <= nt_pc || in->bc_pc > last_pc) continue;   /* out of range */
+          if (sr_is_get(in, R, &is_int, &kval, &dst) ||
+              sr_is_set(in, R, &is_int, &kval, &valreg, &valk)) continue;  /* our op */
+          if (!sr_op_is_gcsafe(in)) {
+            if (dbg) fprintf(stderr, "[SR] R=%d bail: safepoint bc_op=%d pc=%d in (%d,%d]\n",
+                             R, in->bc_op, in->bc_pc, nt_pc, last_pc);
+            ok = 0; break;
+          }
+        }
+      }
+      if (!ok) continue;
+
+      /* (a3) no loop back-edge may re-enter the live range (nt_pc, last_pc]
+         WITHOUT re-executing the home NEWTABLE (which re-nils the slots): such
+         an edge carries a live slot across whatever safepoint the loop holds,
+         and the flat (a2) pc-interval is blind to it. A table created INSIDE a
+         loop is safe -- its back-edge targets <= nt_pc, re-running the nil. The
+         branch target is in `c`; a backward edge has c < bc_pc. (Found by the
+         scalar-replace soundness attack: a `goto` re-reading a field after a GC
+         whose pc was textually past last_pc.) */
+      for (bj = 0; ok && bj < f->nblocks; bj++) {
+        for (in = f->blocks[bj]->first; in; in = in->next) {
+          if (in->bc_op != OP_JMP && in->bc_op != OP_FORLOOP &&
+              in->bc_op != OP_TFORLOOP) continue;
+          if (in->c < in->bc_pc && in->c > nt_pc && in->c <= last_pc) {
+            if (dbg) fprintf(stderr, "[SR] R=%d bail: back-edge to pc=%d in (%d,%d]\n",
+                             R, in->c, nt_pc, last_pc);
+            ok = 0; break;
+          }
+        }
+      }
+      if (!ok) continue;
+      if (dbg) fprintf(stderr, "[SR] R=%d FIRE nkeys=%d range=(%d,%d]\n", R, ks.n, nt_pc, last_pc);
+
+      /* (b) reserve fresh slots above the frame; maxstacksize is a lu_byte. */
+      slot_base = p->maxstacksize;
+      if (slot_base + ks.n > 255) continue;
+      p->maxstacksize = (lu_byte)(slot_base + ks.n);
+
+      /* (c) rewrite the home NEWTABLE (-> nil the slots) and every field op. */
+      sr_rewrite(nt, OP_LOADNIL, slot_base, ks.n - 1);
+      for (bj = 0; bj < f->nblocks; bj++) {
+        for (in = f->blocks[bj]->first; in; in = in->next) {
+          if (in == nt) continue;
+          if (sr_is_get(in, R, &is_int, &kval, &dst)) {
+            sr_rewrite(in, OP_MOVE, dst, slot_base + sr_key_find(&ks, is_int, kval));
+          } else if (sr_is_set(in, R, &is_int, &kval, &valreg, &valk)) {
+            int slot = slot_base + sr_key_find(&ks, is_int, kval);
+            if (valreg >= 0) sr_rewrite(in, OP_MOVE,  slot, valreg);
+            else             sr_rewrite(in, OP_LOADK, slot, valk);
+          }
+        }
+      }
+    }
+  }
+}
+
+void lc_pass_scalar_replace(LcModule *m) {
+  uint32_t i;
+  if (!m) return;
+  for (i = 0; i < m->nfuncs; i++)
+    if (m->funcs[i]) sr_try_func(m->funcs[i]);
 }
