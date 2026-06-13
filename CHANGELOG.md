@@ -7,6 +7,31 @@ of truth -- `clua/src/common/version.h` -- and this file in step.
 
 ## [Unreleased]
 
+## [0.2.0-beta.4] - 2026-06-13
+
+### Changed
+
+- **Smaller exes: unenforced CET instrumentation is no longer emitted.** The
+  runtime and Lua core were compiled with `-fcf-protection=full`, which makes
+  GCC plant an `endbr64` landing pad at the head of every function (plus a
+  `.note.gnu.property` marker). Those pads are only ever checked when the PE
+  load-config advertises CET -- and CLua's load-config is empty, so they were
+  never enforced: pure dead weight. Switching the shipped runtime + core to
+  `-fcf-protection=none` strips ~283 pads from a `print` hello-world (298 -> 15)
+  and ~497 from rover (514 -> 17); the residual handful live in MinGW's
+  prebuilt CRT startup objects, which we link verbatim. hello drops 139 KB ->
+  137 KB, rover 689 KB -> 687 KB. `-fstack-protector-strong` stays -- it is
+  real, near-free stack-smash protection. This was the one remaining non-pulling
+  flag: the size/optimizer set was already the C/Rust release shape (`-Os`,
+  `--gc-sections` with `-ffunction-sections`/`-fdata-sections`,
+  `-fno-(asynchronous-)unwind-tables`, `-fmerge-all-constants`, `-s` strip).
+
+### Fixed
+
+- `rover.exe` now lists `runtime-aot.a` as a make prerequisite, so a
+  runtime/core rebuild (e.g. a CFLAGS change) relinks rover -- previously a
+  stale rover could ship linked against the old runtime.
+
 ## [0.2.0-beta.3] - 2026-06-13
 
 ### Changed

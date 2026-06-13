@@ -99,7 +99,10 @@ clua: $(BUILD_DIR)/clua.exe
 # so rover links with NO gcc — it only needs the archives + aot_entry.o + the
 # CRT sysroot snapshot (built by the `sysroot` target, ordered before this in
 # build-luac.bat; an explicit dep here keeps a direct `make rover` honest).
-$(BUILD_DIR)/rover.exe: $(BUILD_DIR)/clua.exe $(BUILD_DIR)/aot_entry.o $(BUILD_DIR)/sysroot/libkernel32.a $(ROOT)/rover/src/rover.lua
+# runtime-aot.a is listed too: rover is a CLua-compiled PE that *links* that
+# archive, so a runtime/core rebuild (e.g. a CFLAGS change) must relink rover —
+# without this dep a stale rover silently ships against the old runtime.
+$(BUILD_DIR)/rover.exe: $(BUILD_DIR)/clua.exe $(BUILD_DIR)/aot_entry.o $(BUILD_DIR)/runtime-aot.a $(BUILD_DIR)/sysroot/libkernel32.a $(ROOT)/rover/src/rover.lua
 	$(BUILD_DIR)/clua.exe build $(ROOT)/rover/src/rover.lua -O1 -o $@
 
 # sysroot snapshot probe (built by the `sysroot` target); a file dep so

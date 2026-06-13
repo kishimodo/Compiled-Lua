@@ -78,11 +78,19 @@ $(BUILD_DIR)/lua:
 # as "-nan(ind)" where the oracle's MinGW stdio prints "nan", a real fidelity
 # break caught by tests/differential/aot_strformat.lua. Do not flip this
 # without that differential staying green.
+# Size/opt flags mirror a C/Rust release build: -Os, dead-section elimination
+# (-ffunction-sections/-fdata-sections + the linker's --gc-sections), no unwind
+# tables, constant merging, -g0, and a final -s strip. -fstack-protector-strong
+# stays (real stack-smash protection, ~free on this binary). -fcf-protection
+# (Intel CET) is deliberately OFF: it stamps an endbr64 on every function, but
+# nothing in the pipeline marks the PE CET-enforced (the load-config CET fields
+# are zero), so those bytes are pure dead weight -- and clua's own codegen'd
+# bodies carry no endbr64 either, so enabling CET would be inconsistent anyway.
 EMBEDDED_LUA_CFLAGS := -std=c99 -Wall -Wextra -Wno-unused-parameter \
     -Os -g0 -ffunction-sections -fdata-sections \
     -fno-asynchronous-unwind-tables -fno-unwind-tables \
     -fmerge-all-constants -fmerge-constants \
-    -fstack-protector-strong -fcf-protection=full \
+    -fstack-protector-strong -fcf-protection=none \
     -I$(SRC_DIR) -I$(LUA_DIR) -I$(ROOT)/build/gen \
     -DCLUA_TARGET_WINDOWS_X64=1 \
     -DLUA_USE_WINDOWS -DLUA_COMPAT_5_3
@@ -212,7 +220,7 @@ EMBEDDED_RT_CFLAGS := -std=c99 -Wall -Wextra -Wno-unused-parameter \
     -Os -g0 -ffunction-sections \
     -fno-asynchronous-unwind-tables -fno-unwind-tables \
     -fmerge-all-constants -fmerge-constants \
-    -fstack-protector-strong -fcf-protection=full \
+    -fstack-protector-strong -fcf-protection=none \
     -I$(SRC_DIR) -I$(LUA_DIR) -I$(ROOT)/build/gen \
     -DCLUA_TARGET_WINDOWS_X64=1
 
