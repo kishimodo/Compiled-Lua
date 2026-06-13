@@ -121,10 +121,17 @@ print(mt.hello)
   -- no JIT compiler, no FFI, no winpthread, no bytecode interpreter for
   -- debug-free programs, gc-sections, stripped). 230 KB headroom catches any
   -- of those chunks creeping back into the link.
+  --
+  -- The internal linker (--ld=internal / CLUA_LD=internal) does NOT yet
+  -- gc-sections, so its exes carry ~50 KB more dead code (~235 KB). Relax the
+  -- bound in that mode to 300 KB -- still far below the parser (~150 KB) / full
+  -- interpreter / FFI footprints the canary actually guards against.
+  local internal_ld = (os.getenv("CLUA_LD") == "internal")
+  local bound = internal_ld and 300000 or 230000
   local f = io.open(exe, "rb")
   local size = f:seek("end"); f:close()
-  ok(size < 230000, "compiled exe is lean (no parser/JIT/FFI/pthread/interp)",
-     ("size=%d"):format(size))
+  ok(size < bound, "compiled exe is lean (no parser/JIT/FFI/pthread/interp)",
+     ("size=%d (bound=%d, ld=%s)"):format(size, bound, internal_ld and "internal" or "gcc"))
   os.remove(src); os.remove(exe)
 end
 
@@ -344,6 +351,44 @@ else
   -- registry is repo-relative): `rover list` must not crash
   local c3, o3 = run(("\"%s\" list"):format(rover_abs))
   ok(c3 == 0, "rover list runs", o3:sub(1, 120))
+end
+
+-- ---- 8. internal linker (--ld=internal): self-contained COFF->PE64 link ----
+-- Build the same hello program with the built-in linker and with gcc, then
+-- assert (a) the internal build succeeds, (b) its exe runs, (c) its stdout is
+-- byte-identical to the gcc-linked exe's. Skips cleanly when the CRT sysroot
+-- snapshot isn't present (internal mode needs build\bin\sysroot or lib\sysroot).
+do
+  local sysroot_here = exists("build\\bin\\sysroot\\libkernel32.a")
+                    or exists("dist\\lib\\sysroot\\libkernel32.a")
+  if not sysroot_here then
+    print("[~] SKIP internal-linker checks (no CRT sysroot; run `make -f build/Makefile.luac sysroot`)")
+  else
+    local src   = TEMP .. "\\clua_ld_internal_probe.lua"
+    local exe_g = TEMP .. "\\clua_ld_gcc.exe"
+    local exe_i = TEMP .. "\\clua_ld_internal.exe"
+    writefile(src,
+      'local t = {} for i=1,8 do t[i] = i*i end\n' ..
+      'print(table.concat(t, ","))\n' ..
+      'print(("clua"):upper(), math.floor(2.7), 3 << 4)\n')
+
+    local cg, og = run(("\"%s\" build \"%s\" -O1 --ld=gcc -o \"%s\"")
+                       :format(clua_abs, src, exe_g))
+    local ci, oi = run(("\"%s\" build \"%s\" -O1 --ld=internal -o \"%s\"")
+                       :format(clua_abs, src, exe_i))
+    ok(ci == 0, "clua build --ld=internal succeeds",
+       (oi or ""):sub(1, 200))
+
+    if ci == 0 and cg == 0 then
+      local rg, sg = run(("\"%s\""):format(exe_g))
+      local ri, si = run(("\"%s\""):format(exe_i))
+      ok(ri == 0, "internal-linked exe runs (exit 0)", (si or ""):sub(1, 120))
+      ok(rg == 0 and si == sg,
+         "internal-linked stdout == gcc-linked stdout",
+         ("gcc=%q internal=%q"):format((sg or ""):sub(1, 80), (si or ""):sub(1, 80)))
+    end
+    os.remove(src); os.remove(exe_g); os.remove(exe_i)
+  end
 end
 
 if fails > 0 then os.exit(1) end
