@@ -8,7 +8,7 @@ GCC-compiled C program (which links libc); CLua links a runtime *library*
 (GC, tables, strings, metatables, coroutines, FFI) the same way.
 
 ```
-clua build app.lua            ->  app.exe   (optimized, -O1 default)
+clua build app.lua            ->  app.exe   (optimized, -O2 default)
 clua run app.lua -- arg1      compile + run in one step
 clua check app.lua            front-end + closed-world check only
 ```
@@ -107,7 +107,7 @@ Compile a program (works from any directory — `clua.exe` finds its runtime
 libraries relative to itself, or via `CLUA_HOME`):
 
 ```
-build\bin\clua.exe build program.lua          # -> program.exe (-O1 default)
+build\bin\clua.exe build program.lua          # -> program.exe (-O2 default)
 build\bin\clua.exe run program.lua -- args    # compile + run
 ```
 

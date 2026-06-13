@@ -318,10 +318,11 @@ end
 -- Compile each tests/differential/*.lua with aotc.exe into a real PE, run it,
 -- and diff its stdout against clua-interp.exe -i on the same source (the arbiter: a
 -- compiled program must match the interpreter byte-for-byte). Each file is
--- exercised at BOTH -O0 (faithful boxed baseline) and -O1 (the optimizer's
--- typed fastpaths), so the optimizer can never silently change behavior.
+-- exercised at every selectable -O level -- -O0 (faithful boxed baseline),
+-- -O1 (local typed fastpaths), -O2 (whole-program M2 passes), -O3 (M3 memory
+-- passes) -- so no optimization level can ever silently change behavior.
 local function run_aot_differential()
-  header("Differential compiled-PE-vs-interpreter (tests/differential/*.lua, O0+O1)")
+  header("Differential compiled-PE-vs-interpreter (tests/differential/*.lua, O0+O1+O2+O3)")
   if not file_exists(AOTC) then
     fail = fail + 1
     failed[#failed + 1] = "aotdiff:aotc-missing"
@@ -329,7 +330,9 @@ local function run_aot_differential()
     return
   end
   local OPT_LEVELS = { { flag = "",    tag = "O0" },
-                       { flag = "-O1", tag = "O1" } }
+                       { flag = "-O1", tag = "O1" },
+                       { flag = "-O2", tag = "O2" },
+                       { flag = "-O3", tag = "O3" } }
   for _, src in ipairs(glob("tests/differential", "*.lua")) do
     local base = basename(src, "%.lua")
     local oi, ri = capture(guard('"' .. CLUA .. '" -i "' .. src .. '" 2>nul'))
@@ -380,14 +383,14 @@ local function diff_xfail_reason(path)
 end
 
 -- A broad Lua 5.4 conformance corpus run through the SAME differential check as
--- phase 5 (compiled-exe stdout vs interpreter stdout, byte-for-byte, at both
--- -O0 and -O1). A divergence is an AOT codegen/optimizer bug. Files may opt
+-- phase 5 (compiled-exe stdout vs interpreter stdout, byte-for-byte, at every
+-- selectable -O level O0..O3). A divergence is an AOT codegen/optimizer bug. Files may opt
 -- into a known divergence with a first-lines comment `-- DIFF-XFAIL: <reason>`:
 -- such a file's divergence is tallied as an expected XFAIL (the live 'distance
 -- to conformance' metric) rather than a FAIL, and an UNEXPECTED MATCH on an
 -- xfail'd file is reported XPASS so the marker can be removed once fixed.
 local function run_conformance()
-  header("Conformance corpus compiled-vs-interpreter (tests/conformance/*.lua, O0+O1)")
+  header("Conformance corpus compiled-vs-interpreter (tests/conformance/*.lua, O0+O1+O2+O3)")
   if not file_exists(AOTC) then
     fail = fail + 1
     failed[#failed + 1] = "conform:aotc-missing"
@@ -395,7 +398,9 @@ local function run_conformance()
     return
   end
   local OPT_LEVELS = { { flag = "",    tag = "O0" },
-                       { flag = "-O1", tag = "O1" } }
+                       { flag = "-O1", tag = "O1" },
+                       { flag = "-O2", tag = "O2" },
+                       { flag = "-O3", tag = "O3" } }
   for _, src in ipairs(glob("tests/conformance", "*.lua")) do
     local base   = basename(src, "%.lua")
     local reason = diff_xfail_reason(src)

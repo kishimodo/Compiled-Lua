@@ -7,6 +7,33 @@ of truth -- `clua/src/common/version.h` -- and this file in step.
 
 ## [Unreleased]
 
+## [0.2.0-beta.5] - 2026-06-13
+
+### Changed
+
+- **`clua build` now defaults to `-O2` (whole-program optimization).** The
+  default optimization level moves from `-O1` to `-O2`, matching the release
+  convention of a C compiler. `-O1` ran only the M1 local passes (local type
+  inference, arith specialization, local unboxing/devirtualization, small-call
+  inlining); `-O2` additionally runs the M2 *interprocedural* passes across the
+  whole closed-world program -- monomorphization, interprocedural
+  devirtualization, and dead-global elimination. A closed-world AOT compiler
+  sees the entire program, so whole-program optimization is sound and is exactly
+  where CLua should sit by default. `-O0` and `-O1` remain available, and `-O3`
+  (the M3 memory passes -- escape analysis, scalar replacement, GC-barrier
+  elision) stays opt-in for callers who want maximum. `aotc` (the low-level
+  driver) keeps its `-O0` default; only the user-facing `clua` default moved.
+
+### Added
+
+- **The differential + conformance oracle now runs at every selectable `-O`
+  level (`O0+O1+O2+O3`), not just `O0+O1`.** Every compiled differential and
+  conformance test must now match the reference interpreter byte-for-byte at all
+  four levels, so an optimizer or codegen divergence at `-O2` or `-O3` is a hard
+  suite failure rather than an unvalidated blind spot. This is what makes the
+  `-O2` default safe to ship -- and it permanently gates `-O3` too. The change
+  added 146 compiled-vs-interpreter checks (505 -> 651), all green.
+
 ## [0.2.0-beta.4] - 2026-06-13
 
 ### Changed

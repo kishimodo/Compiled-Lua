@@ -48,7 +48,7 @@ static void usage( FILE *to ) {
         "\n"
         "build options:\n"
         "  -o <out.exe>     output path (default: <input-basename>.exe)\n"
-        "  -O0|-O1|-O2      optimization level (default: -O1)\n"
+        "  -O0|-O1|-O2|-O3  optimization level (default: -O2 = whole-program)\n"
         "  -L <pkg>         force-bundle a package\n"
         "  --keep-temps     keep the intermediate object file\n"
         "  --shared-rt      link against the shared runtime (clua-rt.dll)\n"
@@ -105,7 +105,7 @@ static int parse_build_args( CluaArgs *a, int argc, char **argv, int from,
     int i, nforce = 0;
 
     memset( a, 0, sizeof( *a ) );
-    a->opt.opt_level = 1;                       /* clua default: optimize */
+    a->opt.opt_level = 2;                       /* clua default: -O2, whole-program (M2 interprocedural) */
     a->opt.ld_internal = -1;                    /* env (CLUA_LD) decides   */
 
     for ( i = from; i < argc; i++ ) {
