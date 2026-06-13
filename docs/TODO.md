@@ -7,20 +7,34 @@ the honest valuation from the optimizer status doc), and **stale markers**
 
 ## Real open work (roughly priority-ordered)
 
-1. **M4: builtin-package bundling for compiled exes.** The ~195 in-tree
-   packages don't link into AOT programs; `require "json"` is a loud compile
-   error today (rover-installed packages bundle fine). The v1 pipeline's
-   tree-shaken `_pkg_gen.o` link (`clua/src/compiler/pe_link.c`) is the
-   reference implementation.
-2. **M4: FFI in compiled exes.** `aot_entry.c` never opens the FFI (saves
-   ~25 KB and keeps exes single-threaded). FFI-using packages are host-only
-   until an opt-in (closed-world `require "ffi"`-scan anchored) init exists.
-3. **M4: self-contained PE writer** — drop the MinGW gcc/ld dependency, the
-   one external step left in a user build (~170 ms of the ~190 ms total).
-4. **lvm strip, the remainder:** `luaV_execute` is now only a thin dispatch
-   entry, and debug-free programs already link `lvm_nointerp.o`; direct
-   native dispatch at the `luaD_call` boundary would remove the entry hop
-   entirely (perf nicety, small).
+1. ~~**M4: builtin-package bundling for compiled exes.**~~ **DONE
+   2026-06-12:** the driver compiles every required builtin's source
+   (located via `Paths_BuiltinPackagesRoot`: repo checkout, exe-relative,
+   `dist\lib\packages`, `CLUA_HOME`) and preload-registers it like any user
+   module; dist ships the package sources. `imgui` (needs a native archive)
+   stays a loud compile error. Guarded by `tests/differential/aot_builtinpkg`
+   at O0/O1 + the CLI suite.
+2. ~~**M4: FFI in compiled exes.**~~ **DONE 2026-06-12:** opt-in by scan —
+   programs referencing `ffi`/`bit` (require scan or the conservative
+   constant scan, covering the `_G.ffi` idiom) get the `Clua_OpenFfi` anchor
+   force-pulled via `-Wl,--undefined`; `aot_entry` weak-calls it (callback
+   dispatch state included). FFI-free exes keep zero FFI bytes. Guarded by
+   `tests/differential/aot_ffi` + the compiled behavioral layer.
+3. **M4: self-contained PE writer — THE ONE REMAINING ITEM.** Drop the
+   MinGW gcc/ld dependency (~170 ms of a ~190 ms build, and the only
+   external tool a user machine needs). DESIGNED: `clua/src/link/pe_emit.h`
+   specifies the full COFF→PE64 link semantics required (archive index
+   fixpoint with first-definition-wins, COMDAT, weak externals, COMMON,
+   the seven AMD64 reloc types, $-sorted grouped sections with ld-script
+   synthesis for the MinGW CRT, long + short import members, .pdata sort,
+   TLS, base relocs). Implementation plan: `LcPe_Link` behind
+   `--ld=internal` / `CLUA_LD`, sysroot snapshot of the CRT pieces shipped
+   in `dist\lib\sysroot`, default flips only when the full suite passes
+   with the internal linker forced.
+4. ~~**lvm strip, the remainder.**~~ **DONE 2026-06-12:** native dispatch
+   happens directly in `ldo.c`'s `ccall` (hook-gated; the oracle path is
+   untouched), so the `luaV_execute` entry hop is gone; debug-free programs
+   already link `lvm_nointerp.o`.
 5. ~~**v1 JIT removal from the tree** once the behavioral test layers run
    against compiled exes.~~ **DONE 2026-06-12:** the v1 JIT compiler
    (jit/codegen, codegen_ffi, emit_x64, regalloc) is gone; `jit/dispatch.c`
@@ -29,8 +43,10 @@ the honest valuation from the optimizer status doc), and **stale markers**
    differential, conformance and fuzz layers all run aotc-compiled exes
    against the interpreter oracle, which guards the shared `Rt_*` helpers
    directly.
-6. **AOT-ERRBANNER-001 polish:** a traceback-printing message handler in
-   `aot_entry.c` would narrow the uncaught-error divergence vs the oracle.
+6. ~~**AOT-ERRBANNER-001 polish.**~~ **DONE 2026-06-12:** `aot_entry.c`
+   installs a traceback message handler under the entry call; uncaught
+   errors now print the full `stack traceback:` like the oracle (only the
+   banner prefix still differs, inherently).
 7. ~~**Shared `clua-rt.dll` option** for ~20–30 KB per-program exes (runtime
    ships once). Real export-surface engineering; valuable for many-tool
    workspaces.~~ **DONE 2026-06-12:** `clua build --shared-rt` links against
@@ -38,11 +54,12 @@ the honest valuation from the optimizer status doc), and **stale markers**
    `--export-all-symbols` + import lib, data hooks via auto-import
    pseudo-relocs; `protoinit_rt.o` stays per-exe). Hello-world ~30 KB.
    Static remains the default, byte-for-byte unchanged.
-8. `coff_write.c`: function `.text` entries are concatenated tight (16-byte
-   section alignment only); per-function alignment is a micro-polish noted
-   in its header.
-9. `ir.c` TODO(M0): arena-allocate IR objects (alloc-perf nicety; the
-   compiler is link-bound today).
+8. ~~`coff_write.c` per-function alignment.~~ **DONE 2026-06-12:** every
+   function starts on a 16-byte boundary (0xCC padding), verified via the
+   emitted symbol Values.
+9. ~~`ir.c` arena allocation.~~ **DONE 2026-06-12:** chunked 64 KB bump
+   arena owned by `LcModule`; nodes and grow-by-copy arrays live in it,
+   `lc_module_free` drops the chunk chain with no per-node walk.
 
 ## Deliberately deferred (status doc has the honest valuations)
 
