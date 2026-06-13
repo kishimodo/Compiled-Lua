@@ -322,6 +322,7 @@ int lc_drive( const LcDriverOptions *opt ) {
                                     res.RequiresFfi || lc_module_uses_ffi( m ),
                                     opt->shared_rt,
                                     opt->ld_internal,
+                                    opt->no_gc_sections,
                                     err, sizeof( err ) ) ) {
             fprintf( stderr, "aotc: error: link failed: %s\n",
                      err[0] ? err : "(unknown)" );
@@ -382,6 +383,8 @@ int main( int argc, char **argv ) {
             opt.ld_internal = 1;
         } else if ( strcmp( a, "--ld=gcc" ) == 0 ) {
             opt.ld_internal = 0;
+        } else if ( strcmp( a, "--no-gc-sections-internal" ) == 0 ) {
+            opt.no_gc_sections = true;
         } else if ( ( strcmp( a, "-L" ) == 0 || strcmp( a, "--link" ) == 0 )
                     && i + 1 < argc ) {
             if ( nforce < 63 ) {

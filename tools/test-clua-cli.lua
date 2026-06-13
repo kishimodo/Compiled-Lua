@@ -117,21 +117,20 @@ print(mt.hello)
      "compiled exe output matches clua-interp -i",
      ("native=%q oracle=%q"):format(native:sub(1, 80), oracle:sub(1, 80)))
 
-  -- lean-exe canary: a hello-class exe is ~182 KB after the diet (no parser,
+  -- lean-exe canary: a hello-class exe is ~181 KB after the diet (no parser,
   -- no JIT compiler, no FFI, no winpthread, no bytecode interpreter for
   -- debug-free programs, gc-sections, stripped). 230 KB headroom catches any
   -- of those chunks creeping back into the link.
   --
-  -- The internal linker (--ld=internal / CLUA_LD=internal) does NOT yet
-  -- gc-sections, so its exes carry ~50 KB more dead code (~235 KB). Relax the
-  -- bound in that mode to 300 KB -- still far below the parser (~150 KB) / full
-  -- interpreter / FFI footprints the canary actually guards against.
+  -- Both linkers now hit this bound: the built-in linker (the default, or
+  -- --ld=internal / CLUA_LD=internal) does its own --gc-sections sweep, landing
+  -- within ~1 KB of gcc's --gc-sections size. A single 230 KB bound guards both.
   local internal_ld = (os.getenv("CLUA_LD") == "internal")
-  local bound = internal_ld and 300000 or 230000
+  local bound = 230000
   local f = io.open(exe, "rb")
   local size = f:seek("end"); f:close()
   ok(size < bound, "compiled exe is lean (no parser/JIT/FFI/pthread/interp)",
-     ("size=%d (bound=%d, ld=%s)"):format(size, bound, internal_ld and "internal" or "gcc"))
+     ("size=%d (bound=%d, ld=%s)"):format(size, bound, internal_ld and "internal" or "default/gcc"))
   os.remove(src); os.remove(exe)
 end
 
@@ -386,6 +385,26 @@ do
       ok(rg == 0 and si == sg,
          "internal-linked stdout == gcc-linked stdout",
          ("gcc=%q internal=%q"):format((sg or ""):sub(1, 80), (si or ""):sub(1, 80)))
+
+      -- --gc-sections parity + escape hatch: the internal exe (gc on) must be
+      -- within ~5 KB of the gcc exe, and DROPPING gc (--no-gc-sections-internal)
+      -- must produce a strictly LARGER exe (proving the sweep actually fires).
+      local function fsize(p) local f = io.open(p, "rb"); if not f then return -1 end
+        local n = f:seek("end"); f:close(); return n end
+      local sz_i, sz_g = fsize(exe_i), fsize(exe_g)
+      ok(sz_i > 0 and sz_g > 0 and math.abs(sz_i - sz_g) < 5 * 1024,
+         "internal+gc-sections exe size within 5 KB of gcc",
+         ("internal=%d gcc=%d delta=%d"):format(sz_i, sz_g, sz_i - sz_g))
+
+      local exe_n = TEMP .. "\\clua_ld_nogc.exe"
+      local cn = run(("\"%s\" build \"%s\" -O1 --ld=internal "
+                   .. "--no-gc-sections-internal -o \"%s\"")
+                     :format(clua_abs, src, exe_n))
+      local sz_n = fsize(exe_n)
+      ok(cn == 0 and sz_n > sz_i,
+         "--no-gc-sections-internal yields a larger exe (sweep fires)",
+         ("nogc=%d gc=%d"):format(sz_n, sz_i))
+      os.remove(exe_n)
     end
     os.remove(src); os.remove(exe_g); os.remove(exe_i)
   end

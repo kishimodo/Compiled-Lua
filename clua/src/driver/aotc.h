@@ -24,6 +24,9 @@ typedef struct LcDriverOptions {
   int          ld_internal;  /* link with the built-in COFF->PE linker
                                 instead of gcc/ld: -1 = unset (env decides),
                                 0 = force gcc, 1 = force internal           */
+  bool         no_gc_sections; /* --no-gc-sections-internal: disable the
+                                built-in linker's dead-code elimination
+                                (debug escape; default off = gc enabled)    */
   const char **force_pkgs;   /* -L forced packages                          */
   int          nforce_pkgs;
 } LcDriverOptions;

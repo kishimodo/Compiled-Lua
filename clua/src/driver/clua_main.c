@@ -56,10 +56,22 @@ static void usage( FILE *to ) {
         "                   beside it (or on PATH) at run time — copy it from\n"
         "                   <toolchain>\\lib\\ (repo: build\\bin\\). Default\n"
         "                   stays fully static, single-file.\n"
+        "  --ld=internal    force the built-in COFF->PE64 linker (no gcc;\n"
+        "                   needs the shipped lib\\sysroot). This is the\n"
+        "                   DEFAULT when the sysroot is present.\n"
+        "  --ld=gcc         force the MinGW gcc/ld link (needs gcc on PATH).\n"
+        "  --no-gc-sections-internal\n"
+        "                   disable the built-in linker's dead-code sweep\n"
+        "                   (debug; larger exe).\n"
         "\n"
         "environment:\n"
         "  CLUA_HOME        CLua installation root (lib\\runtime-aot.a ...)\n"
-        "  CLUA_GCC         linker driver (default: x86_64-w64-mingw32-gcc on PATH)\n" );
+        "  CLUA_LD          force the linker: 'internal' (built-in, no gcc) or\n"
+        "                   'gcc'. Unset = internal when lib\\sysroot ships,\n"
+        "                   else gcc.\n"
+        "  CLUA_GCC         gcc driver for --ld=gcc / --shared-rt / cold trees\n"
+        "                   (default: x86_64-w64-mingw32-gcc on PATH). gcc is\n"
+        "                   OPTIONAL — the default internal linker needs none.\n" );
 }
 
 /* dir/app.lua -> "app.exe" (in the CWD), heap-allocated. */
@@ -114,6 +126,8 @@ static int parse_build_args( CluaArgs *a, int argc, char **argv, int from,
             a->opt.ld_internal = 1;
         } else if ( strcmp( s, "--ld=gcc" ) == 0 ) {
             a->opt.ld_internal = 0;
+        } else if ( strcmp( s, "--no-gc-sections-internal" ) == 0 ) {
+            a->opt.no_gc_sections = true;
         } else if ( ( strcmp( s, "-L" ) == 0 || strcmp( s, "--link" ) == 0 )
                     && i + 1 < argc ) {
             if ( nforce < 63 ) {

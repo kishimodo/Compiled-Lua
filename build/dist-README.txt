@@ -18,25 +18,27 @@ Shared runtime (optional)
   Copy clua-rt.dll next to your exe (or put it on PATH). The default build
   stays fully static and single-file.
 
-Internal linker (optional, no gcc)
-  clua build app.lua --ld=internal links the .exe with CLua's own built-in
-  COFF->PE64 linker instead of gcc/ld — no external toolchain needed. It
-  uses the CRT snapshot in lib\sysroot\ (shipped in this dist). Set
-  CLUA_LD=internal to make it the default for a session. The internal-linked
-  exe is a few tens of KB larger (it does not yet garbage-collect unused
-  sections) but byte-identical in behavior. The gcc path remains the default
-  and the fallback.
+Linker (built-in by default — no gcc needed)
+  clua links your .exe with its own COFF->PE64 linker, using the CRT
+  snapshot in lib\sysroot\ (shipped in this dist). No external toolchain
+  is required, and the built-in linker garbage-collects unused sections,
+  so the exe is the same size as a gcc-linked one. Force it explicitly
+  with --ld=internal or CLUA_LD=internal.
 
+  gcc is OPTIONAL. Pass --ld=gcc (or CLUA_LD=gcc) to use a MinGW-w64 gcc
+  on PATH instead — handy as a fallback. If lib\sysroot\ is ever missing,
+  clua automatically falls back to gcc with a one-line note.
+
+Package manager (rover)
   rover init                    start a project (rover.toml)
   rover add <package>           add a dependency
   rover install                 reproducible install from the lockfile
 
 Requirements
-  A MinGW-w64 gcc (x86_64-w64-mingw32-gcc) on PATH for the final native
-  link in the DEFAULT mode — everything else happens inside clua.exe.
-  Override the linker driver with the CLUA_GCC environment variable if
-  yours is named differently. With --ld=internal (or CLUA_LD=internal),
-  clua links entirely on its own using lib\sysroot\ and needs NO gcc.
+  None beyond this dist for the default build — clua links on its own
+  using lib\sysroot\. A MinGW-w64 gcc (x86_64-w64-mingw32-gcc) on PATH is
+  only needed for --ld=gcc and --shared-rt (override its name with the
+  CLUA_GCC environment variable).
 
 Layout rules
   clua.exe finds lib\ next to itself (or under %CLUA_HOME%). Keep this

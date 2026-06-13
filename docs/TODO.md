@@ -20,29 +20,34 @@ the honest valuation from the optimizer status doc), and **stale markers**
    force-pulled via `-Wl,--undefined`; `aot_entry` weak-calls it (callback
    dispatch state included). FFI-free exes keep zero FFI bytes. Guarded by
    `tests/differential/aot_ffi` + the compiled behavioral layer.
-3. ~~**M4: self-contained PE writer.**~~ **DONE 2026-06-13 (opt-in):** the
-   built-in COFF→PE64 linker (`clua/src/link/{coff_read,ar_read,pe_emit}.c`,
-   `LcPe_Link`) links a runnable console PE with NO external toolchain —
-   GNU-archive symbol-index fixpoint (first-definition-wins; explicit objects
-   shadow archive members), COMDAT select-any dedup, weak externals, COMMON
+3. ~~**M4: self-contained PE writer.**~~ **DONE 2026-06-13 — now the
+   DEFAULT, gcc-free:** the built-in COFF→PE64 linker
+   (`clua/src/link/{coff_read,ar_read,pe_emit}.c`, `LcPe_Link`) links a
+   runnable console PE with NO external toolchain — GNU-archive symbol-index
+   fixpoint (first-definition-wins; explicit objects shadow archive members),
+   COMDAT select-any dedup, weak externals (a weak undefined ref does NOT pull
+   archives; a weak symbol with no def resolves to absolute 0/NULL), COMMON
    into .bss, all seven AMD64 relocs (ADDR64/32/32NB, REL32 + REL32_1..5,
-   SECREL, SECTION), $-suffix grouped+sorted sections, the MinGW CRT assembled
+   SECREL, SECTION), $-suffix grouped+sorted sections, **`--gc-sections`
+   dead-code elimination** (mark/sweep to a fixpoint, KEEP-by-name for
+   ctor/dtor/CRT/tls/pdata/xdata/pseudo-reloc lists), the MinGW CRT assembled
    from a sysroot snapshot (crt2/crtbegin/crtend + the ucrt mixed archive:
    dlltool long-member imports SYNTHESIZED per-DLL with the real export name
    from `.idata$6`, code sections force-routed to .text, TLS directory from
    `_tls_used`, `__ImageBase` synthesized), base relocs (DIR64) + import
-   directory + IAT built from scratch. Wired behind `--ld=internal` /
-   `CLUA_LD=internal` (flag wins; `LuacLink_LinkProgram` routes to `LcPe_Link`
-   or the gcc path). Sysroot via `make -f build/Makefile.luac sysroot` →
-   `build/bin/sysroot` (and `dist/lib/sysroot`); discovered exe-relative.
-   Tests: `tests/unit/test_lc_pe_emit.c` (reader + archive + end-to-end PE
-   invariants) and a `--ld=internal` section in `tools/test-clua-cli.lua`.
-   **The ENTIRE suite passes with `CLUA_LD=internal` forced (499/0).** The
-   DEFAULT stays gcc — flipping it unconditionally would couple every build
-   (and a fresh checkout) to the generated 16 MB sysroot artifact and drop the
-   gcc fallback, which the posture forbids. Internal ships fully-validated
-   opt-in. **Remaining gap:** no `--gc-sections` yet, so internal exes are
-   ~50 KB larger than gcc's (235 KB vs 187 KB hello); behavior is identical.
+   directory + IAT built from scratch. **The DEFAULT was flipped:**
+   `LuacLink_LinkProgram` resolves `--ld=gcc`/`--ld=internal` → `CLUA_LD` →
+   internal-when-sysroot-present, falling back to gcc with a one-line note
+   when the sysroot is absent. gcc is now OPTIONAL (only `--ld=gcc`,
+   `--shared-rt`, cold-tree entry compile). `rover.exe` builds via the
+   internal default; `build-luac.bat` builds the sysroot before rover.
+   Sysroot via `make -f build/Makefile.luac sysroot` → `build/bin/sysroot`
+   (and `dist/lib/sysroot`); discovered exe-relative. Escape hatch:
+   `--no-gc-sections-internal`. Tests: `tests/unit/test_lc_pe_emit.c` + the
+   `--ld=internal` section in `tools/test-clua-cli.lua`. **The ENTIRE suite
+   passes under the new default (499/0)**, and again with `CLUA_LD=internal`
+   forced. Size parity reached: a hello exe is 180,736 B (internal+gc) vs
+   181,248 B (gcc), section sizes within tens of bytes.
 4. ~~**lvm strip, the remainder.**~~ **DONE 2026-06-12:** native dispatch
    happens directly in `ldo.c`'s `ccall` (hook-gated; the oracle path is
    untouched), so the `luaV_execute` entry hop is gone; debug-free programs

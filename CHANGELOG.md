@@ -4,7 +4,36 @@
 
 ### clua
 
-- **Built-in COFF→PE64 linker — opt-in, no external toolchain.** A new
+- **The built-in linker is now the DEFAULT — gcc is optional.** `clua build`
+  links with its own COFF→PE64 linker (`LcPe_Link`) whenever the CRT sysroot
+  ships next to the runtime archives (`lib\sysroot`, built into every dist and
+  the repo `build\bin\sysroot`), so a fresh install needs NO MinGW gcc. The
+  resolution order is: `--ld=gcc`/`--ld=internal` flag → `CLUA_LD=gcc|internal`
+  → default internal-when-sysroot-present, falling back to gcc with a one-line
+  note if the sysroot is absent (a bare repo that hasn't run `make sysroot`).
+  gcc stays a fully-supported fallback (`--ld=gcc`) and is still used for
+  `--shared-rt` and the cold-tree `aot_entry.c` compile. `rover.exe` is now
+  itself built via the internal default. `build-luac.bat` builds the sysroot
+  before `rover`. The whole suite passes under the new default (499/0).
+
+- **`--gc-sections` in the built-in linker — size parity with gcc.** `LcPe_Link`
+  now sweeps unreachable function/data sections before RVA assignment, exactly
+  like ld's `--gc-sections` (the runtime/Lua archives are `-ffunction-sections`,
+  Lua also `-fdata-sections`). Mark/sweep over the contribution graph: roots are
+  the user object, the entry/force-undef/`_tls_used` anchors, and the KEEP-by-name
+  sections the loader/CRT walk rather than relocate (`.ctors`/`.dtors`, `.CRT`
+  init arrays, `.tls`, `.pdata`/`.xdata`, the pseudo-reloc list); a section goes
+  live when a live section relocates into it (fixpoint). Two ld-fidelity fixes
+  the sweep required: a weak UNDEFINED reference no longer drives archive
+  extraction (so an FFI-free program leaves the whole FFI cluster unpulled
+  instead of dragging it in via `aot_entry`'s weak `Clua_OpenFfi` call; `-u`
+  roots still force the pull), and a weak symbol with no real definition now
+  resolves to a genuine absolute 0 (NULL) — ADDR64/ADDR32 to it write the bare
+  value with no `image_base` and no base reloc, so `&weak_undef == NULL`. A
+  hello exe is 180,736 B (internal) vs 181,248 B (gcc); section sizes match to
+  within tens of bytes. Escape hatch: `--no-gc-sections-internal`.
+
+- **Built-in COFF→PE64 linker — no external toolchain.** A new
   self-contained linker (`clua/src/link/{coff_read,ar_read,pe_emit}.c`,
   `LcPe_Link`) reads the codegen object + the CLua runtime/Lua archives + a
   snapshot of the MinGW CRT and emits a runnable stripped console PE directly,
@@ -20,15 +49,13 @@
   `_tls_used`, base relocations (DIR64), and `__ImageBase`. The mixed `libucrt.a`
   (import stubs for a dozen `api-ms-win-crt-*.dll` plus real objects like
   `ucrt_fprintf.o`) is handled by per-member classification + a normalized
-  head-symbol→DLL map. Opt-in behind `clua build --ld=internal` and
-  `CLUA_LD=internal` (flag wins; default + fallback stay gcc). Sysroot snapshot
-  via `make -f build/Makefile.luac sysroot` → `build/bin/sysroot` and
-  `dist/lib/sysroot`, discovered relocatably next to the runtime archives.
-  The full suite passes with `CLUA_LD=internal` forced (499/0). Link time
-  drops from ~132 ms to ~76 ms (no gcc subprocess). Validated by
-  `tests/unit/test_lc_pe_emit.c` and a `--ld=internal` section in
-  `tools/test-clua-cli.lua`. Known gap: no `--gc-sections`, so internal exes
-  run ~50 KB larger than gcc's (235 KB vs 187 KB hello), behavior identical.
+  head-symbol→DLL map. Sysroot snapshot via `make -f build/Makefile.luac
+  sysroot` → `build/bin/sysroot` and `dist/lib/sysroot`, discovered relocatably
+  next to the runtime archives. Link time drops from ~132 ms to ~76 ms (no gcc
+  subprocess). Validated by `tests/unit/test_lc_pe_emit.c` and a `--ld=internal`
+  section in `tools/test-clua-cli.lua`. (Landed opt-in behind `--ld=internal`;
+  see the two entries above for `--gc-sections` and the default flip that made
+  it gcc-free out of the box.)
 
 - **Atomics work in compiled programs (ATOMIC-INTERLOCKED-SYMS-001).** x64
   `Interlocked*` are compiler intrinsics with no exported symbol;

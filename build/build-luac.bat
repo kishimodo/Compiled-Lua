@@ -34,8 +34,27 @@ if errorlevel 1 (
     goto :done
 )
 
-echo [*] linking aotc.exe + clua.exe (+ aot_entry.o, rover.exe)...
-make -f build/Makefile.luac aotc aot-entry clua rover
+echo [*] linking aotc.exe + clua.exe (+ aot_entry.o)...
+make -f build/Makefile.luac aotc aot-entry clua
+if errorlevel 1 (
+    echo [-] aotc/clua build failed
+    set RC=1
+    goto :done
+)
+
+rem The internal linker is now the DEFAULT, so build the CRT sysroot snapshot
+rem BEFORE rover.exe (rover links via clua.exe, which now defaults to the
+rem built-in linker and needs lib\sysroot / build\bin\sysroot).
+echo [*] building CRT sysroot (build\bin\sysroot) for the default internal linker...
+make -f build/Makefile.luac sysroot
+if errorlevel 1 (
+    echo [-] sysroot build failed
+    set RC=1
+    goto :done
+)
+
+echo [*] building rover.exe (via the default internal linker)...
+make -f build/Makefile.luac rover
 set RC=%ERRORLEVEL%
 
 :done

@@ -184,15 +184,22 @@ static const char *GccCommand( void ) {
     return ( g && g[0] ) ? g : "x86_64-w64-mingw32-gcc";
 }
 
-/* Decide whether to use the internal linker: explicit flag wins, else the
-** CLUA_LD env var (CLUA_LD=internal). The gcc path is the default + fallback. */
+/* Linker selection. Resolution order:
+**   1. explicit --ld=internal / --ld=gcc flag (ld_internal == 1 / 0)
+**   2. CLUA_LD=internal|lcpe / CLUA_LD=gcc env var
+**   3. DEFAULT: internal when the CRT sysroot is discoverable, else gcc.
+** Returns LD_INTERNAL, LD_GCC, or LD_DEFAULT (caller resolves the default
+** against sysroot availability after ResolveToolchain). */
+enum { LD_DEFAULT = 0, LD_INTERNAL, LD_GCC };
+
 static int WantInternalLinker( int ld_internal ) {
-    if ( ld_internal == 1 ) return 1;
-    if ( ld_internal == 0 ) return 0;
-    {
-        const char *e = getenv( "CLUA_LD" );
-        return ( e && ( strcmp( e, "internal" ) == 0 || strcmp( e, "lcpe" ) == 0 ) );
-    }
+    const char *e;
+    if ( ld_internal == 1 ) return LD_INTERNAL;
+    if ( ld_internal == 0 ) return LD_GCC;
+    e = getenv( "CLUA_LD" );
+    if ( e && ( strcmp( e, "internal" ) == 0 || strcmp( e, "lcpe" ) == 0 ) ) return LD_INTERNAL;
+    if ( e && strcmp( e, "gcc" ) == 0 ) return LD_GCC;
+    return LD_DEFAULT;
 }
 
 /* The full MinGW CRT archive set the internal linker links, in the order gcc's
@@ -208,7 +215,7 @@ static const char *kCrtArchives[] = {
 /* Link the program with the built-in COFF->PE64 linker (no gcc). */
 static int LinkInternal( const LcToolchain *tc, const char *userObj,
                          const char *outExe, const char *entry_obj,
-                         int no_interp, int require_ffi,
+                         int no_interp, int require_ffi, int no_gc_sections,
                          char *err, size_t errlen ) {
     char  objbuf[ 6 ][ LC_PATH_MAX ];
     char  arcbuf[ N_CRT_ARCHIVES + 2 ][ LC_PATH_MAX ];
@@ -250,24 +257,27 @@ static int LinkInternal( const LcToolchain *tc, const char *userObj,
     if ( require_ffi ) undef[nundef++] = "Clua_OpenFfi";
 
     memset( &in, 0, sizeof in );
-    in.objects     = objs;  in.nobjects     = nobj;
-    in.archives    = arcs;  in.narchives    = narc;
-    in.force_undef = undef; in.nforce_undef = nundef;
-    in.entry       = "mainCRTStartup";
-    in.out_path    = outExe;
+    in.objects        = objs;  in.nobjects     = nobj;
+    in.archives       = arcs;  in.narchives    = narc;
+    in.force_undef    = undef; in.nforce_undef = nundef;
+    in.entry          = "mainCRTStartup";
+    in.out_path       = outExe;
+    in.no_gc_sections = no_gc_sections;
 
     return LcPe_Link( &in, err, errlen );
 }
 
 int LuacLink_LinkProgram( const char *userObj, const char *outExe,
                           int no_interp, int require_ffi, int shared_rt,
-                          int ld_internal, char *err, size_t errlen ) {
+                          int ld_internal, int no_gc_sections,
+                          char *err, size_t errlen ) {
     char        cmd[ 4096 ];
     char        entry_obj[ LC_PATH_MAX ];
     char        lvm_obj[ LC_PATH_MAX + 4 ];
     LcToolchain tc;
     int         rc;
-    int         use_internal = WantInternalLinker( ld_internal );
+    int         ld_choice = WantInternalLinker( ld_internal );
+    int         use_internal;
 
     if ( err && errlen ) err[ 0 ] = '\0';
     if ( userObj == NULL || outExe == NULL ) {
@@ -276,6 +286,28 @@ int LuacLink_LinkProgram( const char *userObj, const char *outExe,
     }
 
     if ( !ResolveToolchain( &tc, err, errlen ) ) return 0;
+
+    /* Resolve the linker now that the sysroot is known. The DEFAULT is the
+    ** built-in linker (no gcc needed) whenever the CRT sysroot ships next to
+    ** the runtime archives; if the sysroot is absent (a bare repo that hasn't
+    ** run `make sysroot`, or a dist without lib\sysroot) fall back to gcc with
+    ** a one-line note. An explicit --ld=internal still errors loudly below if
+    ** the sysroot is missing — only the implicit default falls back silently. */
+    if ( ld_choice == LD_INTERNAL ) {
+        use_internal = 1;
+    } else if ( ld_choice == LD_GCC ) {
+        use_internal = 0;
+    } else { /* LD_DEFAULT */
+        if ( tc.sysroot[0] ) {
+            use_internal = 1;
+        } else {
+            use_internal = 0;
+            fprintf( stderr,
+                     "clua: note: CRT sysroot not found; using gcc to link "
+                     "(run `make -f build/Makefile.luac sysroot` for a "
+                     "gcc-free build, or pass --ld=internal once it exists)\n" );
+        }
+    }
 
     /* Precompiled aot_entry.o, or the cold-tree fallback: compile it next to
     ** the user object (one extra gcc step, dev-tree only). */
@@ -314,7 +346,8 @@ int LuacLink_LinkProgram( const char *userObj, const char *outExe,
     ** the import-lib + auto-import pseudo-reloc machinery gcc provides). */
     if ( use_internal && !shared_rt ) {
         return LinkInternal( &tc, userObj, outExe, entry_obj,
-                             no_interp, require_ffi, err, errlen );
+                             no_interp, require_ffi, no_gc_sections,
+                             err, errlen );
     }
 
     /* ---- the shared-runtime link (--shared-rt) ----
