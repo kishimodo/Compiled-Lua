@@ -147,6 +147,11 @@ typedef struct {
 /* a base relocation site (DIR64) */
 typedef struct { uint32_t rva; } RelocSite;
 
+/* Stable indexes used throughout the link. They store integer indexes rather
+** than pointers because both the symbol and contribution arrays can realloc. */
+typedef struct { LcCoffObj *obj; uint32_t sec; int contrib; } GcSlot;
+typedef struct { GcSlot *slots; uint32_t cap; } GcMap;
+
 typedef struct {
     /* loaded objects (explicit + pulled archive members) */
     LcCoffObj **objs;
@@ -167,10 +172,13 @@ typedef struct {
     /* global symbol map */
     GSym       *syms;
     int         nsyms, capsyms;
+    uint32_t   *sym_slots;       /* open-addressed slots: symbol index + 1   */
+    uint32_t    sym_slot_cap;
 
     /* contributions */
     Contrib    *contribs;
     int         ncontribs, capcontribs;
+    GcMap       contrib_map;     /* (object, section) -> contribution index  */
 
     OutSec      out[OS_COUNT];
 
@@ -193,24 +201,74 @@ static int lerr( Linker *L, const char *fmt, const char *a ) {
 }
 
 /* ---------------- global symbol table ---------------- */
-static GSym *gsym_find( Linker *L, const char *name ) {
-    int i;
-    for ( i = 0; i < L->nsyms; i++ )
-        if ( strcmp( L->syms[i].name, name ) == 0 ) return &L->syms[i];
-    return NULL;
+static uint32_t gsym_hash( const char *name ) {
+    uint32_t h = 2166136261u;
+    const unsigned char *p = ( const unsigned char * )name;
+    while ( *p ) { h ^= *p++; h *= 16777619u; }
+    return h;
 }
+
+static int gsym_rehash( Linker *L, uint32_t new_cap ) {
+    uint32_t *slots;
+    int i;
+    if ( new_cap < 512 ) new_cap = 512;
+    slots = ( uint32_t * )calloc( new_cap, sizeof( uint32_t ) );
+    if ( !slots ) return 0;
+    for ( i = 0; i < L->nsyms; i++ ) {
+        uint32_t p = gsym_hash( L->syms[i].name ) & ( new_cap - 1 );
+        while ( slots[p] != 0 ) p = ( p + 1 ) & ( new_cap - 1 );
+        slots[p] = ( uint32_t )i + 1;
+    }
+    free( L->sym_slots );
+    L->sym_slots = slots;
+    L->sym_slot_cap = new_cap;
+    return 1;
+}
+
+static GSym *gsym_find( Linker *L, const char *name ) {
+    uint32_t p;
+    if ( L->sym_slot_cap == 0 ) return NULL;
+    p = gsym_hash( name ) & ( L->sym_slot_cap - 1 );
+    for ( ;; ) {
+        uint32_t slot = L->sym_slots[p];
+        if ( slot == 0 ) return NULL;
+        if ( strcmp( L->syms[ slot - 1 ].name, name ) == 0 )
+            return &L->syms[ slot - 1 ];
+        p = ( p + 1 ) & ( L->sym_slot_cap - 1 );
+    }
+}
+
+static void gsym_index_insert( Linker *L, const char *name, uint32_t index ) {
+    uint32_t p = gsym_hash( name ) & ( L->sym_slot_cap - 1 );
+    while ( L->sym_slots[p] != 0 ) p = ( p + 1 ) & ( L->sym_slot_cap - 1 );
+    L->sym_slots[p] = index + 1;
+}
+
 static GSym *gsym_intern( Linker *L, const char *name ) {
-    GSym *g = gsym_find( L, name );
+    GSym *g;
+    char *copy;
+    int index;
+    g = gsym_find( L, name );
     if ( g ) return g;
+    if ( L->sym_slot_cap == 0 ||
+         ( ( ( uint64_t )L->nsyms + 1u ) * 10u >=
+           ( uint64_t )L->sym_slot_cap * 7u ) ) {
+        uint32_t nc = L->sym_slot_cap ? L->sym_slot_cap << 1 : 512;
+        if ( nc < L->sym_slot_cap || !gsym_rehash( L, nc ) ) return NULL;
+    }
+    copy = _strdup( name );
+    if ( !copy ) return NULL;
     if ( L->nsyms >= L->capsyms ) {
         int nc = L->capsyms ? L->capsyms * 2 : 256;
         GSym *ns = ( GSym * )realloc( L->syms, nc * sizeof( GSym ) );
-        if ( !ns ) return NULL;
+        if ( !ns ) { free( copy ); return NULL; }
         L->syms = ns; L->capsyms = nc;
     }
-    g = &L->syms[ L->nsyms++ ];
+    index = L->nsyms++;
+    g = &L->syms[ index ];
     memset( g, 0, sizeof( *g ) );
-    g->name = _strdup( name );
+    g->name = copy;
+    gsym_index_insert( L, name, ( uint32_t )index );
     return g;
 }
 
@@ -879,10 +937,6 @@ done:
 ** has a relocation whose target symbol is DEFINED in it.
 =================================================================== */
 
-/* (obj,sec_index) -> contrib index, open-addressing hash for the mark walk. */
-typedef struct { LcCoffObj *obj; uint32_t sec; int contrib; } GcSlot;
-typedef struct { GcSlot *slots; uint32_t cap; } GcMap;
-
 static uint32_t gc_hash( const LcCoffObj *o, uint32_t sec ) {
     uint64_t h = ( uint64_t )( uintptr_t )o * 1099511628211ull;
     h ^= ( uint64_t )sec + 0x9e3779b97f4a7c15ull + ( h << 6 ) + ( h >> 2 );
@@ -916,6 +970,17 @@ static int gc_map_get( const GcMap *m, const LcCoffObj *o, uint32_t sec ) {
         if ( m->slots[i].obj == o && m->slots[i].sec == sec ) return m->slots[i].contrib;
         i = ( i + 1 ) & ( m->cap - 1 );
     }
+}
+
+static int contrib_map_build( Linker *L ) {
+    int i;
+    free( L->contrib_map.slots );
+    memset( &L->contrib_map, 0, sizeof( L->contrib_map ) );
+    if ( !gc_map_init( &L->contrib_map, L->ncontribs ) ) return 0;
+    for ( i = 0; i < L->ncontribs; i++ )
+        gc_map_put( &L->contrib_map, L->contribs[i].obj,
+                    L->contribs[i].sec_index, i );
+    return 1;
 }
 
 /* Sections kept even when no live relocation targets them. */
@@ -986,7 +1051,7 @@ static void gc_root_symbol( Linker *L, GcMap *map, int *queue, int *qn,
 }
 
 static int gc_sections( Linker *L, const char *const *force_undef, int nforce ) {
-    GcMap map;
+    GcMap *map = &L->contrib_map;
     int *queue;
     int qn = 0, i;
     size_t nc;
@@ -994,14 +1059,10 @@ static int gc_sections( Linker *L, const char *const *force_undef, int nforce ) 
     if ( !L->gc_sections || L->ncontribs <= 0 ) return 1;
     nc = ( size_t )L->ncontribs;
 
-    if ( !gc_map_init( &map, L->ncontribs ) ) return lerr( L, "oom (gc map)", NULL );
-    for ( i = 0; i < L->ncontribs; i++ )
-        gc_map_put( &map, L->contribs[i].obj, L->contribs[i].sec_index, i );
-
     /* each contribution enqueues at most once (guarded by the dropped flag), so
     ** the worklist never exceeds ncontribs entries. */
     queue = ( int * )malloc( nc * sizeof( int ) );
-    if ( !queue ) { free( map.slots ); return lerr( L, "oom (gc queue)", NULL ); }
+    if ( !queue ) return lerr( L, "oom (gc queue)", NULL );
 
     /* Start everything dead; roots flip live + enqueue. */
     for ( i = 0; i < L->ncontribs; i++ ) L->contribs[i].dropped = 1;
@@ -1020,15 +1081,15 @@ static int gc_sections( Linker *L, const char *const *force_undef, int nforce ) 
 
     /* ROOT 2: entry, force-undef roots (e.g. Clua_OpenFfi for FFI programs),
     ** and the linker anchors the loader / data directories consume. */
-    gc_root_symbol( L, &map, queue, &qn, L->entry );
-    gc_root_symbol( L, &map, queue, &qn, "_tls_used" );
+    gc_root_symbol( L, map, queue, &qn, L->entry );
+    gc_root_symbol( L, map, queue, &qn, "_tls_used" );
     for ( i = 0; i < nforce; i++ )
-        gc_root_symbol( L, &map, queue, &qn, force_undef[i] );
+        gc_root_symbol( L, map, queue, &qn, force_undef[i] );
 
     /* MARK to fixpoint. */
     while ( qn > 0 ) {
         int ci = queue[ --qn ];
-        gc_scan_contrib( L, &map, queue, &qn, ci );
+        gc_scan_contrib( L, map, queue, &qn, ci );
     }
 
     /* CLUA_GC_DEBUG: one-line tally of what the sweep kept vs dropped. */
@@ -1045,7 +1106,6 @@ static int gc_sections( Linker *L, const char *const *force_undef, int nforce ) 
     }
 
     free( queue );
-    free( map.slots );
     return 1;
 }
 
@@ -1385,15 +1445,11 @@ static int sym_rva( Linker *L, GSym *g, uint32_t *out, ImportLayout *il ) {
         return 1;
     }
     if ( g->defined && g->obj ) {
-        /* find the contribution for (obj, sec_index) to get out + out_off */
-        int i;
-        for ( i = 0; i < L->ncontribs; i++ ) {
-            Contrib *c = &L->contribs[i];
-            if ( c->dropped ) continue;
-            if ( c->obj == g->obj && c->sec_index == g->sec_index ) {
-                *out = L->out[ c->out ].rva + c->out_off + g->value;
-                return 1;
-            }
+        int ci = gc_map_get( &L->contrib_map, g->obj, g->sec_index );
+        if ( ci >= 0 && !L->contribs[ci].dropped ) {
+            Contrib *c = &L->contribs[ci];
+            *out = L->out[ c->out ].rva + c->out_off + g->value;
+            return 1;
         }
         /* section wasn't contributed (e.g. dropped COMDAT dup): point at the
         ** kept copy is hard; treat as 0 (should not happen for referenced
@@ -1446,14 +1502,12 @@ static int reloc_target_rva( Linker *L, LcCoffObj *o, const LcCoffSymbol *sy,
     /* defined in THIS object's section? (covers local .text/.rdata refs and
     ** STATIC section symbols) */
     if ( sy->section >= 1 && ( uint32_t )sy->section <= o->nsections ) {
-        int i;
-        for ( i = 0; i < L->ncontribs; i++ ) {
-            Contrib *c = &L->contribs[i];
-            if ( c->dropped ) continue;
-            if ( c->obj == o && c->sec_index == ( uint32_t )( sy->section - 1 ) ) {
-                *out_rva = L->out[ c->out ].rva + c->out_off + sy->value;
-                return 1;
-            }
+        int ci = gc_map_get( &L->contrib_map, o,
+                             ( uint32_t )( sy->section - 1 ) );
+        if ( ci >= 0 && !L->contribs[ci].dropped ) {
+            Contrib *c = &L->contribs[ci];
+            *out_rva = L->out[ c->out ].rva + c->out_off + sy->value;
+            return 1;
         }
         /* a dropped COMDAT section: fall through to the global by name */
     }
@@ -1960,7 +2014,9 @@ static void linker_free( Linker *L ) {
     free( L->ar_pulled ); free( L->ar_npulled ); free( L->ar_cappulled );
     for ( i = 0; i < L->nsyms; i++ ) { free( L->syms[i].name ); free( L->syms[i].weak_default ); }
     free( L->syms );
+    free( L->sym_slots );
     free( L->contribs );
+    free( L->contrib_map.slots );
     for ( i = 0; i < OS_COUNT; i++ ) free( L->out[i].raw.p );
     for ( i = 0; i < L->nimports; i++ ) { free( L->imports[i].dll ); free( L->imports[i].func ); }
     free( L->imports );
@@ -2029,6 +2085,7 @@ int LcPe_Link( const LcPeLinkInputs *in, char *err, size_t errlen ) {
 
     /* collect contributions (COMDAT-deduped) */
     if ( !collect_contribs( &L ) ) { snprintf( err, errlen, "%s", L.err[0]?L.err:"collect failed" ); goto out; }
+    if ( !contrib_map_build( &L ) ) { snprintf( err, errlen, "%s", "oom (contribution index)" ); goto out; }
 
     /* --gc-sections: drop unreachable function/data sections before layout. */
     if ( !gc_sections( &L, in->force_undef, in->nforce_undef ) ) {
@@ -2037,6 +2094,8 @@ int LcPe_Link( const LcPeLinkInputs *in, char *err, size_t errlen ) {
 
     /* lay sections (no RVA yet) */
     if ( !layout_sections( &L ) ) { snprintf( err, errlen, "%s", L.err ); goto out; }
+    /* layout sorts the contribution array; refresh the integer-index map. */
+    if ( !contrib_map_build( &L ) ) { snprintf( err, errlen, "%s", "oom (contribution index)" ); goto out; }
 
     /* synthesize imports into idata + thunks into text (offsets only) */
     if ( !build_imports( &L, &il ) ) { snprintf( err, errlen, "%s", L.err ); goto out; }
