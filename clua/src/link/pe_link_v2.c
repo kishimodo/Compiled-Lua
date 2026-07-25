@@ -116,14 +116,59 @@ static int MakeStagedOutput( const char *out_path, char staged[ MAX_PATH ],
 
 static int PublishStagedOutput( const char *staged, const char *out_path,
                                 char *err, size_t errlen ) {
-    if ( MoveFileExA( staged, out_path,
-                      MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH ) ) {
-        return 1;
+    static const DWORD waits_ms[] = { 10, 50, 200 };
+    HANDLE h;
+    DWORD  code = ERROR_SUCCESS;
+    int    attempt;
+
+    /* fclose() gets bytes out of the C runtime, but an explicit filesystem
+    ** flush is needed before the atomic rename is considered durable. */
+    h = CreateFileA( staged, GENERIC_WRITE,
+                     FILE_SHARE_READ | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+                     FILE_ATTRIBUTE_NORMAL, NULL );
+    if ( h == INVALID_HANDLE_VALUE ) {
+        code = GetLastError( );
+        set_errv( err, errlen,
+                  "cannot flush completed output '%s' (Win32 error %lu); "
+                  "the previous output was preserved",
+                  out_path, ( unsigned long )code );
+        DeleteFileA( staged );
+        return 0;
+    }
+    if ( !FlushFileBuffers( h ) ) code = GetLastError( );
+    CloseHandle( h );
+    if ( code != ERROR_SUCCESS ) {
+        set_errv( err, errlen,
+                  "cannot flush completed output '%s' (Win32 error %lu); "
+                  "the previous output was preserved",
+                  out_path, ( unsigned long )code );
+        DeleteFileA( staged );
+        return 0;
+    }
+
+    /* Antivirus, indexers, and sync clients can hold very short-lived file
+    ** handles. Retry only the errors that can plausibly be transient, with a
+    ** small fixed budget so a real permission problem still fails promptly. */
+    for ( attempt = 0; attempt <= ( int )( sizeof( waits_ms ) /
+                                           sizeof( waits_ms[0] ) ); attempt++ ) {
+        if ( MoveFileExA( staged, out_path,
+                          MOVEFILE_REPLACE_EXISTING |
+                          MOVEFILE_WRITE_THROUGH ) ) {
+            return 1;
+        }
+        code = GetLastError( );
+        if ( attempt == ( int )( sizeof( waits_ms ) / sizeof( waits_ms[0] ) )
+             || ( code != ERROR_SHARING_VIOLATION
+                  && code != ERROR_LOCK_VIOLATION
+                  && code != ERROR_ACCESS_DENIED ) ) {
+            break;
+        }
+        Sleep( waits_ms[ attempt ] );
     }
     set_errv( err, errlen,
               "cannot publish completed output '%s' (Win32 error %lu); "
               "the previous output was preserved",
-              out_path, ( unsigned long )GetLastError( ) );
+              out_path, ( unsigned long )code );
     DeleteFileA( staged );
     return 0;
 }
