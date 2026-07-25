@@ -111,6 +111,17 @@ local function exists(p)
   return sh('if exist "' .. p .. '" (exit 0) else (exit 1) >nul 2>&1')
 end
 
+-- SECURITY: every path this program touches is eventually interpolated into a
+-- cmd.exe command line (mkdir/move/xcopy/del/curl). A value carrying a quote,
+-- `&`, `|`, `<`, `>`, `^`, `%` or a control character escapes the quoting and
+-- runs arbitrary commands, so the ROOTS we build staging/lock paths from
+-- ($TEMP, $CLUA_HOME/$LOCALAPPDATA) get the same allowlist treatment the
+-- registry value already had. `registry_ok` below is this same predicate.
+local function shell_safe_path(p)
+  if type(p) ~= "string" or p == "" then return false end
+  return not p:find('[%c"&|<>%^%%`]')
+end
+
 ----------------------------------------------------------------------
 -- SECURITY: package-name allowlist.
 --
@@ -311,6 +322,243 @@ local function parse_return_table(text)
 end
 
 ----------------------------------------------------------------------
+-- TRANSACTIONS: private staging, atomic publication, cross-process locks.
+--
+-- Rover is a MULTI-PROCESS program: several `rover install` runs (a CI matrix,
+-- a watch loop, two shells) can hit one global store simultaneously. The rules
+-- enforced from here on:
+--
+--   * every operation stages its work in a PRIVATE, uniquely named directory --
+--     never a predictable %TEMP%\rover-fetch\<name>\<version> that two
+--     processes delete out from under each other;
+--   * a FILE is published by writing a unique sibling temp file, flushing and
+--     closing it, reading the bytes back, and then replacing the destination
+--     with one `move /Y`. If any step fails the destination keeps its OLD
+--     contents and the temp is removed;
+--   * a DIRECTORY is published by renaming a fully staged tree into place, so a
+--     reader never walks a half-copied package;
+--   * mutations of one package's store entry (its version dirs, the flat
+--     compatibility view, and its .meta manifest) happen under a cross-process
+--     lock with a BOUNDED wait and owner diagnostics.
+--
+-- Primitive notes -- rover must also run under the reference interpreter, so
+-- there is no FFI here and everything is built from cmd.exe:
+--   * `mkdir` is the atomic test-and-set (errorlevel 1 when the directory
+--     already exists), which is what makes the lock a real mutual exclusion;
+--   * `move /Y` is MoveFileEx with MOVEFILE_REPLACE_EXISTING -- an atomic
+--     rename WITHIN one volume, which is why publish staging lives under the
+--     store (%TEMP% is frequently a different volume, where a move degrades
+--     into a non-atomic copy).
+-- LIMIT: Lua's io can flush to the OS but cannot force the disk cache, so
+-- publication is atomic and correctly ordered but not power-loss durable;
+-- that needs a FlushFileBuffers primitive the host does not expose.
+----------------------------------------------------------------------
+local STAGE_TEMP  = (os.getenv("TEMP") or os.getenv("TMP") or ".") .. "\\rover-staging"
+local STAGE_STORE = STORE .. "\\.staging"   -- publish scratch, on the store volume
+local LOCK_ROOT   = STORE .. "\\.locks"
+local STAGE_MAX_AGE = 24 * 3600             -- abandoned staging is swept after a day
+-- Bounded waits. A wait NEVER becomes infinite: after ROVER_LOCK_TIMEOUT the
+-- acquire fails with the owner's identity. ROVER_LOCK_STALE is how old an owner
+-- record may get before the lock is treated as abandoned (a crashed rover).
+local LOCK_WAIT_S  = tonumber(os.getenv("ROVER_LOCK_TIMEOUT") or "") or 60
+local LOCK_STALE_S = tonumber(os.getenv("ROVER_LOCK_STALE") or "") or 600
+
+local rand_seeded = false
+local function token(n)
+  if not rand_seeded then math.randomseed(); rand_seeded = true end
+  local A, out = "0123456789abcdefghijklmnopqrstuvwxyz", {}
+  for i = 1, (n or 12) do local k = math.random(1, #A); out[i] = A:sub(k, k) end
+  return table.concat(out)
+end
+local PROC_ID = token(16)                   -- this process's identity in lock records
+
+local function ensure_dir(d)
+  if not shell_safe_path(d) then return false end
+  if exists(d) then return true end
+  sh('mkdir "' .. d .. '" >nul 2>&1')
+  return exists(d)
+end
+
+local function rm_rf(p)
+  if not shell_safe_path(p) then return false end
+  sh('if exist "' .. p .. '" rmdir /S /Q "' .. p .. '" >nul 2>&1')
+  sh('if exist "' .. p .. '" del /F /Q "' .. p .. '" >nul 2>&1')
+  return not exists(p)
+end
+
+-- Create a directory nobody else can be using. `mkdir` fails when the name is
+-- taken, so the winner of a name collision is decided by the filesystem.
+local function unique_dir(parent, prefix)
+  if not ensure_dir(parent) then return nil, "cannot create directory " .. tostring(parent) end
+  for _ = 1, 64 do
+    local d = parent .. "\\" .. prefix .. "-" .. token(12)
+    if sh('mkdir "' .. d .. '" >nul 2>&1') then return d end
+  end
+  return nil, "could not create a unique staging directory under " .. parent
+end
+
+-- Best-effort recovery of staging abandoned by a crashed rover. A directory is
+-- only removed when it carries a `stamp` older than a day: a brand-new staging
+-- dir has no stamp yet (it is written immediately after the mkdir), so this can
+-- never delete another process's LIVE work.
+local function sweep_staging(root)
+  if not exists(root) then return end
+  local p = io.popen('dir /b /ad "' .. root .. '" 2>nul')
+  if not p then return end
+  local seen = {}
+  for line in p:lines() do
+    if line ~= "" and line:match("^[%w_%.%-]+$") then seen[#seen + 1] = line end
+  end
+  p:close()
+  local now = os.time()
+  for _, d in ipairs(seen) do
+    local full = root .. "\\" .. d
+    local stamp = tonumber(((read_file(full .. "\\stamp") or ""):match("%d+")) or "")
+    if stamp and (now - stamp) > STAGE_MAX_AGE then rm_rf(full) end
+  end
+end
+
+local function open_staging(root, prefix)
+  sweep_staging(root)
+  local d, err = unique_dir(root, prefix)
+  if not d then return nil, err end
+  write_file(d .. "\\stamp", tostring(os.time()) .. "\n")
+  return d
+end
+local function close_staging(d) if d then rm_rf(d) end end
+
+-- Publish `content` at `path`: unique sibling temp -> write -> flush -> close ->
+-- read back -> ONE atomic replace. On any failure the destination is left
+-- exactly as it was and the temp is removed. `tmpdir` overrides where the temp
+-- lives (it MUST be on the destination's volume, or `move` becomes a copy);
+-- pass it when a temp file must not be momentarily visible inside a directory
+-- that other commands hash or enumerate.
+local function write_atomic(path, content, tmpdir)
+  if not shell_safe_path(path) then
+    return false, "refusing to write a path with shell metacharacters: " .. tostring(path)
+  end
+  local dir  = path:match("^(.*)\\[^\\]+$")
+  local base = path:match("([^\\]+)$") or "rover.out"
+  if dir and not ensure_dir(dir) then return false, "cannot create directory " .. dir end
+  local stage = tmpdir or dir or "."
+  if not ensure_dir(stage) then return false, "cannot create directory " .. stage end
+  local tmp
+  for _ = 1, 32 do
+    local cand = stage .. "\\.rover-tmp-" .. token(12) .. "-" .. base
+    if not exists(cand) then tmp = cand; break end
+  end
+  if not tmp then return false, "could not name a temporary file for " .. path end
+  local f = io.open(tmp, "wb")
+  if not f then return false, "cannot create the temporary file " .. tmp end
+  local ok = f:write(content)
+  if ok then ok = f:flush() end
+  f:close()
+  -- Read back BEFORE replacing: a short write (disk full, quota) must not be
+  -- allowed to destroy a good destination file.
+  if not ok or read_file(tmp) ~= content then
+    os.remove(tmp)
+    return false, "failed to write a complete temporary file for " .. path ..
+                  " (the previous file is intact)"
+  end
+  if not sh('move /Y "' .. tmp .. '" "' .. path .. '" >nul 2>&1') then
+    os.remove(tmp)
+    return false, "atomic replace of " .. path .. " failed (the previous file is intact)"
+  end
+  return true
+end
+
+-- Sleep roughly a second. cmd has no sleep; a loopback `ping` is the portable
+-- stand-in. Falls back to a coarse os.time() spin so a bounded wait can never
+-- turn into an unbounded busy loop against a missing ping.exe.
+local function nap()
+  if sh('ping -n 2 127.0.0.1 >nul 2>&1') then return end
+  local t0 = os.time()
+  repeat until os.time() > t0
+end
+
+local function lock_path(name) return LOCK_ROOT .. "\\" .. name .. ".lock" end
+
+local function lock_owner(dir)
+  local t = parse_return_table(read_file(dir .. "\\owner.lua") or "")
+  return (type(t) == "table") and t or nil
+end
+
+local function describe_owner(dir, o)
+  if not o then return "lock " .. dir .. " has no readable owner record" end
+  return string.format("lock %s is held by process %s on %s since epoch %s, doing: %s",
+    dir, tostring(o.proc), tostring(o.host), tostring(o.at), tostring(o.op))
+end
+
+-- Acquire the cross-process lock guarding <store>\<name>: its version dirs, its
+-- flat compatibility view, and .meta\<name>.lua. Waits at most LOCK_WAIT_S and
+-- then FAILS with the owner's identity -- it never waits forever. A lock whose
+-- owner record is older than LOCK_STALE_S, or that stays ownerless for 5s (the
+-- holder died between the mkdir and the owner write), is broken by RENAMING it
+-- aside -- an atomic claim exactly one waiter can win, so two waiters cannot
+-- both decide they broke it.
+local function acquire_pkg_lock(name, op)
+  if not name_ok(name) then return nil, "invalid package name" end
+  if not shell_safe_path(STORE) then
+    return nil, "package store path contains shell metacharacters: " .. STORE
+  end
+  if not ensure_dir(LOCK_ROOT) then
+    return nil, "cannot create the lock directory " .. LOCK_ROOT
+  end
+  local dir = lock_path(name)
+  local deadline, breaks, unknown_since = os.time() + LOCK_WAIT_S, 0, nil
+  while true do
+    if sh('mkdir "' .. dir .. '" >nul 2>&1') then
+      write_file(dir .. "\\owner.lua", string.format(
+        "return { proc = %q, host = %q, at = %d, op = %q }\n",
+        PROC_ID, os.getenv("COMPUTERNAME") or "?", os.time(), op or "?"))
+      return { dir = dir, name = name }
+    end
+    local o, now = lock_owner(dir), os.time()
+    local stale
+    if o and type(o.at) == "number" then
+      unknown_since = nil
+      stale = (now - o.at) > LOCK_STALE_S
+    else
+      unknown_since = unknown_since or now
+      stale = (now - unknown_since) >= 5
+    end
+    if stale and breaks < 3 then
+      breaks, unknown_since = breaks + 1, nil
+      local aside = STAGE_STORE .. "\\stale-" .. token(12)
+      if ensure_dir(STAGE_STORE) and sh('move /Y "' .. dir .. '" "' .. aside .. '" >nul 2>&1') then
+        rm_rf(aside)
+      end
+    elseif now >= deadline then
+      return nil, string.format(
+        "timed out after %ds waiting for the '%s' package lock -- %s",
+        LOCK_WAIT_S, name, describe_owner(dir, o))
+    else
+      nap()
+    end
+  end
+end
+
+local function release_pkg_lock(lk)
+  if not lk then return end
+  local o = lock_owner(lk.dir)
+  -- Only drop a lock we still own: if ours was broken as stale and re-taken by
+  -- someone else, removing it here would hand a third process a false mutex.
+  if o and o.proc ~= nil and o.proc ~= PROC_ID then return end
+  rm_rf(lk.dir)
+end
+
+----------------------------------------------------------------------
+-- FOLLOW-UP (deliberately NOT in this change): the global store is still
+-- shared mutable state ACROSS projects. `remove` deletes a package's whole
+-- store directory and `gc` only protects the current project's rover.lock, so
+-- another project's pinned version can still be dropped. The fix is a durable
+-- global lease/reference database (or a content-addressed store plus per-project
+-- links), which is a store-layout change and needs its own slice. The locks
+-- added here make each individual mutation safe; they do not make deletion
+-- reference-counted.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
 -- Metadata: a package's content hash + declared version/description.
 ----------------------------------------------------------------------
 -- Hash the package's entry point (init.lua). Deterministic content integrity.
@@ -352,6 +600,14 @@ local function list_files(dir)
   return files
 end
 
+-- Is `seg` -- the FIRST path segment of a path relative to <store>\<name> -- a
+-- version directory? The flat compatibility view nests its version dirs
+-- (<store>/<name>/<version>/...), so tree_hash and the flat publisher must skip
+-- exactly the same set: one predicate, used by both.
+local function is_version_segment(seg)
+  return seg ~= nil and seg:match("^v?%d+%.%d+") ~= nil
+end
+
 -- Merkle-style root hash over all files in `dir`. Returns the hex root, or nil
 -- if the dir is empty/unreadable. Relative paths are lowercased ONLY for sorting
 -- stability of the manifest order, but hashed as-is (verbatim) so a real rename
@@ -364,9 +620,7 @@ local function tree_hash(dir)
     -- version, so tree_hash(flat) == tree_hash(versioned) (the same top-level
     -- files) -- the flat install is a copy of the latest version's files.
     -- (parse_semver is defined later; use a self-contained version-segment test)
-    local first = rel:match("^([^\\]+)\\")
-    local is_ver = first and first:match("^v?%d+%.%d+") ~= nil
-    if not is_ver then files[#files + 1] = rel end
+    if not is_version_segment(rel:match("^([^\\]+)\\")) then files[#files + 1] = rel end
   end
   if #files == 0 then return nil end
   table.sort(files, function(a, b) return a:lower() < b:lower() end)
@@ -423,13 +677,15 @@ end
 
 local function manifest_path(name) return META .. "\\" .. name .. ".lua" end
 
+-- Publish a manifest atomically: a failed write leaves the PREVIOUS manifest
+-- intact rather than truncating it, so a crashed/failed install can never
+-- downgrade an installed package to "unknown". Returns ok, err.
 local function write_manifest(name, m)
-  sh('if not exist "' .. META .. '" mkdir "' .. META .. '" >nul 2>&1')
   -- `source` is only present for FOREIGN packages (installed straight from a
   -- GitHub repo, not from a registry); its presence is what marks them.
   local source = (m.source and m.source ~= "")
                  and string.format("  source = %q,\n", m.source) or ""
-  return write_file(manifest_path(name), string.format(
+  return write_atomic(manifest_path(name), string.format(
     "return {\n  name = %q,\n  version = %q,\n  description = %q,\n  hash = %q,\n  tree = %q,\n%s}\n",
     name, m.version, m.description, m.hash, m.tree or "", source))
 end
@@ -471,14 +727,15 @@ local function read_toml_deps(path)
 end
 
 -- Append a dependency to rover.toml's [dependencies] (creating the file/section).
+-- Published atomically: a failed rewrite must not leave a truncated manifest
+-- behind. Returns ok, err.
 local function add_toml_dep(name, constraint)
   local text = read_file(TOML)
   if not text then
-    write_file(TOML, table.concat({
+    return write_atomic(TOML, table.concat({
       "[project]", 'name = "my-project"', 'version = "0.1.0"', "",
       "[dependencies]", string.format('%s = "%s"', name, constraint), "",
     }, "\n"))
-    return
   end
   -- already present? rewrite its line. else append under [dependencies].
   if text:match("\n%s*" .. name:gsub("%-", "%%-") .. "%s*=") then
@@ -490,13 +747,16 @@ local function add_toml_dep(name, constraint)
   else
     text = text .. "\n[dependencies]\n" .. string.format('%s = "%s"\n', name, constraint)
   end
-  write_file(TOML, text)
+  return write_atomic(TOML, text)
 end
 
 -- Lockfile: resolved name -> { version, hash, tree, deps }. `hash` is the legacy
 -- init.lua hash (compat), `tree` is the whole-tree Merkle root (Feature 3), and
 -- `deps` is the package's direct dependency graph (Feature 4). Written as a Lua
 -- literal return-table; read back with parse_return_table (closed-world: no load()).
+-- Published atomically (temp sibling + replace): an interrupted or failed write
+-- must leave the PREVIOUS pins in place, never a half-written lock that would
+-- read as "corrupt" and block the next install. Returns ok, err.
 local function write_lock(locked)
   local lines = { "-- rover.lock -- resolved dependency versions + content hashes.",
                   "-- Generated by rover; do not edit by hand.", "return {" }
@@ -524,7 +784,7 @@ local function write_lock(locked)
   end
   lines[#lines + 1] = "}"
   lines[#lines + 1] = ""
-  write_file(LOCK, table.concat(lines, "\n"))
+  return write_atomic(LOCK, table.concat(lines, "\n"))
 end
 
 -- Returns (table) when the lock loads, nil when ABSENT, or (nil,"corrupt") when
@@ -741,13 +1001,10 @@ end
 --   http://x/" & calc & "
 -- would break out of the quotes and run arbitrary commands. Package NAMES were
 -- already guarded; the registry was not.
-local function registry_ok(reg)
-  if type(reg) ~= "string" or reg == "" then return false end
-  -- control chars, quote, &, |, <, >, ^, %, backtick: none belong in a real
-  -- registry URL or local path and all are dangerous to cmd.exe.
-  if reg:find('[%c"&|<>%^%%`]') then return false end
-  return true
-end
+-- control chars, quote, &, |, <, >, ^, %, backtick: none belong in a real
+-- registry URL or local path and all are dangerous to cmd.exe. Same predicate
+-- as the staging/lock path guard, so there is exactly one rule to audit.
+local function registry_ok(reg) return shell_safe_path(reg) end
 
 local function require_safe_registry(reg)
   if not registry_ok(reg) then
@@ -908,8 +1165,11 @@ local function available_versions(name, registry)
   return {}
 end
 
--- Download <name>@version-satisfying-constraint from a URL registry into a temp
--- dir; returns (dir, version) or nil + message.
+-- Download <name>@version-satisfying-constraint from a URL registry into a
+-- PRIVATE per-operation staging directory (never the old predictable
+-- %TEMP%\rover-fetch\<name>\<version>, which two concurrent rovers would wipe
+-- from under each other). Returns (payload dir, version, staging root) so the
+-- caller can release the staging when it is done, or nil + message.
 local function fetch_remote(name, constraint, url)
   if not name_ok(name) then return nil, "invalid package name" end
   url = url:gsub("/+$", "")
@@ -937,12 +1197,16 @@ local function fetch_remote(name, constraint, url)
     return nil, "remote registry " .. url .. " has no index.json; give an exact version"
   end
   if not version_ok(version) then return nil, "invalid version string from remote registry" end
-  local dl = (os.getenv("TEMP") or ".") .. "\\rover-fetch\\" .. name .. "\\" .. version
-  sh('if exist "' .. dl .. '" rmdir /S /Q "' .. dl .. '" >nul 2>&1')
-  sh('mkdir "' .. dl .. '" >nul 2>&1')
+  local work, werr = open_staging(STAGE_TEMP, "fetch")
+  if not work then return nil, werr end
+  local function bail(msg) close_staging(work); return nil, msg end
+  -- The payload lives in a subdirectory so the staging bookkeeping (`stamp`)
+  -- can never end up inside the tree whose hash we are about to verify.
+  local dl = work .. "\\d"
+  if not ensure_dir(dl) then return bail("cannot create the download directory " .. dl) end
   local base = url .. "/" .. name .. "/" .. version
   if not http_file(base .. "/init.lua", dl .. "\\init.lua") then
-    return nil, "failed to download " .. base .. "/init.lua"
+    return bail("failed to download " .. base .. "/init.lua")
   end
   http_file(base .. "/package.lua", dl .. "\\package.lua")   -- optional metadata
   -- Optionally pull extra files the index lists for this version, so whole-tree
@@ -952,9 +1216,9 @@ local function fetch_remote(name, constraint, url)
       local relbs = rel:gsub("/", "\\")
       local outp = dl .. "\\" .. relbs
       local sub = outp:match("^(.*)\\[^\\]+$")
-      if sub then sh('if not exist "' .. sub .. '" mkdir "' .. sub .. '" >nul 2>&1') end
+      if sub and not ensure_dir(sub) then return bail("cannot create " .. sub) end
       if not http_file(base .. "/" .. rel, outp) then
-        return nil, "failed to download listed file " .. base .. "/" .. rel
+        return bail("failed to download listed file " .. base .. "/" .. rel)
       end
     end
   end
@@ -965,33 +1229,133 @@ local function fetch_remote(name, constraint, url)
     local got_tree = tree_hash(dl)
     local got_init = pkg_hash(dl)
     if declared_hash ~= got_tree and declared_hash ~= got_init then
-      return nil, "integrity check failed for '" .. name .. "' v" .. version ..
-                  ": downloaded content does not match the hash in index.json"
+      return bail("integrity check failed for '" .. name .. "' v" .. version ..
+                  ": downloaded content does not match the hash in index.json")
     end
   end
-  return dl, version
+  return dl, version, work
+end
+
+-- Publish `staged` -- a private, COMPLETE copy of one version's tree, sitting on
+-- the store's volume -- as the flat compatibility view <store>\<name>.
+--
+-- The old code ran a NON-recursive `xcopy /Y "<vdir>\*" "<flat>\"` over
+-- whatever was already there: nested files were silently omitted, and a file
+-- that a newer version had removed stayed behind forever (so the flat view
+-- could hash/behave like no released version at all). Instead we diff against
+-- the staged tree: delete every flat file the new version does not ship, then
+-- MOVE each staged file into place -- a per-file atomic replace, so a reader
+-- never sees a half-written file. Version subdirectories are never touched.
+-- Consumes `staged`. Returns true, or false + message.
+local function publish_flat_view(flat, staged)
+  if not (shell_safe_path(flat) and shell_safe_path(staged)) then
+    return false, "refusing to publish through a path with shell metacharacters"
+  end
+  if not ensure_dir(flat) then return false, "cannot create " .. flat end
+  local newfiles, want = list_files(staged), {}
+  for _, rel in ipairs(newfiles) do want[rel:lower()] = true end
+  for _, rel in ipairs(list_files(flat)) do
+    if not is_version_segment(rel:match("^([^\\]+)\\")) and not want[rel:lower()] then
+      local victim = flat .. "\\" .. rel
+      if not shell_safe_path(victim) then
+        return false, "refusing to remove a stale path with shell metacharacters: " .. rel
+      end
+      sh('del /F /Q "' .. victim .. '" >nul 2>&1')
+    end
+  end
+  for _, rel in ipairs(newfiles) do
+    local src, dst = staged .. "\\" .. rel, flat .. "\\" .. rel
+    if not (shell_safe_path(src) and shell_safe_path(dst)) then
+      return false, "refusing to publish a file whose path carries shell metacharacters: " .. rel
+    end
+    local sub = dst:match("^(.*)\\[^\\]+$")
+    if sub and not ensure_dir(sub) then return false, "cannot create " .. sub end
+    if not sh('move /Y "' .. src .. '" "' .. dst .. '" >nul 2>&1') then
+      return false, "publishing " .. dst .. " failed"
+    end
+  end
+  return true
 end
 
 -- Copy a single-version source dir into the store: versioned
 -- (<store>/<name>/<version>) for lock-pinned resolution AND flat
 -- (<store>/<name>) as the latest. Writes the manifest. Returns m or nil+msg.
+--
+-- TRANSACTION. The copy AND the integrity hashes happen in a private staging
+-- directory on the store's own volume; only then is the package lock taken and
+-- the staged tree RENAMED into place. Consequences:
+--   * two processes installing the same name@version never see each other's
+--     partial trees -- the loser finds an already-published directory whose
+--     tree hash equals its own and ADOPTS it instead of republishing;
+--   * a version directory is immutable while its content matches. Content that
+--     genuinely differs (a tampered store, a re-cut registry version) is
+--     swapped in by renaming the old tree aside and the new tree into place,
+--     never by emptying and refilling the live directory;
+--   * nothing is written into the store before the download/copy has fully
+--     succeeded, so a failed install cannot leave a partial package behind.
 local function install_from_version_dir(name, version, srcdir)
   if not name_ok(name) then return nil, "invalid package name" end
   if not version_ok(version) then return nil, "invalid version string" end
-  sh('if not exist "' .. STORE .. '" mkdir "' .. STORE .. '" >nul 2>&1')
+  if not shell_safe_path(srcdir) then
+    return nil, "source path contains shell metacharacters: " .. tostring(srcdir)
+  end
+  if not shell_safe_path(STORE) then
+    return nil, "package store path contains shell metacharacters: " .. STORE
+  end
+  if not ensure_dir(STORE) then return nil, "cannot create the package store " .. STORE end
+
+  local stage, serr = open_staging(STAGE_STORE, "install")
+  if not stage then return nil, serr end
+  local payload = stage .. "\\d"
+  if not sh('xcopy /E /I /Y /Q "' .. srcdir .. '" "' .. payload .. '" >nul 2>&1')
+     or not exists(payload .. "\\init.lua") then
+    close_staging(stage)
+    return nil, "install of '" .. name .. "' v" .. version ..
+                " failed (could not stage " .. srcdir .. ")"
+  end
+  local staged_tree = tree_hash(payload)
+
+  local lk, lerr = acquire_pkg_lock(name, "install " .. name .. "@" .. version)
+  if not lk then close_staging(stage); return nil, lerr end
+
   local flat = STORE .. "\\" .. name
   local vdir = flat .. "\\" .. version
-  sh('if exist "' .. vdir .. '" rmdir /S /Q "' .. vdir .. '" >nul 2>&1')
-  sh('xcopy /E /I /Y /Q "' .. srcdir .. '" "' .. vdir .. '" >nul 2>&1')
-  if not exists(vdir .. "\\init.lua") then
-    return nil, "install of '" .. name .. "' v" .. version .. " failed"
+  local ok, err = true, nil
+  if exists(vdir .. "\\init.lua") and staged_tree and tree_hash(vdir) == staged_tree then
+    -- Identical bytes are already published: adopt the immutable directory.
+  else
+    if not ensure_dir(flat) then ok, err = false, "cannot create " .. flat end
+    if ok and exists(vdir) then
+      if not sh('move /Y "' .. vdir .. '" "' .. stage .. '\\old" >nul 2>&1') then
+        ok, err = false, "cannot replace the existing store directory " .. vdir
+      end
+    end
+    if ok and not sh('move /Y "' .. payload .. '" "' .. vdir .. '" >nul 2>&1') then
+      ok, err = false, "publishing " .. vdir .. " failed"
+    end
   end
-  sh('xcopy /Y /Q "' .. vdir .. '\\*" "' .. flat .. '\\" >nul 2>&1')
-  local m = read_meta(vdir)
-  m.version = version
-  m.hash = pkg_hash(vdir) or "?"               -- legacy init.lua hash (compat)
-  m.tree = tree_hash(vdir) or m.hash           -- whole-tree Merkle root (integrity)
-  write_manifest(name, m)
+
+  if ok then
+    local fstage = stage .. "\\flat"
+    if not sh('xcopy /E /I /Y /Q "' .. vdir .. '" "' .. fstage .. '" >nul 2>&1') then
+      ok, err = false, "cannot stage the flat compatibility view for '" .. name .. "'"
+    else
+      ok, err = publish_flat_view(flat, fstage)
+    end
+  end
+
+  local m
+  if ok then
+    m = read_meta(vdir)
+    m.version = version
+    m.hash = pkg_hash(vdir) or "?"             -- legacy init.lua hash (compat)
+    m.tree = tree_hash(vdir) or m.hash         -- whole-tree Merkle root (integrity)
+    ok, err = write_manifest(name, m)
+  end
+
+  release_pkg_lock(lk)
+  close_staging(stage)
+  if not ok then return nil, err end
   return m
 end
 
@@ -1066,35 +1430,41 @@ local function foreign_warning(name, source)
     .. "and accepted or denied.", name, source))
 end
 
--- Fetch github.com/<owner>/<repo> into a %TEMP% staging dir and locate the
--- package root (the directory holding init.lua, materializing it from a
--- package.lua `entry` if needed). Test hook: when $ROVER_FOREIGN_TARBALL is
--- set, that local tarball is used instead of curl (the test suite must not
--- hit the network). Returns the staged root dir, or nil + message.
+-- Fetch github.com/<owner>/<repo> into a PRIVATE per-operation %TEMP% staging
+-- dir (never the old predictable %TEMP%\rover-foreign\<owner>-<repo>, which a
+-- second rover would delete mid-extract) and locate the package root (the
+-- directory holding init.lua, materializing it from a package.lua `entry` if
+-- needed). Test hook: when $ROVER_FOREIGN_TARBALL is set, that local tarball is
+-- used instead of curl (the test suite must not hit the network). Returns the
+-- staged root dir, nil, and the staging root the caller must release -- or
+-- nil + message.
 local function fetch_github(owner, repo)
-  local work = (os.getenv("TEMP") or ".") .. "\\rover-foreign\\" .. owner .. "-" .. repo
-  sh('if exist "' .. work .. '" rmdir /S /Q "' .. work .. '" >nul 2>&1')
-  sh('mkdir "' .. work .. '" >nul 2>&1')
+  if not (name_ok(owner) and name_ok(repo)) then
+    return nil, "owner/repo fails the package-name allowlist"
+  end
+  local work, werr = open_staging(STAGE_TEMP, "gh")
+  if not work then return nil, werr end
+  local function bail(msg) close_staging(work); return nil, msg end
   local tgz = work .. "\\pkg.tgz"
   local hook = os.getenv("ROVER_FOREIGN_TARBALL")
   if hook and hook ~= "" then
     if not registry_ok(hook) then               -- it is interpolated into a shell command
-      return nil, "ROVER_FOREIGN_TARBALL contains shell metacharacters"
+      return bail("ROVER_FOREIGN_TARBALL contains shell metacharacters")
     end
     if not sh('copy /Y "' .. hook .. '" "' .. tgz .. '" >nul 2>&1') or not exists(tgz) then
-      return nil, "ROVER_FOREIGN_TARBALL is set but unreadable: " .. hook
+      return bail("ROVER_FOREIGN_TARBALL is set but unreadable: " .. hook)
     end
   else
     local base = "https://codeload.github.com/" .. owner .. "/" .. repo .. "/tar.gz/refs/heads/"
     if not http_file(base .. "main", tgz) and not http_file(base .. "master", tgz) then
-      return nil, "failed to download github.com/" .. owner .. "/" .. repo ..
-                  " (tried branches main and master via the codeload tarball)"
+      return bail("failed to download github.com/" .. owner .. "/" .. repo ..
+                  " (tried branches main and master via the codeload tarball)")
     end
   end
   local ex = work .. "\\x"
-  sh('mkdir "' .. ex .. '" >nul 2>&1')
+  if not ensure_dir(ex) then return bail("cannot create the extract directory " .. ex) end
   if not sh('tar -xzf "' .. tgz .. '" -C "' .. ex .. '" >nul 2>&1') then
-    return nil, "failed to extract the tarball (tar.exe, shipped with Windows 10+, is required)"
+    return bail("failed to extract the tarball (tar.exe, shipped with Windows 10+, is required)")
   end
   -- A codeload tarball wraps everything in <repo>-<branch>/; a hand-built one
   -- may not. Package root = `ex` itself, else the first top-level dir (its
@@ -1116,8 +1486,8 @@ local function fetch_github(owner, repo)
     end
   end
   if not root then
-    return nil, "github.com/" .. owner .. "/" .. repo ..
-                " does not look like a CLua package: no init.lua (or package.lua) at the repo root"
+    return bail("github.com/" .. owner .. "/" .. repo ..
+                " does not look like a CLua package: no init.lua (or package.lua) at the repo root")
   end
   -- Entry point: init.lua at the root, or a package.lua declaring `entry`
   -- (a safe relative path) which we copy to init.lua so the store layout --
@@ -1135,36 +1505,66 @@ local function fetch_github(owner, repo)
     local src = okrel and (root .. "\\" .. entry:gsub("/", "\\")) or nil
     if not (src and exists(src)
             and sh('copy /Y "' .. src .. '" "' .. root .. '\\init.lua" >nul 2>&1')) then
-      return nil, "github.com/" .. owner .. "/" .. repo ..
+      return bail("github.com/" .. owner .. "/" .. repo ..
                   " does not look like a CLua package: no init.lua at the repo root" ..
-                  " (and no package.lua declaring a usable `entry`)"
+                  " (and no package.lua declaring a usable `entry`)")
     end
   end
-  return root
+  return root, nil, work
 end
 
 -- Install a foreign GitHub package into the store (FLAT layout -- a foreign
 -- install is an unversioned snapshot of a branch head, so it gets no
 -- <store>/<name>/<version> dir). Returns manifest, name -- or nil + message.
+-- TRANSACTION: same shape as install_from_version_dir -- fetch and stage
+-- entirely off to the side, then take the package lock and swap the finished
+-- tree in with renames. A foreign snapshot replaces the WHOLE package
+-- directory (that has always been its semantics), so the old tree is renamed
+-- aside rather than deleted in place.
 local function install_foreign(owner, repo)
   local name = repo:lower()
   if not name_ok(name) then
     return nil, "derived package name '" .. name .. "' fails the package-name allowlist"
   end
-  local src, err = fetch_github(owner, repo)
-  if not src then return nil, err end
-  sh('if not exist "' .. STORE .. '" mkdir "' .. STORE .. '" >nul 2>&1')
-  local flat = STORE .. "\\" .. name
-  sh('if exist "' .. flat .. '" rmdir /S /Q "' .. flat .. '" >nul 2>&1')
-  sh('xcopy /E /I /Y /Q "' .. src .. '" "' .. flat .. '" >nul 2>&1')
-  if not exists(flat .. "\\init.lua") then
-    return nil, "install of foreign '" .. name .. "' failed (could not copy into the store)"
+  if not shell_safe_path(STORE) then
+    return nil, "package store path contains shell metacharacters: " .. STORE
   end
-  local m = read_meta(flat)
-  m.hash   = pkg_hash(flat) or "?"
-  m.tree   = tree_hash(flat) or m.hash
-  m.source = "github.com/" .. owner .. "/" .. repo
-  write_manifest(name, m)
+  local src, ferr, work = fetch_github(owner, repo)
+  if not src then return nil, ferr end
+  if not ensure_dir(STORE) then
+    close_staging(work); return nil, "cannot create the package store " .. STORE
+  end
+  local stage, serr = open_staging(STAGE_STORE, "foreign")
+  if not stage then close_staging(work); return nil, serr end
+  local payload = stage .. "\\d"
+  if not sh('xcopy /E /I /Y /Q "' .. src .. '" "' .. payload .. '" >nul 2>&1')
+     or not exists(payload .. "\\init.lua") then
+    close_staging(stage); close_staging(work)
+    return nil, "install of foreign '" .. name .. "' failed (could not stage the fetched tree)"
+  end
+  close_staging(work)                       -- the download scratch is no longer needed
+
+  local lk, lerr = acquire_pkg_lock(name, "install foreign " .. name)
+  if not lk then close_staging(stage); return nil, lerr end
+  local flat = STORE .. "\\" .. name
+  local ok, err = true, nil
+  if exists(flat) and not sh('move /Y "' .. flat .. '" "' .. stage .. '\\old" >nul 2>&1') then
+    ok, err = false, "cannot replace the existing store directory " .. flat
+  end
+  if ok and not sh('move /Y "' .. payload .. '" "' .. flat .. '" >nul 2>&1') then
+    ok, err = false, "install of foreign '" .. name .. "' failed (could not publish into the store)"
+  end
+  local m
+  if ok then
+    m = read_meta(flat)
+    m.hash   = pkg_hash(flat) or "?"
+    m.tree   = tree_hash(flat) or m.hash
+    m.source = "github.com/" .. owner .. "/" .. repo
+    ok, err = write_manifest(name, m)
+  end
+  release_pkg_lock(lk)
+  close_staging(stage)
+  if not ok then return nil, err end
   return m, name
 end
 
@@ -1179,9 +1579,11 @@ local function do_install(name, registry, constraint)
   registry = registry or default_registry()
   constraint = constraint or "*"
   if is_url(registry) then
-    local srcdir, version = fetch_remote(name, constraint, registry)
+    local srcdir, version, work = fetch_remote(name, constraint, registry)
     if not srcdir then return nil, version end       -- version holds the error here
-    return install_from_version_dir(name, version, srcdir)
+    local m, err = install_from_version_dir(name, version, srcdir)
+    close_staging(work)                              -- the download is now published
+    return m, err
   end
   registry = bs(registry)
   local versions, versioned = registry_versions(registry, name)
@@ -1361,6 +1763,14 @@ if os.getenv("ROVER_PKG_TEST") then
     semver_satisfies = semver_satisfies, caret_satisfies = caret_satisfies,
     tilde_satisfies = tilde_satisfies, registry_ok = registry_ok,
     resolve_version = resolve_version,
+    -- transaction primitives (staging, atomic publication, package locks)
+    shell_safe_path = shell_safe_path, is_version_segment = is_version_segment,
+    write_atomic = write_atomic, ensure_dir = ensure_dir, rm_rf = rm_rf,
+    open_staging = open_staging, close_staging = close_staging,
+    acquire_pkg_lock = acquire_pkg_lock, release_pkg_lock = release_pkg_lock,
+    publish_flat_view = publish_flat_view,
+    STORE = STORE, STAGE_TEMP = STAGE_TEMP, STAGE_STORE = STAGE_STORE,
+    LOCK_ROOT = LOCK_ROOT,
     sha256 = sha256, hmac_sha256 = hmac_sha256,
     tree_hash = tree_hash, pkg_hash = pkg_hash, list_files = list_files,
     index_versions = index_versions, index_hash = index_hash,
@@ -1510,7 +1920,11 @@ elseif cmd == "install" then
     n = n + 1
     print(string.format("[+] %s -> v%s (%s)", dep, node.version, (node.tree or node.hash):sub(1, 12)))
   end
-  if n > 0 then write_lock(graph); print(string.format("[+] wrote %s (%d packages)", LOCK, n)) end
+  if n > 0 then
+    local ok, werr = write_lock(graph)
+    if not ok then print("[-] " .. werr); os.exit(1) end
+    print(string.format("[+] wrote %s (%d packages)", LOCK, n))
+  end
   os.exit(0)
 
 elseif cmd == "add" then
@@ -1524,10 +1938,12 @@ elseif cmd == "add" then
     if not owner then print("[-] " .. repo); os.exit(2) end    -- repo holds the error
     local m, pkgname = install_foreign(owner, repo)
     if not m then print("[-] " .. pkgname); os.exit(1) end     -- pkgname holds the error
-    add_toml_dep(pkgname, "*")
+    local tok, terr = add_toml_dep(pkgname, "*")
+    if not tok then print("[-] " .. terr); os.exit(1) end
     local lock = read_lock() or {}
     lock[pkgname] = { version = m.version, hash = m.hash, tree = m.tree, source = m.source }
-    write_lock(lock)
+    local lok, lerr2 = write_lock(lock)
+    if not lok then print("[-] " .. lerr2); os.exit(1) end
     print(string.format("[+] added FOREIGN '%s' v%s to %s and installed it", pkgname, m.version, TOML))
     foreign_warning(pkgname, m.source)
     os.exit(0)
@@ -1542,29 +1958,47 @@ elseif cmd == "add" then
   if not graph then print("[-] " .. err); os.exit(1) end
   local root = graph[name]
   -- record the user's constraint (or a caret on the resolved version) in toml.
-  add_toml_dep(name, constraint or ("^" .. root.version))
-  write_lock(graph)
+  local tok, terr = add_toml_dep(name, constraint or ("^" .. root.version))
+  if not tok then print("[-] " .. terr); os.exit(1) end
+  local lok, lerr = write_lock(graph)
+  if not lok then print("[-] " .. lerr); os.exit(1) end
   print(string.format("[+] added '%s' v%s to %s and installed it", name, root.version, TOML))
 
 elseif cmd == "remove" then
   local name = parg[2]
   if not name then print("usage: remove <name>"); os.exit(2) end
   require_valid_name(name, "remove")
-  -- drop from the store + manifest
-  sh('if exist "' .. STORE .. '\\' .. name .. '" rmdir /S /Q "' .. STORE .. '\\' .. name .. '" >nul 2>&1')
+  -- drop from the store + manifest, under the package lock so a concurrent
+  -- install cannot be publishing into the tree we are deleting. The tree is
+  -- RENAMED aside first, so a reader never walks a directory being emptied.
+  local lk, lerr = acquire_pkg_lock(name, "remove " .. name)
+  if not lk then print("[-] " .. lerr); os.exit(1) end
+  local dir = STORE .. "\\" .. name
+  if exists(dir) then
+    local stage = open_staging(STAGE_STORE, "remove")
+    if stage and sh('move /Y "' .. dir .. '" "' .. stage .. '\\old" >nul 2>&1') then
+      close_staging(stage)
+    else
+      close_staging(stage)
+      sh('rmdir /S /Q "' .. dir .. '" >nul 2>&1')
+    end
+  end
   sh('if exist "' .. manifest_path(name) .. '" del /Q "' .. manifest_path(name) .. '" >nul 2>&1')
+  release_pkg_lock(lk)
   -- Feature 6: also drop the dependency from rover.toml AND rover.lock.
   local toml = read_file(TOML)
   if toml then
     -- remove the `name = "..."` line from [dependencies]
     local esc = name:gsub("(%W)", "%%%1")
     toml = toml:gsub("\n%s*" .. esc .. "%s*=[^\n]*", "")
-    write_file(TOML, toml)
+    local ok, err = write_atomic(TOML, toml)
+    if not ok then print("[-] " .. err); os.exit(1) end
   end
   local lock = read_lock()
   if lock and lock[name] then
     lock[name] = nil
-    write_lock(lock)
+    local ok, err = write_lock(lock)
+    if not ok then print("[-] " .. err); os.exit(1) end
   end
   print("[+] removed '" .. name .. "' (store, manifest, rover.toml, rover.lock)")
 
@@ -1715,7 +2149,8 @@ elseif cmd == "update" then
       end
     end
   end
-  write_lock(newlock)
+  local lok, lerr = write_lock(newlock)
+  if not lok then print("[-] " .. lerr); os.exit(1) end
   if changed == 0 then print("[+] nothing to update") end
   os.exit(0)
 
@@ -1728,17 +2163,34 @@ elseif cmd == "gc" then
   if p then for line in p:lines() do if line ~= "" and line ~= ".meta" and safe_name(line) then pkgs[#pkgs + 1] = line end end p:close() end
   local pruned, kept = 0, 0
   for _, name in ipairs(pkgs) do
-    local vers = registry_versions(STORE, name)   -- versioned subdirs under the store
-    local latest = vers[1]
-    local pinned = lock[name] and lock[name].version
-    for _, v in ipairs(vers) do
-      if v ~= latest and v ~= pinned then
-        sh('rmdir /S /Q "' .. STORE .. '\\' .. name .. '\\' .. v .. '" >nul 2>&1')
-        print(string.format("  pruned %s v%s", name, v))
-        pruned = pruned + 1
-      else
-        kept = kept + 1
+    -- Hold the package lock while pruning so a concurrent install cannot be
+    -- publishing into a version dir we are deleting. A package that is busy is
+    -- skipped, never force-pruned.
+    local lk, lerr = acquire_pkg_lock(name, "gc " .. name)
+    if not lk then
+      print("  [!] skipped " .. name .. ": " .. lerr)
+    else
+      local vers = registry_versions(STORE, name)   -- versioned subdirs under the store
+      local latest = vers[1]
+      local pinned = lock[name] and lock[name].version
+      for _, v in ipairs(vers) do
+        if v ~= latest and v ~= pinned then
+          -- rename aside, then delete: a reader never walks a dying tree
+          local stage = open_staging(STAGE_STORE, "gc")
+          local vdir = STORE .. "\\" .. name .. "\\" .. v
+          if stage and sh('move /Y "' .. vdir .. '" "' .. stage .. '\\old" >nul 2>&1') then
+            close_staging(stage)
+          else
+            close_staging(stage)
+            sh('rmdir /S /Q "' .. vdir .. '" >nul 2>&1')
+          end
+          print(string.format("  pruned %s v%s", name, v))
+          pruned = pruned + 1
+        else
+          kept = kept + 1
+        end
       end
+      release_pkg_lock(lk)
     end
   end
   print(string.format("[+] gc: pruned %d, kept %d versioned dir(s) (latest + lock-pinned)", pruned, kept))
@@ -1824,12 +2276,16 @@ elseif cmd == "publish" then
   out[#out + 1] = "}"
   local idxtext = table.concat(out, "\n") .. "\n"
   local idxpath = regdir .. "\\index.json"
-  if not write_file(idxpath, idxtext) then print("[-] failed to write " .. idxpath); os.exit(1) end
+  -- Atomic: a failed regeneration must leave the previous, consistent index in
+  -- place -- clients fetching it mid-publish must never read a truncated file.
+  local wok, werr = write_atomic(idxpath, idxtext)
+  if not wok then print("[-] " .. werr); os.exit(1) end
   print("[+] wrote " .. idxpath .. " (" .. #names .. " package(s))")
   -- optionally emit a detached HMAC signature when a key is configured
   local key = os.getenv("ROVER_REGISTRY_KEY")
   if key and key ~= "" then
-    write_file(regdir .. "\\index.json.sig", hmac_sha256(key, idxtext) .. "\n")
+    local sok, serr = write_atomic(regdir .. "\\index.json.sig", hmac_sha256(key, idxtext) .. "\n")
+    if not sok then print("[-] " .. serr); os.exit(1) end
     print("[+] wrote index.json.sig (HMAC-SHA256, $ROVER_REGISTRY_KEY)")
   end
 
@@ -1912,7 +2368,7 @@ elseif cmd == "search" then
 elseif cmd == "init" then
   local target = "rover.toml"
   if exists(target) then print("[-] " .. target .. " already exists"); os.exit(1) end
-  write_file(target, table.concat({
+  local ok, err = write_atomic(target, table.concat({
     "# rover.toml -- rover (the CLua package manager) project manifest",
     "[project]",
     'name = "my-project"',
@@ -1925,6 +2381,7 @@ elseif cmd == "init" then
     "# greet = \"^1.0.0\"",
     "",
   }, "\n"))
+  if not ok then print("[-] " .. err); os.exit(1) end
   print("[+] wrote " .. target)
 
 else
