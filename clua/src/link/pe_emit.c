@@ -1487,16 +1487,32 @@ static int apply_relocations( Linker *L, ImportLayout *il ) {
         for ( r = 0; r < sc->nrelocs; r++ ) {
             const LcCoffReloc *rl = &sc->relocs[r];
             const LcCoffSymbol *sy = LcCoff_SymByIndex( o, rl->symidx );
-            uint32_t patch_off;     /* offset within os->raw */
+            uint64_t patch_off64;   /* offset within os->raw, before narrowing */
+            uint32_t patch_off;
             uint32_t target_rva;
             int      tgt_abs = 0;   /* target is an absolute value (weak NULL) */
+            size_t   patch_width;
             uint8_t *p;
             if ( !sy ) return lerr( L, "reloc references aux/oob symbol in %s", o->origin );
 
-            patch_off = c->out_off + rl->va;
-            if ( patch_off + 4 > os->raw.len ) {
-                /* ADDR64 needs 8; bounds-check below per-type */
+            switch ( rl->type ) {
+            case LC_IMAGE_REL_AMD64_ABSOLUTE: patch_width = 0; break;
+            case LC_IMAGE_REL_AMD64_ADDR64:   patch_width = 8; break;
+            case LC_IMAGE_REL_AMD64_SECTION:  patch_width = 2; break;
+            default:                          patch_width = 4; break;
             }
+            patch_off64 = ( uint64_t )c->out_off + ( uint64_t )rl->va;
+            if ( rl->va > sc->size_raw ||
+                 patch_width > ( size_t )sc->size_raw - rl->va ||
+                 patch_off64 > UINT32_MAX ||
+                 patch_off64 > ( uint64_t )os->raw.len ||
+                 patch_width > os->raw.len - ( size_t )patch_off64 ) {
+                snprintf( L->err, sizeof L->err,
+                          "relocation patch is outside section data in %s",
+                          o->origin );
+                return 0;
+            }
+            patch_off = ( uint32_t )patch_off64;
             p = os->raw.p + patch_off;
 
             if ( !reloc_target_rva( L, o, sy, il, &target_rva, &tgt_abs ) ) {
@@ -1516,20 +1532,36 @@ static int apply_relocations( Linker *L, ImportLayout *il ) {
                 uint64_t add = ( uint64_t )p[0] | ((uint64_t)p[1]<<8) | ((uint64_t)p[2]<<16)
                              | ((uint64_t)p[3]<<24) | ((uint64_t)p[4]<<32) | ((uint64_t)p[5]<<40)
                              | ((uint64_t)p[6]<<48) | ((uint64_t)p[7]<<56);
+                if ( target_rva > UINT64_MAX - base ||
+                     add > UINT64_MAX - ( base + target_rva ) ) {
+                    return lerr( L, "ADDR64 relocation overflows in %s", o->origin );
+                }
                 w64( p, va + add );
-                if ( !tgt_abs && !reloc_add( L, os->rva + patch_off ) ) return lerr( L, "oom", NULL );
+                if ( !tgt_abs ) {
+                    if ( patch_off > UINT32_MAX - os->rva ) {
+                        return lerr( L, "base relocation RVA overflows in %s", o->origin );
+                    }
+                    if ( !reloc_add( L, os->rva + patch_off ) ) return lerr( L, "oom", NULL );
+                }
                 break;
             }
             case LC_IMAGE_REL_AMD64_ADDR32: {
                 uint32_t add = (uint32_t)p[0]|((uint32_t)p[1]<<8)|((uint32_t)p[2]<<16)|((uint32_t)p[3]<<24);
-                uint32_t base = tgt_abs ? 0 : ( uint32_t )L->image_base;
-                w32( p, base + target_rva + add );
-                if ( !tgt_abs && !reloc_add( L, os->rva + patch_off ) ) return lerr( L, "oom", NULL );
+                uint64_t value = ( tgt_abs ? 0 : L->image_base ) +
+                                 ( uint64_t )target_rva + ( uint64_t )add;
+                if ( value > UINT32_MAX ) {
+                    return lerr( L, "ADDR32 relocation overflows in %s", o->origin );
+                }
+                w32( p, ( uint32_t )value );
                 break;
             }
             case LC_IMAGE_REL_AMD64_ADDR32NB: {
                 uint32_t add = (uint32_t)p[0]|((uint32_t)p[1]<<8)|((uint32_t)p[2]<<16)|((uint32_t)p[3]<<24);
-                w32( p, target_rva + add );   /* image-relative; no base reloc */
+                uint64_t value = ( uint64_t )target_rva + ( uint64_t )add;
+                if ( value > UINT32_MAX ) {
+                    return lerr( L, "ADDR32NB relocation overflows in %s", o->origin );
+                }
+                w32( p, ( uint32_t )value );  /* image-relative; no base reloc */
                 break;
             }
             case LC_IMAGE_REL_AMD64_REL32:
@@ -1540,9 +1572,16 @@ static int apply_relocations( Linker *L, ImportLayout *il ) {
             case LC_IMAGE_REL_AMD64_REL32_5: {
                 int extra = ( int )( rl->type - LC_IMAGE_REL_AMD64_REL32 ); /* 0..5 */
                 int32_t add = (int32_t)((uint32_t)p[0]|((uint32_t)p[1]<<8)|((uint32_t)p[2]<<16)|((uint32_t)p[3]<<24));
-                uint32_t site_rva = os->rva + patch_off;
+                uint64_t site_rva = ( uint64_t )os->rva + patch_off;
                 /* disp = target - (next_insn). next = site + 4 + extra */
-                int64_t disp = ( int64_t )target_rva - ( int64_t )( site_rva + 4 + extra ) + add;
+                int64_t disp;
+                if ( site_rva > INT64_MAX - 9 ) {
+                    return lerr( L, "REL32 site RVA overflows in %s", o->origin );
+                }
+                disp = ( int64_t )target_rva - ( int64_t )( site_rva + 4 + extra ) + add;
+                if ( disp < INT32_MIN || disp > INT32_MAX ) {
+                    return lerr( L, "REL32 relocation overflows in %s", o->origin );
+                }
                 w32( p, ( uint32_t )( int32_t )disp );
                 break;
             }
@@ -2003,8 +2042,8 @@ int LcPe_Link( const LcPeLinkInputs *in, char *err, size_t errlen ) {
     if ( !build_imports( &L, &il ) ) { snprintf( err, errlen, "%s", L.err ); goto out; }
 
     /* headers size depends on the final section count. .reloc is built later
-    ** (it needs RVAs), so predict whether it will exist: any ADDR64/ADDR32
-    ** site produces base relocs. Reserve its header slot up front so the
+    ** (it needs RVAs), so predict whether it will exist: any ADDR64 site
+    ** produces a base relocation. Reserve its header slot up front so the
     ** computed SizeOfHeaders matches the final section count. */
     nsec = ( uint32_t )count_sections( &L );
     {
@@ -2016,7 +2055,7 @@ int LcPe_Link( const LcPeLinkInputs *in, char *err, size_t errlen ) {
             sc = &L.contribs[ci].obj->sections[ L.contribs[ci].sec_index ];
             for ( r = 0; r < sc->nrelocs; r++ ) {
                 uint16_t t = sc->relocs[r].type;
-                if ( t == LC_IMAGE_REL_AMD64_ADDR64 || t == LC_IMAGE_REL_AMD64_ADDR32 ) { will_reloc = 1; break; }
+                if ( t == LC_IMAGE_REL_AMD64_ADDR64 ) { will_reloc = 1; break; }
             }
         }
         if ( will_reloc ) nsec++;   /* reserve the .reloc section header      */

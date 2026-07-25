@@ -99,7 +99,9 @@ static int MakeStagedOutput( const char *out_path, char staged[ MAX_PATH ],
     if ( slash == full + 2 && full[1] == ':' ) slash[1] = '\0';
     else                                        *slash = '\0';
 
-    if ( strlen( full ) >= MAX_PATH ) {
+    /* GetTempFileName appends "\\cluXXXX.tmp"; reserve that suffix and NUL,
+    ** not merely the caller-provided directory itself. */
+    if ( strlen( full ) >= MAX_PATH - 14 ) {
         set_errv( err, errlen,
                   "output directory is too long for the current Windows path "
                   "backend: %s", full );
@@ -116,7 +118,7 @@ static int MakeStagedOutput( const char *out_path, char staged[ MAX_PATH ],
 
 static int PublishStagedOutput( const char *staged, const char *out_path,
                                 char *err, size_t errlen ) {
-    static const DWORD waits_ms[] = { 10, 50, 200 };
+    static const DWORD waits_ms[] = { 25, 75, 200, 500, 1000 };
     HANDLE h;
     DWORD  code = ERROR_SUCCESS;
     int    attempt;
