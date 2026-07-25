@@ -135,6 +135,28 @@ ok(M.shell_safe_path("C:\\x&calc") == false, "ampersand-rejected")
 -- 5. the version-segment predicate the flat publisher and tree_hash share
 ok(M.is_version_segment("1.0.0") and M.is_version_segment("v2.10"), "version-segment-yes")
 ok(not M.is_version_segment("sub") and not M.is_version_segment("lib"), "version-segment-no")
+
+-- 6. `dir /s` returns absolute names even when its input is relative. The
+-- default in-repo registry is relative, so list_files must canonicalize before
+-- stripping the prefix (otherwise `rover publish` emits an empty file list).
+local relfiles = M.list_files("rover\\registry-test\\mfpkg\\1.0.0")
+local saw_helper = false
+for _, rel in ipairs(relfiles) do
+  if rel:lower() == "helper.lua" then saw_helper = true end
+end
+ok(saw_helper, "relative-list-files")
+
+-- 7. A package is allowed to ship a directory named like a version. It must
+-- remain inside the integrity root; only flat-store hashing explicitly excludes
+-- Rover's own nested version directories.
+local shaped = box .. "\\version-shaped"
+M.ensure_dir(shaped .. "\\1.0")
+ok(M.write_atomic(shaped .. "\\init.lua", "return {}\n"), "shape-init")
+ok(M.write_atomic(shaped .. "\\1.0\\payload.lua", "return 1\n"), "shape-first")
+local h1 = M.tree_hash(shaped)
+ok(M.write_atomic(shaped .. "\\1.0\\payload.lua", "return 2\n"), "shape-second")
+local h2 = M.tree_hash(shaped)
+ok(h1 and h2 and h1 ~= h2, "version-shaped-directory-is-hashed")
 print("ATOMIC_OK")
 ]==])
   local c, out = run('set "ROVER_PKG_TEST=1" && set "ROVER_TX_BOX=' .. box .. '" && "'

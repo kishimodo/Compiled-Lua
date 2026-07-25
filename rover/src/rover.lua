@@ -508,9 +508,14 @@ local function acquire_pkg_lock(name, op)
   local deadline, breaks, unknown_since = os.time() + LOCK_WAIT_S, 0, nil
   while true do
     if sh('mkdir "' .. dir .. '" >nul 2>&1') then
-      write_file(dir .. "\\owner.lua", string.format(
+      local owner_ok, owner_err = write_atomic(dir .. "\\owner.lua", string.format(
         "return { proc = %q, host = %q, at = %d, op = %q }\n",
         PROC_ID, os.getenv("COMPUTERNAME") or "?", os.time(), op or "?"))
+      if not owner_ok then
+        rm_rf(dir)
+        return nil, "claimed package lock but could not publish its owner: " ..
+                    tostring(owner_err)
+      end
       return { dir = dir, name = name }
     end
     local o, now = lock_owner(dir), os.time()
@@ -541,10 +546,10 @@ end
 local function release_pkg_lock(lk)
   if not lk then return end
   local o = lock_owner(lk.dir)
-  -- Only drop a lock we still own: if ours was broken as stale and re-taken by
-  -- someone else, removing it here would hand a third process a false mutex.
-  if o and o.proc ~= nil and o.proc ~= PROC_ID then return end
-  rm_rf(lk.dir)
+  -- Only drop a lock whose readable record still names us. If ours was broken
+  -- as stale and re-taken, there is a short mkdir->owner publication window;
+  -- treating a missing record as ours would delete the new holder's mutex.
+  if o and o.proc == PROC_ID then rm_rf(lk.dir) end
 end
 
 ----------------------------------------------------------------------
@@ -582,9 +587,17 @@ end
 -- contains no metadata files, so everything under it belongs to the package.
 local function list_files(dir)
   local files = {}
+  -- `dir /s` prints absolute paths even when its input is relative. Canonicalize
+  -- the prefix in a child cmd first so the default `rover\registry` and paths
+  -- containing `.`/`..` do not silently produce an empty file list.
+  local ch = io.popen('cd /d "' .. dir .. '" 2>nul && cd')
+  if not ch then return files end
+  local canonical = ch:read("*l")
+  ch:close()
+  if not canonical or canonical == "" then return files end
   local p = io.popen('dir /b /s /a-d "' .. dir .. '" 2>nul')
   if not p then return files end
-  local prefix = dir
+  local prefix = canonical
   if prefix:sub(-1) ~= "\\" then prefix = prefix .. "\\" end
   local plen = #prefix
   for line in p:lines() do
@@ -612,7 +625,7 @@ end
 -- if the dir is empty/unreadable. Relative paths are lowercased ONLY for sorting
 -- stability of the manifest order, but hashed as-is (verbatim) so a real rename
 -- still changes the root.
-local function tree_hash(dir)
+local function tree_hash(dir, exclude_version_dirs)
   local files = {}
   for _, rel in ipairs(list_files(dir)) do
     -- A flat store dir (<store>/<name>) NESTS its version dirs
@@ -620,7 +633,10 @@ local function tree_hash(dir)
     -- version, so tree_hash(flat) == tree_hash(versioned) (the same top-level
     -- files) -- the flat install is a copy of the latest version's files.
     -- (parse_semver is defined later; use a self-contained version-segment test)
-    if not is_version_segment(rel:match("^([^\\]+)\\")) then files[#files + 1] = rel end
+    if not exclude_version_dirs
+       or not is_version_segment(rel:match("^([^\\]+)\\")) then
+      files[#files + 1] = rel
+    end
   end
   if #files == 0 then return nil end
   table.sort(files, function(a, b) return a:lower() < b:lower() end)
@@ -796,6 +812,12 @@ local function read_lock()
   if not c then return nil end                     -- absent
   local t = parse_return_table(c)
   if type(t) ~= "table" then return nil, "corrupt" end  -- present but unparseable
+  for name, entry in pairs(t) do
+    if not name_ok(name) or type(entry) ~= "table"
+       or not version_ok(entry.version) then
+      return nil, "corrupt"
+    end
+  end
   return t
 end
 
@@ -1146,16 +1168,40 @@ local function verify_index_signature(index_text, fetch_sig)
   if not sig then return false, "registry signature required (ROVER_REGISTRY_KEY set) but index.json.sig missing" end
   sig = sig:gsub("%s+", "")
   local want = hmac_sha256(key, index_text)
-  if sig:lower() == want:lower() then return true end
+  sig, want = sig:lower(), want:lower()
+  local diff = #sig ~ #want
+  local n = math.max(#sig, #want)
+  for i = 1, n do diff = diff | ((sig:byte(i) or 0) ~ (want:byte(i) or 0)) end
+  if diff == 0 then return true end
   return false, "registry signature mismatch -- index.json failed HMAC verification"
+end
+
+-- Fetch one remote index through the SAME signature gate for every consumer.
+-- Version selection is security-sensitive too: verifying only the later
+-- payload download lets a tampered index steer `update`, `outdated`, conflict
+-- reconciliation, and `search` to an attacker-chosen version.
+local function verified_remote_index(url)
+  url = url:gsub("/+$", "")
+  local idx = http_body(url .. "/index.json")
+  if not idx then
+    if os.getenv("ROVER_REGISTRY_KEY") and os.getenv("ROVER_REGISTRY_KEY") ~= "" then
+      return nil, "registry signature required but " .. url .. " has no index.json"
+    end
+    return nil
+  end
+  local ok, err = verify_index_signature(idx, function()
+    return http_body(url .. "/index.json.sig")
+  end)
+  if not ok then return nil, err end
+  return idx
 end
 
 -- Available versions of <name> in a registry (local dir OR URL), sorted DESC.
 local function available_versions(name, registry)
   registry = registry or default_registry()
   if is_url(registry) then
-    local idx = http_body(registry:gsub("/+$", "") .. "/index.json")
-    return idx and index_versions(idx, name) or {}
+    local idx, err = verified_remote_index(registry)
+    return idx and index_versions(idx, name) or {}, err
   end
   registry = bs(registry)
   local vers, versioned = registry_versions(registry, name)
@@ -1174,13 +1220,9 @@ local function fetch_remote(name, constraint, url)
   if not name_ok(name) then return nil, "invalid package name" end
   url = url:gsub("/+$", "")
   local version, declared_hash
-  local idx = http_body(url .. "/index.json")
+  local idx, idxerr = verified_remote_index(url)
+  if idxerr then return nil, idxerr end
   if idx then
-    -- Feature 5: enforce a detached signature over the index when configured.
-    local sigok, sigerr = verify_index_signature(idx, function()
-      return http_body(url .. "/index.json.sig")
-    end)
-    if not sigok then return nil, sigerr end
     local vers = index_versions(idx, name)
     if #vers == 0 then return nil, "package '" .. name .. "' not in remote index " .. url end
     version = resolve_version(vers, constraint)
@@ -1189,8 +1231,6 @@ local function fetch_remote(name, constraint, url)
                   "' (have: " .. table.concat(vers, ", ") .. ")"
     end
     declared_hash = index_hash(idx, name, version)   -- per-version trusted hash
-  elseif os.getenv("ROVER_REGISTRY_KEY") and os.getenv("ROVER_REGISTRY_KEY") ~= "" then
-    return nil, "registry signature required but " .. url .. " has no index.json"
   elseif parse_semver(constraint) then
     version = constraint                          -- no index: allow an exact version
   else
@@ -1314,13 +1354,18 @@ local function install_from_version_dir(name, version, srcdir)
                 " failed (could not stage " .. srcdir .. ")"
   end
   local staged_tree = tree_hash(payload)
+  if not staged_tree then
+    close_staging(stage)
+    return nil, "install of '" .. name .. "' v" .. version ..
+                " failed (staged tree is empty or unreadable)"
+  end
 
   local lk, lerr = acquire_pkg_lock(name, "install " .. name .. "@" .. version)
   if not lk then close_staging(stage); return nil, lerr end
 
   local flat = STORE .. "\\" .. name
   local vdir = flat .. "\\" .. version
-  local ok, err = true, nil
+  local ok, err, moved_old, preserve_stage = true, nil, false, false
   if exists(vdir .. "\\init.lua") and staged_tree and tree_hash(vdir) == staged_tree then
     -- Identical bytes are already published: adopt the immutable directory.
   else
@@ -1328,10 +1373,22 @@ local function install_from_version_dir(name, version, srcdir)
     if ok and exists(vdir) then
       if not sh('move /Y "' .. vdir .. '" "' .. stage .. '\\old" >nul 2>&1') then
         ok, err = false, "cannot replace the existing store directory " .. vdir
+      else
+        moved_old = true
       end
     end
     if ok and not sh('move /Y "' .. payload .. '" "' .. vdir .. '" >nul 2>&1') then
       ok, err = false, "publishing " .. vdir .. " failed"
+      if moved_old then
+        if sh('move /Y "' .. stage .. '\\old" "' .. vdir .. '" >nul 2>&1') then
+          moved_old = false
+          err = err .. "; the previous version was restored"
+        else
+          preserve_stage = true
+          err = err .. "; rollback also failed -- recover the previous tree from " ..
+                stage .. "\\old"
+        end
+      end
     end
   end
 
@@ -1354,7 +1411,7 @@ local function install_from_version_dir(name, version, srcdir)
   end
 
   release_pkg_lock(lk)
-  close_staging(stage)
+  if not preserve_stage then close_staging(stage) end
   if not ok then return nil, err end
   return m
 end
@@ -1547,12 +1604,16 @@ local function install_foreign(owner, repo)
   local lk, lerr = acquire_pkg_lock(name, "install foreign " .. name)
   if not lk then close_staging(stage); return nil, lerr end
   local flat = STORE .. "\\" .. name
-  local ok, err = true, nil
+  local ok, err, moved_old, published, preserve_stage = true, nil, false, false, false
   if exists(flat) and not sh('move /Y "' .. flat .. '" "' .. stage .. '\\old" >nul 2>&1') then
     ok, err = false, "cannot replace the existing store directory " .. flat
+  elseif exists(stage .. "\\old") then
+    moved_old = true
   end
   if ok and not sh('move /Y "' .. payload .. '" "' .. flat .. '" >nul 2>&1') then
     ok, err = false, "install of foreign '" .. name .. "' failed (could not publish into the store)"
+  elseif ok then
+    published = true
   end
   local m
   if ok then
@@ -1562,8 +1623,27 @@ local function install_foreign(owner, repo)
     m.source = "github.com/" .. owner .. "/" .. repo
     ok, err = write_manifest(name, m)
   end
+  if not ok and moved_old then
+    if published and not sh('move /Y "' .. flat .. '" "' .. stage .. '\\failed" >nul 2>&1') then
+      preserve_stage = true
+      err = err .. "; rollback could not detach the failed replacement"
+    elseif not sh('move /Y "' .. stage .. '\\old" "' .. flat .. '" >nul 2>&1') then
+      preserve_stage = true
+      err = err .. "; rollback also failed -- recover the previous tree from " ..
+            stage .. "\\old"
+    else
+      err = err .. "; the previous package was restored"
+    end
+  elseif not ok and published then
+    -- There was no prior package. Detach the failed new tree before cleanup so
+    -- a failed manifest publication does not leave an untracked install live.
+    if not sh('move /Y "' .. flat .. '" "' .. stage .. '\\failed" >nul 2>&1') then
+      preserve_stage = true
+      err = err .. "; cleanup could not detach the unpublished package at " .. flat
+    end
+  end
   release_pkg_lock(lk)
-  close_staging(stage)
+  if not preserve_stage then close_staging(stage) end
   if not ok then return nil, err end
   return m, name
 end
@@ -1656,7 +1736,11 @@ local function resolve_graph(roots, registry)
           note()
         else
           -- try to find a single version satisfying ALL recorded constraints + the new one
-          local vers = available_versions(name, registry)
+          local vers, verr = available_versions(name, registry)
+          if verr then
+            errors[#errors + 1] = verr
+            vers = {}
+          end
           local pick
           for _, v in ipairs(vers) do
             local all = semver_satisfies(v, constraint)
@@ -1930,6 +2014,12 @@ elseif cmd == "install" then
 elseif cmd == "add" then
   local name = parg[2]
   if not name then print("usage: add <name|github.com/owner/repo> [registry] [constraint] [--registry url]"); os.exit(2) end
+  local existing_lock, existing_lockerr = read_lock()
+  if existing_lockerr == "corrupt" then
+    print("[-] " .. LOCK .. " exists but is corrupt/unparseable; refusing to add "
+          .. "a dependency because that would destroy the existing pins.")
+    os.exit(1)
+  end
   if is_github_source(name) then
     -- FOREIGN add: install from GitHub + record in rover.toml ("*": foreign
     -- snapshots have no registry versions to range over) + pin in rover.lock
@@ -1940,7 +2030,7 @@ elseif cmd == "add" then
     if not m then print("[-] " .. pkgname); os.exit(1) end     -- pkgname holds the error
     local tok, terr = add_toml_dep(pkgname, "*")
     if not tok then print("[-] " .. terr); os.exit(1) end
-    local lock = read_lock() or {}
+    local lock = existing_lock or {}
     lock[pkgname] = { version = m.version, hash = m.hash, tree = m.tree, source = m.source }
     local lok, lerr2 = write_lock(lock)
     if not lok then print("[-] " .. lerr2); os.exit(1) end
@@ -1968,6 +2058,12 @@ elseif cmd == "remove" then
   local name = parg[2]
   if not name then print("usage: remove <name>"); os.exit(2) end
   require_valid_name(name, "remove")
+  local lock, lockerr = read_lock()
+  if lockerr == "corrupt" then
+    print("[-] " .. LOCK .. " exists but is corrupt/unparseable; refusing to "
+          .. "remove anything until its pins can be read.")
+    os.exit(1)
+  end
   -- drop from the store + manifest, under the package lock so a concurrent
   -- install cannot be publishing into the tree we are deleting. The tree is
   -- RENAMED aside first, so a reader never walks a directory being emptied.
@@ -1975,13 +2071,15 @@ elseif cmd == "remove" then
   if not lk then print("[-] " .. lerr); os.exit(1) end
   local dir = STORE .. "\\" .. name
   if exists(dir) then
-    local stage = open_staging(STAGE_STORE, "remove")
-    if stage and sh('move /Y "' .. dir .. '" "' .. stage .. '\\old" >nul 2>&1') then
+    local stage, serr = open_staging(STAGE_STORE, "remove")
+    if not stage or not sh('move /Y "' .. dir .. '" "' .. stage .. '\\old" >nul 2>&1') then
       close_staging(stage)
-    else
-      close_staging(stage)
-      sh('rmdir /S /Q "' .. dir .. '" >nul 2>&1')
+      release_pkg_lock(lk)
+      print("[-] could not atomically detach " .. dir .. ": " ..
+            tostring(serr or "rename failed"))
+      os.exit(1)
     end
+    close_staging(stage)
   end
   sh('if exist "' .. manifest_path(name) .. '" del /Q "' .. manifest_path(name) .. '" >nul 2>&1')
   release_pkg_lock(lk)
@@ -1994,7 +2092,6 @@ elseif cmd == "remove" then
     local ok, err = write_atomic(TOML, toml)
     if not ok then print("[-] " .. err); os.exit(1) end
   end
-  local lock = read_lock()
   if lock and lock[name] then
     lock[name] = nil
     local ok, err = write_lock(lock)
@@ -2012,14 +2109,16 @@ elseif cmd == "verify" then
   local function verify_one(name, version, want_tree, want_init, label)
     if not name_ok(name) then print("[-] invalid package name in lock: " .. tostring(name)); return false end
     local dir = STORE .. "\\" .. name
+    local versioned = false
     if version and version_ok(version) and exists(dir .. "\\" .. version .. "\\init.lua") then
       dir = dir .. "\\" .. version
+      versioned = true
     end
     if not exists(dir .. "\\init.lua") then
       print("[-] " .. label .. " not installed in the store"); return false
     end
     if want_tree and want_tree ~= "" then
-      local actual = tree_hash(dir)
+      local actual = tree_hash(dir, not versioned)
       if actual == want_tree then
         print(string.format("[+] %s OK (tree %s)", label, actual)); return true
       end
@@ -2047,7 +2146,12 @@ elseif cmd == "verify" then
     os.exit(verify_one(name, nil, m.tree, m.hash, "'" .. name .. "' v" .. m.version) and 0 or 1)
   end
   -- project mode: verify all of rover.lock
-  local lock = read_lock()
+  local lock, lockerr = read_lock()
+  if lockerr == "corrupt" then
+    print("[-] " .. LOCK .. " exists but is corrupt/unparseable; refusing to "
+          .. "report unverifiable pins as absent.")
+    os.exit(1)
+  end
   if not lock then print("[-] no " .. LOCK .. " (run `install` to generate one)"); os.exit(1) end
   local bad = 0
   for n, e in pairs(lock) do
@@ -2097,7 +2201,13 @@ elseif cmd == "outdated" then
   local deps = read_toml_deps(TOML)
   if not deps then print("[-] no " .. TOML .. " (run `init`/`add` first)"); os.exit(1) end
   local registry = reg_arg(parg[2]) or default_registry()
-  local lock = read_lock() or {}
+  local lock, lockerr = read_lock()
+  if lockerr == "corrupt" then
+    print("[-] " .. LOCK .. " exists but is corrupt/unparseable; refusing to "
+          .. "compare versions against unknown pins.")
+    os.exit(1)
+  end
+  lock = lock or {}
   local names = {}
   for d in pairs(deps) do names[#names + 1] = d end
   table.sort(names)
@@ -2105,7 +2215,8 @@ elseif cmd == "outdated" then
   for _, name in ipairs(names) do
     local constraint = deps[name]
     local cur = lock[name] and lock[name].version or nil
-    local vers = available_versions(name, registry)
+    local vers, verr = available_versions(name, registry)
+    if verr then print("[-] " .. verr); os.exit(1) end
     local best = resolve_version(vers, constraint)     -- newest satisfying constraint
     local latest = vers[1]                             -- newest overall
     if best and best ~= cur then
@@ -2129,10 +2240,16 @@ elseif cmd == "update" then
   local registry = reg_arg(parg[3]) or default_registry()
   local deps = read_toml_deps(TOML)
   if not deps then print("[-] no " .. TOML); os.exit(1) end
+  local lock, lockerr = read_lock()
+  if lockerr == "corrupt" then
+    print("[-] " .. LOCK .. " exists but is corrupt/unparseable; refusing to "
+          .. "update because that would destroy the existing pins.")
+    os.exit(1)
+  end
+  lock = lock or {}
   -- resolve the full graph fresh from the (possibly widened) constraints
   local graph, err = resolve_graph(deps, registry)
   if not graph then print("[-] " .. err); os.exit(1) end
-  local lock = read_lock() or {}
   local changed = 0
   -- when updating a single dep, keep the other lock entries untouched
   local newlock = {}
@@ -2158,7 +2275,13 @@ elseif cmd == "gc" then
   -- Prune versioned store dirs (<store>/<name>/<version>) that are neither the
   -- newest installed version of their package nor pinned by the current
   -- project's rover.lock. The flat install is always kept.
-  local lock = read_lock() or {}
+  local lock, lockerr = read_lock()
+  if lockerr == "corrupt" then
+    print("[-] " .. LOCK .. " exists but is corrupt/unparseable; refusing to "
+          .. "garbage-collect versions whose pins are unknown.")
+    os.exit(1)
+  end
+  lock = lock or {}
   local pkgs, p = {}, io.popen('dir /b /ad "' .. STORE .. '" 2>nul')
   if p then for line in p:lines() do if line ~= "" and line ~= ".meta" and safe_name(line) then pkgs[#pkgs + 1] = line end end p:close() end
   local pruned, kept = 0, 0
@@ -2176,16 +2299,18 @@ elseif cmd == "gc" then
       for _, v in ipairs(vers) do
         if v ~= latest and v ~= pinned then
           -- rename aside, then delete: a reader never walks a dying tree
-          local stage = open_staging(STAGE_STORE, "gc")
+          local stage, serr = open_staging(STAGE_STORE, "gc")
           local vdir = STORE .. "\\" .. name .. "\\" .. v
           if stage and sh('move /Y "' .. vdir .. '" "' .. stage .. '\\old" >nul 2>&1') then
             close_staging(stage)
+            print(string.format("  pruned %s v%s", name, v))
+            pruned = pruned + 1
           else
             close_staging(stage)
-            sh('rmdir /S /Q "' .. vdir .. '" >nul 2>&1')
+            print(string.format("  [!] kept %s v%s: atomic detach failed%s",
+                  name, v, serr and (" (" .. serr .. ")") or ""))
+            kept = kept + 1
           end
-          print(string.format("  pruned %s v%s", name, v))
-          pruned = pruned + 1
         else
           kept = kept + 1
         end
@@ -2333,7 +2458,8 @@ elseif cmd == "search" then
   local any = false
   if is_url(registry) then
     -- list package names from the remote index.json
-    local idx = http_body(registry:gsub("/+$", "") .. "/index.json")
+    local idx, idxerr = verified_remote_index(registry)
+    if idxerr then print("[-] " .. idxerr); os.exit(1) end
     if idx then
       local names = {}
       for nm in idx:gmatch('"([%w_%-%.]+)"%s*:%s*%[') do if safe_name(nm) then names[#names + 1] = nm end end
