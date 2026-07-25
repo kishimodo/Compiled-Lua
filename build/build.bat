@@ -23,7 +23,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-pushd %~dp0..
+pushd "%~dp0.."
 make -f build/Makefile %*
 set RC=%ERRORLEVEL%
 popd
