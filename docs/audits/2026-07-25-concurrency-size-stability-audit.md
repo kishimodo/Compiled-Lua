@@ -7,11 +7,13 @@ Rover package manager, and Windows behavior.
 
 ## Executive conclusion
 
-CLua has a strong behavioral baseline: the complete suite passed with
-677 passes, 0 failures, 5 skips, 0 XFAIL, and 0 XPASS. The highest-value next
-step is not to put every compiler phase on a thread. The pipeline has necessary
-barriers, and current code generation contains mutable globals that make naive
-threading unsafe.
+CLua has a broad behavioral suite, but its original 677-pass result was not
+initially load-bearing evidence: the runner could classify a crashing test as
+a skip and accept empty output. The harness now fails closed, checks its own
+classifier, and has revalidated the suite. The highest-value next step is not
+to put every compiler phase on a thread. The pipeline has necessary barriers,
+and current code generation contains mutable globals that make naive threading
+unsafe.
 
 The recommended target is a deterministic dependency scheduler:
 
@@ -23,6 +25,50 @@ The recommended target is a deterministic dependency scheduler:
 
 Before adding workers, fix the verifier, package-store transactions, build
 dependency tracking, and codegen context isolation.
+
+## Joint implementation status
+
+Codex and Claude Code independently reviewed the same tree, exchanged findings
+through the optional local MCP mailbox, and implemented separate slices in
+isolated Git worktrees. The following issues found during that review are fixed
+on `codex/concurrency-size-stability`:
+
+- compiler outputs are staged beside the destination, flushed, and atomically
+  replaced with bounded Windows sharing-violation retries;
+- the test harness fails on crashes, empty output, missing watchdog protection,
+  and invalid skip classification;
+- Rover uses private staging, per-package cross-process locks, immutable
+  version directories, atomic metadata replacement, rollback, and recursive
+  flat-view refresh;
+- Rover rejects corrupt locks instead of silently discarding pins, verifies
+  signed remote indexes before selection, and hashes version-shaped package
+  directories correctly;
+- compiler and interpreter lockfile resolution reject malicious version path
+  segments, and the compiler no longer truncates lockfiles at 32 KB;
+- `OP_SELF` preserves Lua 5.4's constant/register `k` bit, covered by a
+  greater-than-255-constants conformance case at every optimization level;
+- the internal linker validates relocation widths/ranges and no longer emits a
+  64-bit base relocation over an `ADDR32` patch site;
+- build entry scripts quote their workspace root for OneDrive and other paths
+  containing spaces.
+
+The transactional Rover work deliberately does not claim power-loss durability
+without an OS-level directory flush, whole-directory atomicity for the legacy
+flat compatibility view, or safe global garbage collection across unrelated
+projects. Those require the content-addressed/reference-tracked store design
+described below.
+
+Final verification on this branch:
+
+- complete fail-closed suite: 682 pass, 0 fail, 5 expected skips, 0 XFAIL,
+  0 XPASS;
+- differential fuzz smoke: 55 seeds across O1/O2/O3, with zero divergence and
+  zero oracle failures;
+- concurrent compiler stress: 16 simultaneous builds (8 sharing one output and
+  8 using distinct outputs), all exited zero; all 9 published executables were
+  valid, produced `ok 300`, and had one identical SHA-256;
+- two sequential builds with the same invocation produced identical SHA-256
+  output.
 
 ## Measured baseline
 
@@ -83,25 +129,30 @@ Implement structural checks appropriate to memory-form IR now, add stronger
 SSA checks if/when SSA exists, and invoke verification after every mutating
 pass in debug/test builds and at the final boundary in release builds.
 
-### 3. Make Rover installs transactional and cross-process safe
+### 3. Make Rover installs transactional and cross-process safe (implemented)
 
-`rover/src/rover.lua` uses predictable staging paths such as
-`%TEMP%\rover-fetch\<name>\<version>`, deletes them before use, writes directly
-into the global store, and updates manifests/locks without a lock or atomic
+The original `rover/src/rover.lua` used predictable staging paths such as
+`%TEMP%\rover-fetch\<name>\<version>`, deleted them before use, wrote directly
+into the global store, and updated manifests/locks without a lock or atomic
 rename (around lines 940–987 and 1231 onward).
 
-Two Rover processes can delete each other's downloads, observe partial trees,
+Two Rover processes could delete each other's downloads, observe partial trees,
 overwrite manifests, or produce a lock that describes different bytes.
 
-Required design:
+Implemented design:
 
 - random per-operation staging directories;
 - per-package/version named locks with bounded waits and owner diagnostics;
 - download + verify entirely in staging;
 - atomic directory publish/rename;
-- atomic lock/manifest writes (`temp`, flush, replace);
+- atomic lock/manifest writes (`temp`, replace);
 - immutable version directories;
 - recovery/cleanup of abandoned staging by age.
+
+The implementation also verifies complete staged trees, rolls back a failed
+version-directory replacement, and prevents a retiring lock owner from deleting
+a successor's lock. Remaining durability and legacy-flat-view limits are listed
+in the joint status above.
 
 ### 4. Do not let one project's GC/delete break other projects
 
@@ -114,16 +165,13 @@ either scan a durable global lease/reference database or be explicitly
 conservative. `remove` should change the current project manifest/lock, not
 delete shared content immediately.
 
-### 5. Make output publication atomic
+### 5. Make output publication atomic (implemented)
 
-The internal linker opens the final output path with `fopen(..., "wb")` and
-writes it directly (`clua/src/link/pe_emit.c`, around lines 1900–1903).
-Interrupted builds, concurrent builds to one path, OneDrive sync, indexers, and
-antivirus can observe or retain a partial executable.
-
-Write beside the target under a unique name, flush and close it, then use a
-Windows atomic replace/rename. Report sharing violations with the owning path
-and retry only a small bounded set of transient errors.
+The link orchestrator now gives the emitter a unique sibling temporary path,
+flushes and closes it, calls `FlushFileBuffers`, and publishes with
+`MoveFileExA(REPLACE_EXISTING | WRITE_THROUGH)`. Bounded retry covers sharing,
+lock, and access-denied errors commonly caused by antivirus, indexers, and sync
+clients. The path guard reserves space for the generated suffix.
 
 ## P1: highest-return size and speed work
 
@@ -260,11 +308,30 @@ structured errors. Never run arbitrary unbounded `curl` processes per file.
 - `clua run --shared-rt` should locate/stage the required runtime DLL
   automatically or emit a precise remediation.
 
+## Cross-review refinements
+
+The independent second pass changed the priority of several performance items:
+
+- `emit_store_savedpc` emits roughly 30 bytes before most potentially throwing
+  bytecodes, repeatedly walking stable `L -> ci -> closure -> Proto -> code`
+  state. Hoisting that state can remove more native code than literal-scan
+  cleanup alone.
+- `gsym_find` and relocation target lookup repeatedly scan global symbols and
+  contributions, making important internal-linker paths quadratic. Indexed
+  lookup should precede linker threading.
+- `-O2` and `-O3` currently produce the same Rover size as `-O1`; the measured
+  `-O1` growth is primarily multi-arm code generation rather than meaningful
+  higher-level optimization. A separate `-Oz` contract is preferable to
+  promising that all `-O` levels reduce size.
+- precise feature-use analysis remains correct work, but the string library is
+  also conservatively enabled by common table/field opcodes. Its isolated size
+  benefit must therefore be remeasured after each gate is made precise.
+
 ## Rover-specific correctness and security gaps
 
-- The flat “latest” copy is updated with non-recursive `xcopy` and is not
-  cleared first. Nested files may be omitted and files removed in a newer
-  version may remain stale. Publish a complete staged tree atomically.
+- The flat compatibility view is now recursively refreshed and stale files are
+  removed, but its per-file publication cannot become whole-directory atomic
+  without changing the current store layout.
 - Remote index and package files are fetched serially; the same index may be
   fetched repeatedly. Cache metadata per command and download with bounded
   concurrency.
@@ -275,8 +342,8 @@ structured errors. Never run arbitrary unbounded `curl` processes per file.
   refetched from the lock. Record and fetch an immutable commit/tree digest.
 - Add size limits, file-count limits, timeouts, and cancellation to remote
   fetch and extraction paths.
-- Compiler-side lock lookup reads a fixed 32 KB buffer; large lockfiles can be
-  truncated. Parse the complete lockfile with the same strict parser/schema.
+- Compiler-side lock lookup now reads the complete lockfile (bounded at 16 MB),
+  scopes a version lookup to its package entry, and validates the path segment.
 
 ## Test additions required before claiming extreme Windows stability
 
@@ -295,15 +362,25 @@ structured errors. Never run arbitrary unbounded `curl` processes per file.
 
 ## Recommended delivery order
 
-1. Verifier + codegen context isolation + deterministic IDs.
-2. Atomic compiler output and Rover store/lock transactions.
-3. Build dependency tracking and parallel build-system jobs.
-4. Precise feature/library-use analysis for the immediate size reduction.
-5. `-Oz` lowering: imm32 helper args, selective prologues, outlined slow paths.
-6. Rover solve/fetch/verify/install phase split with bounded concurrency.
-7. Parallel compiler local phases and archive-load overlap.
-8. Incremental cache/build-server mode.
-9. UTF-16 long-path/process/filesystem layer and full Windows fault matrix.
+1. Correctness/security fixes: `OP_SELF`, lock-version traversal, relocation
+   validation, fail-closed tests (implemented).
+2. Atomic compiler output and Rover store/lock transactions (implemented).
+3. Replace the linker's repeated linear symbol/contribution scans with indexed
+   lookups. The warm build is link-dominated; take this single-threaded win
+   before adding synchronization.
+4. Hoist stable `CallInfo`/`Proto` state used by `emit_store_savedpc`; this is
+   the largest code-volume opportunity identified by the second review.
+5. Add golden byte-identity/reproducibility gates, then implement `-Oz`
+   lowering: imm32 helper arguments, selective prologues, and outlined slow
+   paths. Make `-O2`/`-O3` behavior honest or implement their advertised work.
+6. Implement the optimizer verifier, codegen context isolation, deterministic
+   IDs, build dependency tracking, and safe parallel build-system jobs.
+7. Split Rover solve/fetch/verify/install, add a real backtracking solver, and
+   use bounded concurrent fetch/verification.
+8. Parallelize compiler-local work and overlap immutable archive-index loading;
+   keep deterministic barriers for layout and publication.
+9. Add incremental cache/build-server mode, then the UTF-16
+   long-path/process/filesystem layer and complete Windows fault matrix.
 
 Each slice must retain byte-identical oracle behavior, deterministic output
 across job counts, and a green full suite.
