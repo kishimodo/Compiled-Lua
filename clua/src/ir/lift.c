@@ -325,6 +325,17 @@ void lc_lift_func(LcFunc *f) {
         break;
       }
 
+      /* ---- SELF A B C k: C is a constant only while it fits MAXARG_C.
+              With >255 constants luaK_exp2K materializes the method-name in a
+              register and clears k. Preserve that distinction with the same
+              Ck encoding used by SETTABLE-family value operands. ---- */
+      case OP_SELF: {
+        int Carg = GETARG_C(i);
+        B = GETARG_B(i);
+        C = GETARG_k(i) ? -Carg - 1 : Carg;
+        break;
+      }
+
       /* ---- closures & upvalues (Plan 3) ----
               CLOSURE A Bx: a=A, b=Bx (index into P->p). GETUPVAL/SETUPVAL A B:
               a=A, b=B (upvalue index). VARARG A C: a=A, b=C (codegen converts

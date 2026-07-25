@@ -1479,10 +1479,14 @@ int Rt_TForLoop( lua_State *L, int A ) {
     return 0;  /* loop done */
 }
 
-int Rt_Self( lua_State *L, int A, int B, int C ) {
+int Rt_Self( lua_State *L, int A, int B, int Ck ) {
     StkId         Base = L->ci->func.p + 1;
-    TValue       *Key  = &clLvalue( s2v( L->ci->func.p ) )->p->k[ C ];
+    LClosure     *Cl   = clLvalue( s2v( L->ci->func.p ) );
+    int           C, K;
+    TValue       *Key;
     const TValue *Slot = { 0 };
+    DecodeCk( Ck, &C, &K );
+    Key = K ? &Cl->p->k[ C ] : s2v( Base + C );
     /* setobj2s for R[A+1] = R[B] (do this FIRST so a subsequent table-get
        can't observe a stale R[A+1] if the table is the same as R[A]) */
     setobj2s( L, Base + A + 1, s2v( Base + B ) );

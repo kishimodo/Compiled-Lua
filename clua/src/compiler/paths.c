@@ -121,6 +121,24 @@ static int FormatVersionedInitPath( const char *Base, const char *Module,
     return 1;
 }
 
+/* Rover versions become path segments. Keep this validator independent of the
+   lock parser so a checked-in lockfile can never smuggle separators, drive
+   prefixes, or `..` into the compiler's source lookup. */
+static int LockedVersionOk( const char *S, size_t Len ) {
+    size_t I;
+    if ( S == NULL || Len == 0 || Len > 64 ) { return 0; }
+    if ( S[ 0 ] == '.' || S[ 0 ] == '-' ) { return 0; }
+    for ( I = 0; I < Len; I++ ) {
+        unsigned char C = ( unsigned char )S[ I ];
+        int Allowed = ( C >= 'a' && C <= 'z' ) || ( C >= 'A' && C <= 'Z' )
+                   || ( C >= '0' && C <= '9' ) || C == '_' || C == '.'
+                   || C == '+' || C == '-';
+        if ( !Allowed ) { return 0; }
+        if ( C == '.' && I + 1 < Len && S[ I + 1 ] == '.' ) { return 0; }
+    }
+    return 1;
+}
+
 /* Find <ModuleName>'s pinned version in <LockDir>/rover.lock (the project
    lockfile, next to the source being compiled). Scans the `rover`-generated
    `["<name>"] = { version = "X", ... }` format with a targeted string search
@@ -130,34 +148,63 @@ static int Paths_LockedVersion( const char *LockDir, const char *ModuleName,
     char  LockPath[ 512 ];
     const char *Dir = ( LockDir != NULL && LockDir[ 0 ] != '\0' ) ? LockDir : ".";
     FILE *F;
-    char  Buf[ 32768 ];
+    char *Buf = NULL;
     char  Key[ 280 ];
-    char *P, *V, *Q1, *Q2;
+    char *P, *End, *V, *T, *Q1 = NULL, *Q2;
+    long FileSize;
     size_t N, Len;
+    int Result = 0;
 
     if ( snprintf( LockPath, sizeof( LockPath ), "%s/rover.lock", Dir ) >= ( int )sizeof( LockPath ) ) { return 0; }
     F = fopen( LockPath, "rb" );
     if ( F == NULL ) { return 0; }
-    N = fread( Buf, 1, sizeof( Buf ) - 1, F );
+    if ( fseek( F, 0, SEEK_END ) != 0 || ( FileSize = ftell( F ) ) < 0
+         || FileSize > 16 * 1024 * 1024 || fseek( F, 0, SEEK_SET ) != 0 ) {
+        fclose( F );
+        return 0;
+    }
+    Buf = ( char * )malloc( ( size_t )FileSize + 1 );
+    if ( Buf == NULL ) { fclose( F ); return 0; }
+    N = fread( Buf, 1, ( size_t )FileSize, F );
+    if ( N != ( size_t )FileSize || ferror( F ) ) {
+        fclose( F );
+        free( Buf );
+        return 0;
+    }
     fclose( F );
     Buf[ N ] = '\0';
 
     /* exact key token `["<name>"]` (the closing "] makes prefix names safe) */
-    if ( snprintf( Key, sizeof( Key ), "[\"%s\"]", ModuleName ) >= ( int )sizeof( Key ) ) { return 0; }
+    if ( snprintf( Key, sizeof( Key ), "[\"%s\"]", ModuleName ) >= ( int )sizeof( Key ) ) { goto Done; }
     P = strstr( Buf, Key );
-    if ( P == NULL ) { return 0; }
-    V = strstr( P, "version" );
-    if ( V == NULL ) { return 0; }
-    Q1 = strchr( V, '"' );
-    if ( Q1 == NULL ) { return 0; }
-    Q1++;
+    if ( P == NULL ) { goto Done; }
+    End = strchr( P, '}' );
+    if ( End == NULL ) { goto Done; }
+    V = P;
+    while ( ( V = strstr( V, "version" ) ) != NULL && V < End ) {
+        int PrevOk = V == P || V[ -1 ] == '{' || V[ -1 ] == ','
+                  || V[ -1 ] == ' ' || V[ -1 ] == '\t'
+                  || V[ -1 ] == '\r' || V[ -1 ] == '\n';
+        T = V + 7;
+        while ( T < End && ( *T == ' ' || *T == '\t' || *T == '\r' || *T == '\n' ) ) { T++; }
+        if ( PrevOk && T < End && *T == '=' ) {
+            T++;
+            while ( T < End && ( *T == ' ' || *T == '\t' || *T == '\r' || *T == '\n' ) ) { T++; }
+            if ( T < End && *T == '"' ) { Q1 = T + 1; break; }
+        }
+        V += 7;
+    }
+    if ( Q1 == NULL ) { goto Done; }
     Q2 = strchr( Q1, '"' );
-    if ( Q2 == NULL ) { return 0; }
+    if ( Q2 == NULL || Q2 > End ) { goto Done; }
     Len = ( size_t )( Q2 - Q1 );
-    if ( Len == 0 || Len >= VerSize ) { return 0; }
+    if ( Len >= VerSize || !LockedVersionOk( Q1, Len ) ) { goto Done; }
     memcpy( VerOut, Q1, Len );
     VerOut[ Len ] = '\0';
-    return 1;
+    Result = 1;
+Done:
+    free( Buf );
+    return Result;
 }
 
 /* Installed-package store: $CLUA_HOME/packages, else %LOCALAPPDATA%/clua/
