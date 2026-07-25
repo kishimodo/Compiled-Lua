@@ -70,6 +70,64 @@ static void set_errv( char *err, size_t errlen, const char *fmt, ... ) {
 
 #define LC_PATH_MAX 1024
 
+/* Link into a unique file beside the requested output, then replace the
+** destination only after the linker has closed a complete PE. Keeping the
+** staging file in the destination directory makes MoveFileEx an atomic,
+** same-volume publication step and preserves an older good binary when a
+** build is interrupted or the linker fails after opening its output. */
+static int MakeStagedOutput( const char *out_path, char staged[ MAX_PATH ],
+                             char *err, size_t errlen ) {
+    char  full[ LC_PATH_MAX ];
+    char *slash;
+    DWORD n;
+
+    n = GetFullPathNameA( out_path, ( DWORD )sizeof( full ), full, NULL );
+    if ( n == 0 || n >= sizeof( full ) ) {
+        set_errv( err, errlen,
+                  "cannot resolve output directory for '%s' (Win32 error %lu)",
+                  out_path, ( unsigned long )GetLastError( ) );
+        return 0;
+    }
+
+    slash = strrchr( full, '\\' );
+    if ( slash == NULL ) slash = strrchr( full, '/' );
+    if ( slash == NULL ) {
+        set_errv( err, errlen, "output path has no directory: %s", out_path );
+        return 0;
+    }
+    /* Preserve C:\ rather than turning the volume root into drive-relative C:. */
+    if ( slash == full + 2 && full[1] == ':' ) slash[1] = '\0';
+    else                                        *slash = '\0';
+
+    if ( strlen( full ) >= MAX_PATH ) {
+        set_errv( err, errlen,
+                  "output directory is too long for the current Windows path "
+                  "backend: %s", full );
+        return 0;
+    }
+    if ( GetTempFileNameA( full, "clu", 0, staged ) == 0 ) {
+        set_errv( err, errlen,
+                  "cannot create staging file beside '%s' (Win32 error %lu)",
+                  out_path, ( unsigned long )GetLastError( ) );
+        return 0;
+    }
+    return 1;
+}
+
+static int PublishStagedOutput( const char *staged, const char *out_path,
+                                char *err, size_t errlen ) {
+    if ( MoveFileExA( staged, out_path,
+                      MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH ) ) {
+        return 1;
+    }
+    set_errv( err, errlen,
+              "cannot publish completed output '%s' (Win32 error %lu); "
+              "the previous output was preserved",
+              out_path, ( unsigned long )GetLastError( ) );
+    DeleteFileA( staged );
+    return 0;
+}
+
 typedef struct {
     char runtime_a[ LC_PATH_MAX ];    /* runtime-aot.a                        */
     char lualib_a[ LC_PATH_MAX ];     /* liblua54-embedded.a                  */
@@ -296,6 +354,7 @@ int LuacLink_LinkProgram( const char *userObj, const char *outExe,
                           int shared_rt, int ld_internal, int no_gc_sections,
                           char *err, size_t errlen ) {
     char        cmd[ 4096 ];
+    char        staged_out[ MAX_PATH ];
     char        entry_obj[ LC_PATH_MAX ];
     char        lvm_obj[ LC_PATH_MAX + 4 ];
     char        libundef[ 512 ];   /* -Wl,--undefined= for each used stdlib anchor */
@@ -382,9 +441,14 @@ int LuacLink_LinkProgram( const char *userObj, const char *outExe,
     ** Static link only (shared_rt stays on the gcc path; the DLL build needs
     ** the import-lib + auto-import pseudo-reloc machinery gcc provides). */
     if ( use_internal && !shared_rt ) {
-        return LinkInternal( &tc, userObj, outExe, entry_obj,
-                             no_interp, require_ffi, used_libs, no_gc_sections,
-                             err, errlen );
+        if ( !MakeStagedOutput( outExe, staged_out, err, errlen ) ) return 0;
+        if ( !LinkInternal( &tc, userObj, staged_out, entry_obj,
+                            no_interp, require_ffi, used_libs, no_gc_sections,
+                            err, errlen ) ) {
+            DeleteFileA( staged_out );
+            return 0;
+        }
+        return PublishStagedOutput( staged_out, outExe, err, errlen );
     }
 
     /* ---- the shared-runtime link (--shared-rt) ----
@@ -409,21 +473,23 @@ int LuacLink_LinkProgram( const char *userObj, const char *outExe,
            stdlib anchors do NOT trigger MinGW auto-import, so force-undef the
            used ones to pull their import thunks (otherwise &Clua_OpenStrlib is
            null and the library is never opened). */
+        if ( !MakeStagedOutput( outExe, staged_out, err, errlen ) ) return 0;
         snprintf( cmd, sizeof( cmd ),
                   "%s -o \"%s\" \"%s\" \"%s\" \"%s\" %s%s\"%s\" "
                   "-Wl,--subsystem,console -s -lm -lkernel32 -ladvapi32",
-                  GccCommand( ), outExe, userObj, entry_obj, tc.protoinit_o,
+                  GccCommand( ), staged_out, userObj, entry_obj, tc.protoinit_o,
                   require_ffi ? "-Wl,--undefined=Clua_OpenFfi " : "",
                   libundef,
                   tc.rt_implib );
         rc = run_cmd( cmd );
         if ( rc != 0 ) {
+            DeleteFileA( staged_out );
             set_errv( err, errlen,
                       "shared-rt link failed (gcc rc=%d; is MinGW-w64 gcc on "
                       "PATH, or set CLUA_GCC): %s", rc, cmd );
             return 0;
         }
-        return 1;
+        return PublishStagedOutput( staged_out, outExe, err, errlen );
     }
 
     /* Interpreter selection: a program whose closed-world scan proves it
@@ -448,21 +514,23 @@ int LuacLink_LinkProgram( const char *userObj, const char *outExe,
     ** unreferenced functions (both archives are -ffunction-sections; lib
     ** registration tables live in .rdata and keep every reachable lib
     ** function alive). */
+    if ( !MakeStagedOutput( outExe, staged_out, err, errlen ) ) return 0;
     snprintf( cmd, sizeof( cmd ),
               "%s -o \"%s\" \"%s\" \"%s\" %s%s%s\"%s\" \"%s\" "
               "-Wl,--subsystem,console -Wl,--gc-sections -s "
               "-lm -lkernel32 -ladvapi32",
-              GccCommand( ), outExe, userObj, entry_obj, lvm_obj,
+              GccCommand( ), staged_out, userObj, entry_obj, lvm_obj,
               require_ffi ? "-Wl,--undefined=Clua_OpenFfi " : "",
               libundef,
               tc.runtime_a, tc.lualib_a );
     rc = run_cmd( cmd );
     if ( rc != 0 ) {
+        DeleteFileA( staged_out );
         set_errv( err, errlen,
                   "link failed (gcc rc=%d; is MinGW-w64 gcc on PATH, or set "
                   "CLUA_GCC): %s", rc, cmd );
         return 0;
     }
 
-    return 1;
+    return PublishStagedOutput( staged_out, outExe, err, errlen );
 }
