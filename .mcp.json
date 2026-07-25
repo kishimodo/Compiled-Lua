@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "clua-coordination": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["tools/agent-coordination/server.py"],
+      "env": {}
+    }
+  }
+}

@@ -1,5 +1,10 @@
 # CLua (LuaC) — working notes
 
+> **Joint Codex sessions:** use a separate `claude/<task>` worktree and the
+> optional `clua-coordination` MCP mailbox. Read `AGENTS.md` and
+> `tools/agent-coordination/README.md`. The mailbox is not needed for ordinary
+> Claude-only sessions.
+>
 > **This is CLua, the standalone AOT-compiled Lua 5.4 language.** There is no
 > JIT anywhere in the tree. Read [`README.md`](README.md) for status and
 > [`PROMPT.md`](PROMPT.md) for the build spec (mission, locked decisions, IR,

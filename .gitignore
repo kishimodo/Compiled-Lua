@@ -11,3 +11,6 @@ dist/
 luac.out
 clua-v*.zip
 clua-v*.zip.sha256
+.coordination/
+agent-coordination.sqlite3*
+__pycache__/
