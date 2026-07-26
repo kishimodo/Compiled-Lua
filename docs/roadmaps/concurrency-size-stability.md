@@ -43,7 +43,7 @@ above stays as the strategic order.
 | 4 | Pin the system `tar` in the test runner | done | pinned at the call site; case C7 proves PATH immunity, and reverting the pin fails only that case |
 | 5 | **imm32 helper-call arguments** | done | **-73,216 bytes** measured (-12.0% of Rover's `.text`, -9.9% whole file), against a 73,124 prediction; hello unchanged. Unconditional, not behind `-Oz`. [`helper-call-args.md`](../benchmarks/helper-call-args.md) |
 | 6 | **Hash the archive symbol index** | done | **-52% warm build** (rover -O1 180->87 ms, hello 153->76 ms); 41,058,508 name compares -> 21,537 with every resolution count bit-identical; output byte-identical. [`archive-symbol-lookup.md`](../benchmarks/archive-symbol-lookup.md) |
-| 7 | `-MMD -MP` header dependencies | open | removes the documented stale-object trap that yields silent empty-output binaries |
+| 7 | `-MMD -MP` header dependencies | done | touching `ir.h` rebuilds 7 objects including `lift.o`; a struct-layout change in `ar_read.h` rebuilds both objects sharing its `sizeof`, where before it rebuilt neither. `tools/test-build-header-deps.lua` |
 | 8 | Codegen context isolation | open | row 6 prerequisite; must follow step 5, same file |
 | 9 | Implement `lc_module_verify` | open | a safety control that only appears active |
 | 10 | Make `-O2`/`-O3` honest | open | `-O1` and `-O2` share SHA-256 `e474660e…0d21bde` |

@@ -122,7 +122,5 @@ full toolchain rebuilds.
 
 Only three files change, so use the single-object A/B recipe in
 [`README.md`](README.md) with
-`clua/src/codegen/{codegen.c,x64_emit.c,x64_emit.h}`. Delete
-`build/bin/obj/{ir,opt,codegen,link,driver}` between arms: the Makefile does not
-track header dependencies, and a stale `lift.o` silently produces empty-output
-binaries.
+`clua/src/codegen/{codegen.c,x64_emit.c,x64_emit.h}`. Header dependencies are
+tracked now, so no manual object wipe is needed between arms.

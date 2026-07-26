@@ -84,10 +84,15 @@ gotcha prints harmless `'x86' is not recognized` noise). The user-facing
 layout: `make -f build/Makefile.luac dist` → `dist\` (clua.exe + rover.exe +
 lib\ + README).
 
-**Gotcha:** changes to `clua/src/ir/ir.h` (or any backend header, e.g.
-`clua/src/codegen/codegen.h`) require wiping the backend objects first
-(`build/bin/obj/{ir,opt,codegen,link,driver}`) — the Makefile does not track
-header dependencies, and stale `lift.o` produces silent empty-output binaries.
+**Header dependencies are tracked** (since the `-MMD -MP` change): editing
+`clua/src/ir/ir.h` or any other header rebuilds exactly the objects that included
+it, so the old "wipe `build/bin/obj/{ir,opt,codegen,link,driver}` first" step is
+no longer needed. Both makefiles append `$(DEPFLAGS)` to their compile-flag
+variables and read the generated `.d` fragments back at the end of the file.
+If you ever want a partial wipe anyway, use `make -f build/Makefile clean-objs`
+(objects *and* fragments) — never `del *.o` alone, which leaves an object
+untracked again. The first build after a fresh clone is still a full one.
+`tools/test-build-header-deps.lua` gates all of this.
 
 **Gotcha:** `clua/src/runtime/aot_entry.c` is precompiled to `build/bin/aot_entry.o`
 by Makefile.luac (target `aot-entry`); the linker prefers that object and only

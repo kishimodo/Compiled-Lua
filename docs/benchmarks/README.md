@@ -107,11 +107,13 @@ When a change touches few files, rebuild only those objects instead of two full
 trees:
 
 1. `git checkout <baseline-ref> -- <the changed files>`;
-2. delete the affected backend objects — `build/bin/obj/{ir,opt,codegen,link,driver}`
-   — because the Makefile does not track header dependencies and a stale object
-   silently produces an empty-output binary;
-3. `cmd /c "build\build-luac.bat"`, measure, then `git checkout HEAD -- <files>`
+2. `cmd /c "build\build-luac.bat"`, measure, then `git checkout HEAD -- <files>`
    and repeat.
+
+Header dependencies are tracked, so step 2 no longer needs the manual object wipe
+this recipe used to require — editing a header rebuilds its dependents. Use
+`make -f build/Makefile clean-objs` if you want a deliberately clean arm; it
+removes objects and fragments together.
 
 For a single-object change (for example `clua/src/link/pe_emit.c`) it is enough
 to recompile that one object with the flags from the build log and relink
