@@ -52,7 +52,18 @@ Four premises were wrong. Do not act on them:
    `luaH_getshortstr` — do *not* inline the hash probe, measured gain from that is
    zero (100–105 ms vs 102 ms). Worth 2.38× on the op. For SETFIELD keep
    `luaV_finishfastset`'s barrier; a missing `luaC_barrierback` is a GC crash.
-3. **Narrow `no_proofs` properly** (see below). Rover itself is losing its proofs.
+3. **Hoist `L->top.p = L->ci->top.p` out of the table helpers' fast path.**
+   Verified and ready, but do it BY HAND — see the warning below. Nine helpers
+   (`Rt_GetI`, `Rt_GetField`, `Rt_GetTable`, `Rt_GetTabUp`, `Rt_Self`, `Rt_SetI`,
+   `Rt_SetField`, `Rt_SetTable`, `Rt_SetTabUp`) each store `L->top` unconditionally
+   before a `luaV_fastget`/`fastgeti` test. **Established: those macros need no
+   `L->top`** — `lvm.h:85-101` shows they are pure raw-access, and
+   `luaV_finishfastset` (`:108-110`) is only `setobj2t` + `luaC_barrierback`. Only
+   `luaV_finishget`/`finishset` need it, because `luaT_callTM*` pushes above the
+   live register window. So the store belongs as the first statement of each `else`.
+   Worth one store per table access across ~4,700 sites in rover; expect a few
+   percent, not more.
+4. **Narrow `no_proofs` properly** (see below). Rover itself is losing its proofs.
 4. Phase 3 Tier 1: bundle `dofile("literal")` and enumerable `require`.
 5. Phase 4 reorganisation, with the build-glob work done first.
 
@@ -72,6 +83,16 @@ and closing it took three attempts, each caught by the test rather than by
 reasoning. If you touch that scanner, keep `tools/test-closed-world.lua`'s
 both-sizes pairing: every banned construct compiled in a small chunk *and* one
 padded past 255 constants. A test using only small chunks is what let it through.
+
+**Do not batch-rewrite these helpers with a regex, and do not trust a count
+invariant to prove a move was correct.** I tried to hoist the `L->top` store with
+one, guarded by "the number of stores must be unchanged". It was: 91 before, 91
+after. It was still wrong — with `re.S` and a lazy body group the match spanned
+*past* the intended function, so `Rt_GetTable` lost its store and the replacement
+landed in a later function's `else`. The count is blind to misplacement, and the
+result would have shipped a metamethod path that pushes over live registers. It was
+caught only by reading `Rt_GetTable` afterwards. Nine explicit edits, each verified
+by reading the function, is the right way.
 
 **`git add -A` is unsafe while subagents have been running.** It swept a probe into
 `933ae67`, and then the commit that removed it swept a *second* probe in the same
