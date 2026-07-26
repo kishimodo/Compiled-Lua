@@ -1985,7 +1985,17 @@ static int emit_pe( Linker *L, const char *out_path, ImportLayout *il ) {
         w16( oh + 68, 3 );                  /* Subsystem = CONSOLE             */
         /* DllCharacteristics: HIGH_ENTROPY_VA|DYNAMIC_BASE|NX_COMPAT|TS_AWARE */
         w16( oh + 70, 0x0020 | 0x0040 | 0x0100 | 0x8000 );
-        w64( oh + 72, 0x200000 );           /* SizeOfStackReserve 2 MB         */
+        /* SizeOfStackReserve 16 MB. AOT code makes a real native call per Lua
+        ** call, so Lua recursion costs native stack -- unlike the interpreter,
+        ** which runs every callee in one C frame. At the previous 2 MB a compiled
+        ** program died between recursion depth 9,000 and 15,000 while the
+        ** interpreter reached 200,000, so this is a FIDELITY setting, not a
+        ** tuning knob. Reserve is address space that Windows commits lazily a
+        ** page at a time (SizeOfStackCommit below stays at 4 KB), so the cost of
+        ** the larger number is nothing until a program actually recurses.
+        ** Rt_Call's stack guard still converts exhaustion into a catchable Lua
+        ** error; this only sets how deep a program gets before that fires. */
+        w64( oh + 72, 0x1000000 );          /* SizeOfStackReserve 16 MB        */
         w64( oh + 80, 0x1000 );             /* SizeOfStackCommit               */
         w64( oh + 88, 0x100000 );           /* SizeOfHeapReserve               */
         w64( oh + 96, 0x1000 );             /* SizeOfHeapCommit                */

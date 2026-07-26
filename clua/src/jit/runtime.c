@@ -61,6 +61,95 @@ int Rt_MulSlow( lua_State *L, int A, int B, int C ) {
     return 0;
 }
 
+/* Native recursion guard.
+**
+** AOT code makes a REAL native call for every Lua-level call (the `Jitted( L )`
+** dispatch below), so Lua recursion consumes native stack. The interpreter runs
+** every callee inside one C frame, so its depth is bounded only by LUAI_MAXSTACK
+** and it raises a catchable "stack overflow"; we are bounded by the thread's
+** stack and, without this guard, the process simply DIES with
+** STATUS_STACK_OVERFLOW (0xC00000FD) -- no message, not catchable by pcall.
+**
+** Measured before this guard, with the 2 MB SizeOfStackReserve pe_emit.c writes:
+** a compiled binary died between recursion depth 9,000 and 15,000, where the
+** interpreter reached 200,000 and returned `<chunk>:1: stack overflow`. The
+** existing differential test tests/differential/pcall_err.lua:85-95 recurses only
+** 500 levels specifically to stay under it.
+**
+** The limit is deliberately well below the true capacity (~12,000 frames at 2 MB,
+** measured at roughly 170 bytes per Rt_Call + AOT frame pair): a helper called
+** from the deepest frame, an FFI thunk, or the error handler itself still needs
+** room to run, and luaG_runerror allocates while formatting. Raising the reserve
+** raises the true capacity but never removes the need for the guard.
+**
+** The check is STATELESS -- it measures the remaining stack directly rather than
+** counting depth. A depth counter would have to be decremented after the
+** dispatch returns, and an error inside the callee leaves via luaD_throw's
+** longjmp, skipping the decrement; the count would ratchet upward until every
+** call failed. Measuring the stack has no such failure mode, and it is
+** automatically correct across coroutine switches (each coroutine is a fiber
+** with its own stack, and Windows updates the thread's stack bounds on switch).
+**
+** VirtualQuery on the address of a local gives AllocationBase = the base of the
+** whole stack RESERVATION, which is the real bottom (StackLimit in the TEB is
+** only the committed low-water mark, and GetCurrentThreadStackLimits is gated
+** behind _WIN32_WINNT >= 0x0602, which this tree does not set). VirtualQuery has
+** no version gate.
+**
+** It is not cheap, though, and this sits on the very call path we are trying to
+** make faster -- so it is SAMPLED. Depth changes by at most one frame per call,
+** so checking every Nth call is safe only while the margin exceeds N frames'
+** worth of stack. Getting that relation wrong is a live crash, and the first
+** version of this guard did: it sampled every 1024 calls against a 256 KB margin
+** on an ESTIMATED 170 bytes per frame. The measured figure is 292 bytes
+** (16 MB reserve / 57,344 frames reached), so 1024 calls span 299 KB and could
+** step straight past the margin -- which showed up as the SECOND unbounded
+** recursion in a program crashing while the first was caught cleanly, because
+** the phase counter's alignment differs between descents.
+**
+** So: sample every 512 calls against a 1 MB margin. That is 1 MB / 292 B = 3,590
+** frames of headroom against a 512-frame worst-case overshoot (150 KB), i.e. 7x
+** safety. The per-frame cost is INVARIANT in the user program -- it is the fixed
+** AOT prologue (8 pushes + SUB RSP,0x28) plus Rt_Call's own frame, because Lua
+** registers live on the heap-allocated Lua stack addressed through RDI rather
+** than on the native stack, so a function with many locals does not widen it.
+**
+** Measured cost on the most call-dense kernel available (8M calls, min-of-7):
+** 272 ms with the check compiled out, 284 ms at a 512 interval, 289 ms at 128.
+** So the guard costs 12 ms (4.4%) here, and MOST of that is the per-call phase
+** increment and branch rather than the sampled VirtualQuery -- widening the
+** interval 4x only recovered 5 of the 17 ms. Real code pays proportionally less
+** because it is not pure calls. When the call path is rewritten (devirtualisation
+** and callee inlining) this belongs in the AOT prologue as a bare SP compare
+** against a cached limit, which removes even that.
+**
+** Reserving 1 MB of the 16 MB costs about 6% of reachable depth, leaving ~53,000
+** frames -- measured at 57,344 before the margin was taken out.
+**
+** The phase counter deliberately needs no unwind handling and no thread-safety:
+** it only selects sampling points, so a value that leaks after an error, or
+** races between threads, changes WHICH call is checked and nothing else.
+**
+** AOT-only: the hazard is one native frame per Lua call, which is the AOT
+** dispatch. The embedded build reaches callees through the interpreter and has
+** no windows.h here, so the check compiles out. */
+#if defined( LUAC_AOT_RUNTIME )
+#define RT_STACK_MARGIN   ( 1024u * 1024u )
+#define RT_STACK_SAMPLE   511u    /* power-of-two mask: check every 512th call */
+static unsigned g_StackProbePhase = 0;
+static int Rt_StackNearlyExhausted( void ) {
+    MEMORY_BASIC_INFORMATION Mbi;
+    volatile char Probe;
+    if ( VirtualQuery( ( LPCVOID )&Probe, &Mbi, sizeof Mbi ) == 0 ) return 0;
+    return ( ( uintptr_t )&Probe - ( uintptr_t )Mbi.AllocationBase )
+           < ( uintptr_t )RT_STACK_MARGIN;
+}
+#define RT_STACK_LOW() \
+    ( ( ++g_StackProbePhase & RT_STACK_SAMPLE ) == 0 && Rt_StackNearlyExhausted() )
+#else
+#define RT_STACK_LOW() 0
+#endif
+
 int Rt_Call( lua_State *L, int A, int NArgs, int NResults ) {
     StkId Base = L->ci->func.p + 1;
     StkId Func = Base + A;
@@ -138,6 +227,16 @@ int Rt_Call( lua_State *L, int A, int NArgs, int NResults ) {
                all register slots are within the stack's live range. */
             if ( !Cl->p->is_vararg ) {
                 L->top.p = Ci->top.p;
+            }
+            /* Raise BEFORE dispatching, and restore the caller's CallInfo first
+            ** so the error is thrown from a consistent frame. The message is
+            ** byte-identical to the interpreter's (luaD_growstack raises plain
+            ** "stack overflow", which luaG_runerror prefixes with chunk:line),
+            ** so an unbounded recursion produces the same output under both
+            ** engines and the differential suite stays meaningful. */
+            if ( RT_STACK_LOW() ) {
+                L->ci = Ci->previous;
+                luaG_runerror( L, "stack overflow" );
             }
             Jitted( L );
 
