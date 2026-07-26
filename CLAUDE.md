@@ -23,7 +23,9 @@
 > optimizer, codegen, PE emission, FFI rules, testing, milestones).
 >
 > **The product is `clua.exe`** (subcommands `build`/`run`/`check`/`version`,
-> `-O2` default (whole-program), output name derived from the input; relocatable — finds its
+> `-O2` default — but `-O2` emits the same bytes as `-O1` today, and `clua help`
+> now says so per level; `-Os`/`-Oz` are rejected, not silently treated as `-O0`),
+> output name derived from the input; relocatable — finds its
 > runtime libs next to the exe or via `CLUA_HOME`), plus **`rover.exe`**, the
 > package manager, itself a CLua-compiled closed-world program built from
 > `rover/src/rover.lua` (project files: `rover.toml`/`rover.lock`;
