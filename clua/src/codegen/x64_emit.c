@@ -123,6 +123,12 @@ int X64Emit_MovMemToReg( LcCodeBuf *Buf, X64_GPR_T Dst,
     return EmitMemOp( Buf, 0x8B, Lo3( Dst ), IsHi( Dst ), Base, Disp, 1 );
 }
 
+int X64Emit_LeaRegMem( LcCodeBuf *Buf, X64_GPR_T Dst,
+                       X64_GPR_T Base, int32_t Disp ) {
+    /* 0x8D /r  LEA r64, [Base + Disp] */
+    return EmitMemOp( Buf, 0x8D, Lo3( Dst ), IsHi( Dst ), Base, Disp, 1 );
+}
+
 int X64Emit_MovRegToMem( LcCodeBuf *Buf, X64_GPR_T Base, int32_t Disp,
                          X64_GPR_T Src ) {
     /* 0x89 /r  MOV r/m64, r64 */

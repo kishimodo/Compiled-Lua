@@ -54,6 +54,55 @@
 static int g_lc_opt_level = 0;
 
 /* ------------------------------------------------------------------ */
+/* savedpc base register (LUAC-001 size fix).                          */
+/*                                                                      */
+/* Every throw-capable op used to re-walk L -> ci -> func -> LClosure   */
+/* -> Proto -> code (5 loads + add + store = 29 bytes) just to publish  */
+/* ci->u.l.savedpc. Four of those five loads read state that is         */
+/* CONSTANT for the whole frame:                                        */
+/*                                                                      */
+/*   INVARIANT (savedpc base). For one activation of one compiled body, */
+/*   clLvalue(s2v(L->ci->func.p))->p->code is a fixed address.          */
+/*     - The body is only ever entered at its entry point: ldo.c ccall  */
+/*       and lvm.c luaV_execute both call jitted(L) right after         */
+/*       luaD_precall set L->ci, and nothing resumes a native body      */
+/*       mid-stream (a native frame has no saved context), so the       */
+/*       prologue always runs first for the value it caches.            */
+/*     - The running closure at ci->func never changes during the frame */
+/*       (OP_VARARGPREP slides ci->func.p and a stack realloc rewrites  */
+/*       it, but both keep pointing at the SAME LClosure object; that   */
+/*       is exactly why RDI is reloaded and RBX is not).                */
+/*     - Proto.code is allocated once when the Proto is built (here: by */
+/*       protoinit_rt at startup) and is never reallocated or freed     */
+/*       while a frame of it is live.                                   */
+/*   OP_TAILCALL rebinds ci to a different closure, but the body        */
+/*   returns immediately after it, so no cached value is reused.        */
+/*                                                                      */
+/* So the prologue computes it once into RBP (the one callee-saved GPR  */
+/* nothing else in the backend uses; R12-R15/RSI belong to the M1 loop  */
+/* residency cache) and each site collapses to                          */
+/*     mov rax, [rbx + L.ci] ; lea r11, [rbp + d] ; mov [rax+pc], r11   */
+/* = 15 bytes, or 12 when d fits in a disp8.                            */
+/*                                                                      */
+/* RBP is biased by g_savedpc_bias so that d = 4*(pc+1) - bias is       */
+/* CENTERED on zero across the function: for a body of <= 63 bytecodes  */
+/* every site then reaches the 3-byte-shorter disp8 encoding, and for   */
+/* longer bodies the middle 63 do. The bias is a compile-time constant  */
+/* applied identically in the prologue and at every site, so the stored */
+/* pointer is bit-identical to the unbiased P->code + (pc+1).           */
+/* ------------------------------------------------------------------ */
+static int32_t g_savedpc_bias = 0;
+
+/* Displacement window is [4 - bias, 4*sizecode - bias]; centering it costs a
+   one-off LEA in the prologue and is pointless when 4*sizecode already fits
+   in a disp8 (sizecode <= 31). Rounded to an instruction so every site's
+   displacement stays a multiple of 4. */
+static int32_t lc_savedpc_bias_for( int sizecode ) {
+    if ( sizecode <= 31 ) return 0;
+    return ( int32_t )( 4 * ( ( sizecode + 1 ) / 2 ) );
+}
+
+/* ------------------------------------------------------------------ */
 /* Frame scaffolding — faithful port of the v1 JIT's prologue/epilogue  */
 /* emitters (that compiler has since been removed from the tree),       */
 /* retargeted onto X64Emit_*(B,...). The ONLY M0 deviation: skip the    */
@@ -66,11 +115,11 @@ static int g_lc_opt_level = 0;
 /*!
  * @brief
  *  Emit the function prologue. Saves all callee-saved registers we use, sets
- *  up RBX = L and RDI = ci->func.p + 16 (= ci->func.p + 1 TValue, the Lua
- *  register base).
+ *  up RBX = L, RDI = ci->func.p + 16 (= ci->func.p + 1 TValue, the Lua
+ *  register base) and RBP = P->code + g_savedpc_bias (the savedpc base).
  *
- *  Stack layout: 7 pushes (56 bytes) + return address (8) = 64.
- *  sub rsp, 0x20 (32) -> 96 total, which is 16-aligned at calls.
+ *  Stack layout: 8 pushes (64 bytes) + return address (8) = 72.
+ *  sub rsp, 0x28 (40) -> 112 total, which is 16-aligned at calls.
  */
 /* Float-residency constants needed by the prologue/epilogue (the full
    definitions of the residency machinery follow the lowering section). */
@@ -88,10 +137,14 @@ int LcCg_EmitPrologue( LcCodeBuf *B ) {
     if ( !X64Emit_PushReg( B, X64_R14 ) ) return 0;
     if ( !X64Emit_PushReg( B, X64_R15 ) ) return 0;
     if ( !X64Emit_PushReg( B, X64_RSI ) ) return 0;
-    /* 7 pushes = 56 bytes; with return address (8) = 64; +0x20 shadow = 96, 16-aligned */
+    /* RBP: the savedpc base register (see the INVARIANT block above). Pushed
+       last so RDI stays the first push / last pop. */
+    if ( !X64Emit_PushReg( B, X64_RBP ) ) return 0;
+    /* 8 pushes = 64 bytes; with return address (8) = 72; +0x28 = 112, 16-aligned */
     /* xmm6..xmm10 are Win64 callee-saved (full 128 bits); save them only when
        this function uses float residency (g_res_fn_xmm, set by res_analyze
-       before the prologue is emitted). 5*16 = 80 keeps RSP 16-aligned. */
+       before the prologue is emitted). 5*16 = 80 preserves RSP alignment
+       (it is a multiple of 16), and MOVUPS does not require an aligned slot. */
     if ( g_res_fn_xmm ) {
         int xi;
         if ( !X64Emit_SubRspImm( B, 0x50 ) ) return 0;
@@ -99,7 +152,7 @@ int LcCg_EmitPrologue( LcCodeBuf *B ) {
             if ( !X64Emit_MovupsStoreXmm( B, k_res_xmm[ xi ], X64_RSP, xi * 16 ) )
                 return 0;
     }
-    if ( !X64Emit_SubRspImm( B, 0x20 ) )  return 0;
+    if ( !X64Emit_SubRspImm( B, 0x28 ) )  return 0;
     /* rbx = rcx (save L in a callee-saved register; rcx is volatile across calls) */
     if ( !X64Emit_MovRegToReg( B, X64_RBX, X64_RCX ) ) return 0;
     /* rax = [rcx + LC_OFF_CI] */
@@ -110,6 +163,13 @@ int LcCg_EmitPrologue( LcCodeBuf *B ) {
     if ( !X64Emit_MovRegToReg( B, X64_RDI, X64_RAX ) ) return 0;
     /* ADD RDI, 16  (advance past the function slot): 48 81 C7 10 00 00 00 */
     if ( !X64Emit_AddRegImm32( B, X64_RDI, 16 ) ) return 0;
+    /* RBP = P->code + g_savedpc_bias. RAX still holds ci->func.p, so this is
+       the same closure->Proto walk lower_const does, done once per frame. */
+    if ( !X64Emit_MovMemToReg( B, X64_RBP, X64_RAX, 0 ) )                 return 0;
+    if ( !X64Emit_MovMemToReg( B, X64_RBP, X64_RBP, LC_OFF_LCL_P ) )      return 0;
+    if ( !X64Emit_MovMemToReg( B, X64_RBP, X64_RBP, LC_OFF_PROTO_CODE ) ) return 0;
+    if ( g_savedpc_bias != 0 &&
+         !X64Emit_LeaRegMem( B, X64_RBP, X64_RBP, g_savedpc_bias ) )      return 0;
     /* M0: registers are memory-resident; no cache preload (M1 enables RegAlloc) */
     return 1;
 }
@@ -120,7 +180,7 @@ int LcCg_EmitPrologue( LcCodeBuf *B ) {
  *  callee-saved registers in reverse push order and return.
  */
 int LcCg_EmitEpilogue( LcCodeBuf *B ) {
-    if ( !X64Emit_AddRspImm( B, 0x20 ) )  return 0;
+    if ( !X64Emit_AddRspImm( B, 0x28 ) )  return 0;
     if ( g_res_fn_xmm ) {                 /* mirror the prologue's xmm saves */
         int xi;
         for ( xi = 0; xi < LC_RES_NREGS; xi++ )
@@ -128,6 +188,7 @@ int LcCg_EmitEpilogue( LcCodeBuf *B ) {
                 return 0;
         if ( !X64Emit_AddRspImm( B, 0x50 ) ) return 0;
     }
+    if ( !X64Emit_PopReg( B, X64_RBP ) )  return 0;
     if ( !X64Emit_PopReg( B, X64_RSI ) )  return 0;
     if ( !X64Emit_PopReg( B, X64_R15 ) )  return 0;
     if ( !X64Emit_PopReg( B, X64_R14 ) )  return 0;
@@ -1304,17 +1365,20 @@ static int op_needs_savedpc( int op ) {
     }
 }
 
-/* Store ci->u.l.savedpc = P->code + (pc+1) (LUAC-001). Recovers P->code at
-   runtime via ci->func -> closure -> Proto -> code (the chain lower_const uses
-   for Proto.k), so pcRel(savedpc, P) == pc and a raised error reports the right
-   source:line. Clobbers RAX (= ci) and R11; emitted before each throwing op. */
+/* Store ci->u.l.savedpc = P->code + (pc+1) (LUAC-001), so pcRel(savedpc, P)
+   == pc and a raised error reports the right source:line (and the right
+   variable name -- ldebug's varinfo decodes the instruction AT that pc, so
+   every throw-capable op needs its OWN pc, not merely its own line).
+
+   The P->code walk is hoisted into the prologue (RBP = P->code + bias; see the
+   INVARIANT block near the top of this file), leaving three instructions:
+   reload ci (L->ci is NOT frame-cached -- it is only stable across this frame,
+   and RBX/RDI/RBP already consume every register we can spare), compute the
+   pointer, store it. Clobbers RAX (= ci) and R11, exactly as before. */
 static int emit_store_savedpc( LcCodeBuf *B, int pc ) {
     if ( !X64Emit_MovMemToReg( B, X64_RAX, X64_RBX, LC_OFF_CI ) )         return 0;
-    if ( !X64Emit_MovMemToReg( B, X64_R11, X64_RAX, LC_OFF_CI_FUNC ) )    return 0;
-    if ( !X64Emit_MovMemToReg( B, X64_R11, X64_R11, 0 ) )                 return 0;
-    if ( !X64Emit_MovMemToReg( B, X64_R11, X64_R11, LC_OFF_LCL_P ) )      return 0;
-    if ( !X64Emit_MovMemToReg( B, X64_R11, X64_R11, LC_OFF_PROTO_CODE ) ) return 0;
-    if ( !X64Emit_AddRegImm32( B, X64_R11, ( pc + 1 ) * 4 ) )            return 0;
+    if ( !X64Emit_LeaRegMem( B, X64_R11, X64_RBP,
+                             ( int32_t )( pc + 1 ) * 4 - g_savedpc_bias ) ) return 0;
     if ( !X64Emit_MovRegToMem( B, X64_RAX, LC_OFF_CI_SAVEDPC, X64_R11 ) ) return 0;
     return 1;
 }
@@ -1992,6 +2056,10 @@ LcCodeModule *lc_codegen(LcModule *m) {
        BEFORE the prologue -- it decides whether xmm6..xmm10 must be saved
        (g_res_fn_xmm gates the prologue/epilogue xmm spill area). */
     res_analyze(f);
+
+    /* savedpc base bias: fixed for this function, consumed by the prologue
+       (RBP = P->code + bias) and by every emit_store_savedpc site. */
+    g_savedpc_bias = lc_savedpc_bias_for(sizecode);
 
     if (!LcCg_EmitPrologue(&buf)) {
       for (int ri = 0; ri < g_res_n; ri++) free(g_res_regions[ri].obs);

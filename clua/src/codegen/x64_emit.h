@@ -43,6 +43,16 @@ int X64Emit_MovMemToReg( LcCodeBuf *Buf, X64_GPR_T Dst,
 
 /*!
  * @brief
+ *  REX.W = 1 LEA r64, [Base + Disp]  (8D /r). Address arithmetic only — no
+ *  memory access and no flag effects. Uses the same disp8/disp32 ModR/M
+ *  selection as the MOV forms, so a displacement in [-128,127] costs 3 bytes
+ *  less than the disp32 encoding.
+ */
+int X64Emit_LeaRegMem( LcCodeBuf *Buf, X64_GPR_T Dst,
+                       X64_GPR_T Base, int32_t Disp );
+
+/*!
+ * @brief
  *  REX.W = 1 MOV r/m64, r64.   Encodes:  MOV [Base + Disp], Src
  */
 int X64Emit_MovRegToMem( LcCodeBuf *Buf, X64_GPR_T Base, int32_t Disp,
