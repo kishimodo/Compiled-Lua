@@ -100,10 +100,13 @@ end
 -- The extraction tar is pinned, not resolved from PATH: it must be the absolute
 -- System32 path, never a bare "tar".
 do
-  local got = M.tar_exe()
+  local got, err = M.tar_exe()
   local root = os.getenv("SystemRoot") or os.getenv("windir") or "C:\\Windows"
   local want = root:gsub("/", "\\") .. "\\System32\\tar.exe"
   if got ~= want then print("FAILCASE:tar-exe-pin-" .. tostring(got)); os.exit(7) end
+  -- A healthy environment must produce no error, or the caller would refuse to
+  -- extract anything.
+  if err ~= nil then print("FAILCASE:tar-exe-spurious-error"); os.exit(7) end
 end
 local function ok(cond, label) if not cond then print("FAILCASE:" .. label); os.exit(7) end end
 local P = M.parse_github_source

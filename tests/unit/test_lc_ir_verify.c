@@ -34,7 +34,8 @@ static const char *PROGRAM =
     "local acc = t.x\n"
     "for i = 1, 10 do acc = acc + i end\n"
     "local function bump(n) acc = acc + n return acc end\n"
-    "print(bump(2), acc, \"done\")\n";
+    "GlobalOut = acc\n"                 /* SETTABUP: upvalue in A, key in B */
+    "print(bump(2), acc, \"done\")\n";  /* GETTABUP: upvalue in B, key in C */
 
 static LcInst *first_inst( LcFunc *f ) {
     uint32_t bi;
@@ -124,6 +125,8 @@ int main( void ) {
        walk saw last, which is not necessarily the one lift intended */
     {
         LcInst *a = first_inst( f );
+        CHECK_MSG( a && a->next, "fixture must have >=2 instructions for the "
+                                 "duplicate-pc case" );
         if ( a && a->next ) {
             int saved = a->next->bc_pc;
             a->next->bc_pc = a->bc_pc;
@@ -137,6 +140,8 @@ int main( void ) {
        ->next, so a half-updated splice silently drops instructions */
     {
         LcInst *a = first_inst( f );
+        CHECK_MSG( a && a->next, "fixture must have >=2 instructions for the "
+                                 "linkage case" );
         if ( a && a->next ) {
             LcInst *saved = a->next->prev;
             a->next->prev = NULL;
@@ -188,6 +193,8 @@ int main( void ) {
     {
         LcInst *in = find_bc_op( f, OP_GETFIELD );
         if ( !in ) in = find_bc_op( f, OP_MOVE );
+        CHECK_MSG( in != NULL, "fixture must contain GETFIELD or MOVE for the "
+                               "register-range case" );
         if ( in ) {
             int saved = in->a;
             in->a = P->maxstacksize;          /* one past the frame */
@@ -200,12 +207,53 @@ int main( void ) {
     /* a constant index past the pool */
     {
         LcInst *in = find_bc_op( f, OP_LOADK );
+        CHECK_MSG( in != NULL, "fixture must contain LOADK for the "
+                               "constant-index case" );
         if ( in ) {
             int saved = in->b;
             in->b = P->sizek;
             CHECK( !lc_module_verify( m, err, sizeof err ) );
             in->b = saved;
             CHECK( lc_module_verify( m, err, sizeof err ) );
+        }
+    }
+
+    /* ---- the TABUP upvalue indexes, which take DIFFERENT operands ----
+       GETTABUP A B C is R[A] := UpValue[B][K[C]] -- upvalue in B.
+       SETTABUP A B C is UpValue[A][K[B]] := RK(C) -- upvalue in A.
+       Reading `b` for both rejected valid IR: for SETTABUP, b is the
+       constant-key index and legitimately exceeds sizeupvalues. The positive
+       case above is the regression guard for that (the fixture now contains a
+       real global assignment, and must verify clean); these two pin the checks
+       themselves. */
+    {
+        LcInst *in = find_bc_op( f, OP_GETTABUP );
+        CHECK_MSG( in != NULL, "fixture must contain GETTABUP (a global read)" );
+        if ( in ) {
+            int saved = in->b;
+            in->b = P->sizeupvalues;          /* one past the upvalue array */
+            CHECK( !lc_module_verify( m, err, sizeof err ) );
+            in->b = saved;
+            CHECK( lc_module_verify( m, err, sizeof err ) );
+        }
+    }
+    {
+        LcInst *in = find_bc_op( f, OP_SETTABUP );
+        CHECK_MSG( in != NULL, "fixture must contain SETTABUP (a global write)" );
+        if ( in ) {
+            int saved = in->a;
+            in->a = P->sizeupvalues;
+            CHECK( !lc_module_verify( m, err, sizeof err ) );
+            in->a = saved;
+            CHECK( lc_module_verify( m, err, sizeof err ) );
+            /* And the operand that must NOT be range-checked as an upvalue: b is
+               a constant-key index here, so a large value is legal. */
+            saved = in->b;
+            in->b = P->sizeupvalues + 5;
+            CHECK_MSG( lc_module_verify( m, err, sizeof err ),
+                       "SETTABUP's B is a constant key, not an upvalue index -- "
+                       "range-checking it against sizeupvalues rejects valid IR" );
+            in->b = saved;
         }
     }
 

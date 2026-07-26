@@ -40,6 +40,41 @@ to ~87 ms, and its binary from 743,424 to 670,208 bytes.
   reintroduced codegen global, the old `return true` verifier, the old `atoi`
   `-O` parse, a removed `-include`. A test that has never failed is not evidence.
 
+## Adversarial review of the slice
+
+Five independent reviewers over the accumulated diff (codegen, linker, verifier +
+drivers, Rover + build, tests + claims), each finding refuted by three skeptics
+before being accepted. **Ten findings, all real, all fixed.** Codegen came back
+clean; the linker reviewer confirmed duplicate-armap precedence correct *with
+proof* rather than by reading the comment.
+
+The one that mattered, and the lesson worth carrying:
+
+> **342 of 618 objects had no dependency fragment** — every Lua core object among
+> them — while `CLAUDE.md` asserted tracking and had deleted the manual-wipe
+> instruction. `-MMD` writes a fragment only as a side effect of compiling, so
+> objects already up to date when the change landed never got one.
+>
+> The test verified the **makefiles were configured**, not that the **tree was
+> covered**. Configuration is not coverage. Both `test-build-header-deps.lua` and
+> `test-codegen-no-globals.lua` had that shape of hole; both now derive their
+> subject from the tree (617/617 objects tracked; codegen objects globbed from
+> the sources) instead of asserting a static list.
+
+Six of the ten findings were tests being weaker than claimed:
+`clean-objs` omitting the directories that were untracked; four malformation cases
+behind unasserted `if` guards; `test_lc_link_symindex` reporting PASS when half its
+coverage skipped (now prints a NOTE and the check count drops 25 → 18); the
+hardcoded codegen object list. Two were functional: `tar_exe()` failing *open* on a
+hostile `$SystemRoot` (downgrading to the PATH tar exactly when the environment is
+least trustworthy — now refuses), and the verifier checking only `b < 0` for
+`GETTABUP`, which is how every global access compiles.
+
+Two doc claims were qualified rather than defended: the "-52% warm build" A/B spans
+commits and folds in the imm32 change, so the compare-count collapse
+(41,058,508 → 21,537) is the clean single-commit number; and the "within 92 bytes"
+prediction agreement is against `.text`, not the 512-byte-quantized whole-file size.
+
 ## Not done / not claimed
 
 - **`-Oz` lowering** (roadmap row 5) is still open: selective callee-saved

@@ -188,6 +188,16 @@ Spreads are tight (rover 83-90 ms, hello 71-87 ms), so the delta is far outside
 run-to-run noise for once. This beats the ~43% estimate above because the member
 scan collapsed as well, and because the surviving work is cache-resident.
 
+**Honest limit on that A/B.** The "before" times were taken at `bc1ea8f` and the
+"after" at `2b8a555`, so two other commits sit between them — the `tar` pin (Lua
+source only, no effect on compile time) and the imm32 helper-argument change,
+which shrinks the emitted `.text` by 12% and therefore reduces how much PE there
+is to write. Some unquantified part of the wall-clock delta belongs to that, not
+to the index. The *compare-count* collapse (41,058,508 -> 21,537) is a clean
+single-commit measurement and is the claim to lean on; treat "-52%" as the
+end-to-end improvement across the slice rather than as the index's isolated
+contribution.
+
 Output is unchanged: the pre-index build, the indexed build, and a repeat indexed
 build all produce Rover `-O1` at SHA-256 `4c2b5a77d4ad567d…`.
 

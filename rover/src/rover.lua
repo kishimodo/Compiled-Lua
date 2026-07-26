@@ -1501,12 +1501,26 @@ end
 --      caller's PATH.
 -- $SystemRoot reaches cmd.exe interpolated, so it gets the same allowlist
 -- treatment as every other environment-derived path here.
+-- Returns one of:
+--   <path>          use this binary
+--   nil, nil        no System32 tar on this host (pre-1803 Windows) -- the PATH
+--                   fallback is acceptable, with a warning
+--   nil, <reason>   the environment is HOSTILE -- refuse, do not fall back
+--
+-- The distinction matters and an earlier version of this did not make it: both
+-- cases returned nil, so a $SystemRoot carrying a shell metacharacter silently
+-- selected the *less* trusted extractor from PATH. Rover refuses hard on every
+-- other shell_safe_path failure ($TEMP, $CLUA_HOME, $ROVER_REGISTRY); failing
+-- open here, on the path that extracts an untrusted archive, was backwards.
 local function tar_exe()
   local root = os.getenv("SystemRoot") or os.getenv("windir")
-  if not root or root == "" or not shell_safe_path(root) then return nil end
+  if not root or root == "" then return nil, nil end
+  if not shell_safe_path(root) then
+    return nil, "$SystemRoot/$windir contains shell metacharacters"
+  end
   local exe = bs(root) .. "\\System32\\tar.exe"
   local f = io.open(exe, "rb")           -- io.open, not exists(): exists()
-  if not f then return nil end           -- slurps the whole file first
+  if not f then return nil, nil end      -- slurps the whole file first
   f:close()
   return exe
 end
@@ -1544,7 +1558,13 @@ local function fetch_github(owner, repo)
   end
   local ex = work .. "\\x"
   if not ensure_dir(ex) then return bail("cannot create the extract directory " .. ex) end
-  local tarbin = tar_exe()
+  local tarbin, tarerr = tar_exe()
+  if tarerr then
+    -- Hostile environment: refuse rather than hand an untrusted archive to
+    -- whatever `tar` PATH offers. Falling back here would downgrade the
+    -- extraction sandbox exactly when the environment is least trustworthy.
+    return bail("refusing to extract: " .. tarerr)
+  end
   local cmd
   if tarbin then
     -- bsdtar has no remote-archive syntax, so absolute arguments are safe, and

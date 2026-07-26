@@ -330,9 +330,35 @@ static bool lc_verify_func(LcFunc *f, uint32_t fi, char *err, size_t errlen) {
       at_pc[in->bc_pc] = in;
 
       /* operand ranges against the source Proto */
-      if (in->b < 0 && in->bc_op == OP_GETTABUP) {
-        ok = lc_verr(err, errlen, "func %u pc %d: negative upvalue index %d",
-                     fi, in->bc_pc, in->b);
+      /* Upvalue index for the two TABUP opcodes -- how every global access is
+      ** compiled, since _ENV is an upvalue, so this is the most-executed operand
+      ** of the lot. The GETUPVAL/SETUPVAL case below does NOT cover them.
+      **
+      ** THE OPERAND DIFFERS BETWEEN THEM, which is not guessable and cost a
+      ** broken build to learn (lopcodes.h:213,218 and lift.c:300-311 are the
+      ** authority, not intuition):
+      **     OP_GETTABUP A B C   R[A] := UpValue[B][K[C]]   -> upvalue is B
+      **     OP_SETTABUP A B C   UpValue[A][K[B]] := RK(C)   -> upvalue is A
+      ** Using `b` for both rejects valid IR: for SETTABUP, b is the constant-key
+      ** index, which legitimately exceeds sizeupvalues. Three differential cases
+      ** caught it immediately -- a verifier that rejects correct programs is
+      ** worse than one that checks too little.
+      **
+      ** The constant KEY indexes are deliberately NOT checked here. lift.c
+      ** Ck-encodes some operands (`k ? -C-1 : C`) and OP_SELF switches C between
+      ** a constant and a register above 255 constants, so a naive range check on
+      ** those fields is exactly the same class of false rejection. Checking them
+      ** needs the encoding verified per opcode first. */
+      if (in->bc_op == OP_GETTABUP && (in->b < 0 || in->b >= sizeup)) {
+        ok = lc_verr(err, errlen,
+                     "func %u pc %d (GETTABUP): upvalue index %d outside [0,%d)",
+                     fi, in->bc_pc, in->b, sizeup);
+        break;
+      }
+      if (in->bc_op == OP_SETTABUP && (in->a < 0 || in->a >= sizeup)) {
+        ok = lc_verr(err, errlen,
+                     "func %u pc %d (SETTABUP): upvalue index %d outside [0,%d)",
+                     fi, in->bc_pc, in->a, sizeup);
         break;
       }
       if (in->op == LC_OP_CLOSURE && (in->b < 0 || in->b >= sizep)) {

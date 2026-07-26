@@ -598,9 +598,25 @@ imgui: $(BUILD_DIR)/imgui.a
 # never delete only one kind -- use this, or `clean`, which removes $(BUILD_DIR)
 # wholesale. This target exists because the partial wipe it replaces was
 # documented in CLAUDE.md and done by hand.
+#
+# It must cover EVERY directory this project compiles into, not just the backend
+# ones. -MMD writes a fragment only as a side effect of compiling, so an object
+# that was already up to date when tracking was introduced has none, and a
+# partial wipe that skips its directory leaves it untracked forever. Omitting
+# build/bin/lua, lua-emb and the three loose root objects is exactly how that
+# happens -- 342 objects were in that state until this list was completed.
+# tools/test-build-header-deps.lua asserts the coverage so it cannot drift again.
+#
+# $(BUILD_DIR)/sysroot is deliberately absent: crt2.o/crtbegin.o/crtend.o are
+# prebuilt CRT objects copied from the toolchain, not compiled here.
 .PHONY: clean-objs
 clean-objs:
 	-if exist "$(BUILD_DIR)\obj" rmdir /S /Q "$(BUILD_DIR)\obj"
 	-if exist "$(BUILD_DIR)\obj-emb" rmdir /S /Q "$(BUILD_DIR)\obj-emb"
 	-if exist "$(BUILD_DIR)\obj-aot" rmdir /S /Q "$(BUILD_DIR)\obj-aot"
 	-if exist "$(BUILD_DIR)\obj-aotc" rmdir /S /Q "$(BUILD_DIR)\obj-aotc"
+	-if exist "$(BUILD_DIR)\lua" rmdir /S /Q "$(BUILD_DIR)\lua"
+	-if exist "$(BUILD_DIR)\lua-emb" rmdir /S /Q "$(BUILD_DIR)\lua-emb"
+	-if exist "$(BUILD_DIR)\imgui" rmdir /S /Q "$(BUILD_DIR)\imgui"
+	-del /Q "$(BUILD_DIR)\*.o" 2>nul
+	-del /Q "$(BUILD_DIR)\*.d" 2>nul

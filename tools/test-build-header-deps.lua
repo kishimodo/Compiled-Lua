@@ -152,7 +152,75 @@ for _, mk in ipairs({ "build/Makefile", "build/Makefile.luac" }) do
   end
 end
 
--- ---- 4. the produced fragments are parseable by make ---------------------
+-- ---- 4. COVERAGE: every object this project compiles has a fragment -------
+--
+-- The check the first version of this test was missing, and the omission was
+-- caught by review rather than by the suite. Asserting that the makefiles are
+-- configured correctly is not the same as asserting that the TREE is tracked:
+-- -MMD writes a fragment only as a side effect of compiling, so every object
+-- that was already up to date when tracking was introduced has none, and stays
+-- untracked until something recompiles it. 342 objects were in exactly that
+-- state -- including every Lua core object -- while CLAUDE.md claimed tracking
+-- and had deleted the manual-wipe instruction.
+--
+-- Remedy when this fails: `make -f build/Makefile clean-objs` then a full build.
+-- Objects that are COPIES or come from outside, so they legitimately have no
+-- fragment of their own. Each is paired with the tracked object it derives from,
+-- and that origin is asserted below -- an exemption that cannot be checked is
+-- just a hole with a comment.
+local COPIES = {
+  -- build/Makefile: `copy /Y obj-aot\runtime\protoinit_rt.o -> protoinit_rt.o`,
+  -- the loose per-exe deserializer that ships beside the archives.
+  ["protoinit_rt.o"] = "obj-aot\\runtime\\protoinit_rt.o",
+}
+
+local uncovered, objs_seen, exempted = {}, 0, 0
+do
+  -- build/bin/sysroot holds crt2.o/crtbegin.o/crtend.o, prebuilt CRT objects
+  -- copied from the toolchain rather than compiled here.
+  local out = sh('dir /b /s "' .. ROOT .. '\\build\\bin\\*.o"')
+  for path in out:gmatch("[^\r\n]+") do
+    if path:find("%.o$") and not path:lower():find("\\sysroot\\") then
+      local base = path:match("([^\\]+)$")
+      local origin = COPIES[base]
+      -- Only exempt the copy sitting directly in build/bin, not a same-named
+      -- object elsewhere. Compare directories rather than pattern-matching: with
+      -- plain=true a `$` anchor would be matched literally, which is how the
+      -- first attempt at this silently exempted nothing.
+      local dir = path:sub(1, #path - #base - 1):lower():gsub("\\+$", "")
+      local at_root = dir == (ROOT .. "\\build\\bin"):lower()
+      if origin and at_root then
+        exempted = exempted + 1
+        local od = ROOT .. "\\build\\bin\\" .. origin:gsub("%.o$", ".d")
+        local of = io.open(od, "rb")
+        if of then of:close() else
+          fail("%s is exempted as a copy of %s, but that origin has no fragment "
+               .. "either -- the exemption is hiding a real gap", base, origin)
+        end
+      else
+        objs_seen = objs_seen + 1
+        local dep = path:gsub("%.o$", ".d")
+        local f = io.open(dep, "rb")
+        if f then f:close() else uncovered[#uncovered + 1] = path end
+      end
+    end
+  end
+end
+if objs_seen == 0 then
+  print("  note: no objects built yet; skipped the coverage check")
+elseif #uncovered > 0 then
+  local shown = {}
+  for i = 1, math.min(6, #uncovered) do
+    shown[i] = (uncovered[i]:gsub(".*\\build\\bin\\", ""))
+  end
+  fail("%d of %d compiled objects have no .d fragment, so editing a header they "
+       .. "include rebuilds nothing -- the exact silent-stale-object trap this "
+       .. "change claims to have retired. Run `make -f build/Makefile clean-objs` "
+       .. "then a full build. Examples: %s",
+       #uncovered, objs_seen, table.concat(shown, ", "))
+end
+
+-- ---- 5. the produced fragments are parseable by make ---------------------
 
 local frag_count, bad_paths, checked = 0, 0, 0
 do
@@ -194,6 +262,7 @@ end
 
 print(string.format("[+] PASS %s (both makefiles define -MMD -MP, every compile "
                     .. "recipe is covered, fragments are read back after the "
-                    .. "default goal; %d fragments on disk, %d sampled clean)",
-                    NAME, frag_count, checked))
+                    .. "default goal; %d/%d compiled objects tracked, %d "
+                    .. "verified copy exempted, %d fragments sampled clean)",
+                    NAME, objs_seen - #uncovered, objs_seen, exempted, checked))
 os.exit(0)

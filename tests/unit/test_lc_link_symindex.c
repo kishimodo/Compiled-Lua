@@ -27,6 +27,10 @@
 #include <process.h>   /* _getpid */
 #define getpid _getpid
 
+/* Sub-cases that could not run (missing sysroot), reported beside the final
+** verdict. Without this a PASS quietly meant "half the coverage was skipped". */
+static int g_skipped = 0;
+
 #define FILL_SYMS 4000   /* forces 512 -> 1024 -> 2048 -> 4096 -> 8192 rehashes */
 
 static void p16( uint8_t *p, uint16_t v ) { p[0]=(uint8_t)v; p[1]=(uint8_t)(v>>8); }
@@ -137,7 +141,14 @@ static void test_wide_symbol_table(void) {
     const char *arcs[1];
 
     if ( !probe ) {
-        printf( "[~] SKIP lc_link_symindex: no sysroot (build/bin/sysroot/libkernel32.a)\n" );
+        /* The harness still reports PASS for the checks that DID run, so lost
+        ** coverage has to be loud: without the sysroot the 4000-symbol rehash and
+        ** byte-identity half never executes. Counted, and repeated at the end so
+        ** a green line can never quietly mean partial coverage. */
+        printf( "[~] SKIP lc_link_symindex(wide-symbol-table): no sysroot at "
+                "build/bin/sysroot/libkernel32.a -- the rehash and byte-identity "
+                "coverage did NOT run\n" );
+        g_skipped++;
         return;
     }
     fclose( probe );
@@ -367,5 +378,9 @@ int main(void) {
     TEST_BEGIN("lc_link_symindex");
     test_wide_symbol_table();
     test_armap_duplicate_precedence();
+    if ( g_skipped ) {
+        printf( "[~] NOTE lc_link_symindex: %d of 2 sub-cases skipped; the "
+                "verdict below covers only what ran\n", g_skipped );
+    }
     TEST_END();
 }

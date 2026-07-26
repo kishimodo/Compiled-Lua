@@ -116,7 +116,11 @@ about 4 KB.
 | `print("hello")` `-O1` | 137,216 | 137,216 | 0 | 114,880 | 114,816 | -64 |
 
 The prediction from the pre-implementation count was **73,124 bytes**; the
-measured figure is **73,216**, within 92 bytes (0.13%). Tier distribution over
+measured `.text` delta is **73,216**, within 92 bytes (0.13%). Compare against
+the `.text` column, not the whole-file one: PE file size is quantized to the
+512-byte file alignment, so a whole-file agreement finer than 512 bytes would be
+an artefact. The two columns happen to coincide at `-O1` here, which is luck, not
+method. Tier distribution over
 Rover's argument slots: 3,935 zero, 9,974 positive, 365 negative. `hello` does
 not move, as predicted — 4 call sites, and the 512-byte PE alignment absorbs them.
 

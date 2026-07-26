@@ -54,7 +54,23 @@ local function find_nm()
 end
 
 -- Every object compiled from clua/src/codegen/.
-local OBJS = { "codegen", "x64_emit", "lc_codebuf", "protoblob_emit" }
+-- DERIVED from the sources, not hardcoded: build/Makefile globs the directory
+-- (LUAC_SRCS), so a .c added to clua/src/codegen/ is compiled and linked while a
+-- fixed list here would silently never check it -- which is the same
+-- "configured correctly but not actually covering the tree" hole that let 342
+-- objects go untracked in the header-dependency work.
+local OBJS = {}
+do
+  local out = sh('dir /b "' .. ROOT .. '\\clua\\src\\codegen\\*.c"')
+  for name in out:gmatch("[^\r\n]+") do
+    local base = name:match("^(.+)%.c$")
+    if base then OBJS[#OBJS + 1] = base end
+  end
+end
+if #OBJS == 0 then
+  print("[~] SKIP " .. NAME .. " (no sources found in clua/src/codegen)")
+  os.exit(0)
+end
 
 local nm = find_nm()
 if not nm then
@@ -85,6 +101,12 @@ end
 if checked == 0 then
   print("[~] SKIP " .. NAME .. " (build\\bin\\obj\\codegen not built)")
   os.exit(0)
+end
+-- A source with no built object is not a pass: it means the tree is stale and
+-- that source's globals were never examined.
+if checked ~= #OBJS then
+  fail("%d of %d codegen sources have no built object, so their file-scope state "
+       .. "was never examined", #OBJS - checked, #OBJS)
 end
 
 if #found > 0 then

@@ -10,6 +10,26 @@ Reproduce every path in this directory from the worktree you are standing in:
 python tools/agent-coordination/repo-paths.py --get benchmarks_dir
 ```
 
+## A caveat on every SHA-256 recorded here
+
+The header-dependency work exposed that **342 of 618 objects had never been
+compiled with dependency tracking** and were stale — including the whole Lua core
+and the AOT runtime archives. Running `clean-objs` plus a full build recompiled
+them from current sources for the first time, which moved every emitted binary:
+`print("hello")` lost 80 bytes of `.text` and 52 of `.rdata` despite having a
+single user function, so the change is in the linked runtime, not in codegen.
+
+Consequences for anyone reproducing these notes:
+
+- the absolute SHA-256 values recorded in this directory predate that rebuild and
+  will **not** reproduce; treat them as evidence of *reproducibility at the time*,
+  not as fixed expectations;
+- the **deltas** are unaffected, because each A/B compared two builds against the
+  same runtime — only the compiler differed between the arms;
+- the binaries shipped before the rebuild were partly built from out-of-date
+  runtime objects. That is what the tracking work was for, and it turned out to
+  be a live condition rather than a hypothetical one.
+
 ## Ground rules
 
 - **State the commit, not the branch.** Branches move; a size table without a
