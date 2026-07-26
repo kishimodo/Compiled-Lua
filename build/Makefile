@@ -285,7 +285,12 @@ $(BUILD_DIR)/runtime-embedded.a: $(RUNTIME_EMB_OBJS)
 # __thread, which would drag libgcc emutls + ~23 KB of winpthread into every
 # compiled exe. runtime-embedded.a (clua-interp.exe / v1 compiler.exe PEs, which
 # may see foreign threads via FFI callbacks) keeps real TLS.
-AOT_RT_SRCS := $(RUNTIME_SRCS)
+# mingw_stdio_shim.c is AOT-ONLY on purpose. It routes Lua's three __mingw_*
+# stdio references to the UCRT, which removes 38,816 bytes of static gdtoa/pformat
+# from every emitted PE. It must not join RUNTIME_SRCS: that list also builds
+# runtime.a, which clua-interp.exe links, and putting the oracle on the same
+# implementation would make the differential suite agree by moving both sides.
+AOT_RT_SRCS := $(RUNTIME_SRCS) $(SRC_DIR)/runtime/mingw_stdio_shim.c
 AOT_RT_CFLAGS := $(EMBEDDED_RT_CFLAGS) -DLUAC_AOT_RUNTIME=1
 RUNTIME_AOT_OBJS := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/obj-aot/%.o,$(AOT_RT_SRCS))
 

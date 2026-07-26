@@ -562,8 +562,30 @@ int LuacLink_LinkProgram( const char *userObj, const char *outExe,
     ** registration tables live in .rdata and keep every reachable lib
     ** function alive). */
     if ( !MakeStagedOutput( outExe, staged_out, err, errlen ) ) return 0;
+    /* The three --undefined flags for the stdio shim are load-bearing on THIS
+    ** path and are not needed on the internal one.
+    **
+    ** runtime-aot.a is scanned before liblua54.a, and ld extracts an archive
+    ** member only to satisfy a symbol that is already undefined. At the moment
+    ** runtime-aot.a is scanned nothing has referenced __mingw_sprintf yet -- the
+    ** reference lives in liblua54.a's lobject.o, which has not been pulled. So
+    ** mingw_stdio_shim.o is skipped, and by the time lobject.o does create the
+    ** reference the only archive left to satisfy it is libmingwex, which drags in
+    ** ~38 KB of gdtoa/pformat. Forcing the symbols undefined up front makes the
+    ** shim member extract on the first scan.
+    **
+    ** The internal linker needs none of this because resolve_fixpoint re-scans
+    ** archives until the undefined set stops changing. Measured before this fix:
+    ** internal 146,944 vs gcc 187,904 for the same program -- a 40,960-byte
+    ** discrepancy that tools/test-clua-cli.lua caught as a size-parity failure.
+    ** Reordering the archives instead would not work: runtime-aot.a's helpers call
+    ** into the Lua core, so neither single ordering satisfies both directions. */
     snprintf( cmd, sizeof( cmd ),
-              "%s -o \"%s\" \"%s\" \"%s\" %s%s%s\"%s\" \"%s\" "
+              "%s -o \"%s\" \"%s\" \"%s\" %s%s%s"
+              "-Wl,--undefined=__mingw_sprintf "
+              "-Wl,--undefined=__mingw_fprintf "
+              "-Wl,--undefined=__mingw_strtod "
+              "\"%s\" \"%s\" "
               "-Wl,--subsystem,console -Wl,--gc-sections -s "
               "-lm -lkernel32 -ladvapi32",
               GccCommand( ), staged_out, userObj, entry_obj, lvm_obj,
