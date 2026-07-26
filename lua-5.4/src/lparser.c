@@ -44,6 +44,23 @@
 
 
 /*
+** CLua: the synthetic label `continue` jumps to.
+**
+** Deliberately NOT spelled "continue". `break` can safely share its label name
+** with the user because `break` is a reserved word, so `::break::` is a syntax
+** error and the name is unforgeable. `continue` is a CONTEXTUAL keyword here, so
+** `::continue::` remains perfectly legal Lua -- and this repository already
+** contains it in five files, as the documented pre-5.4 idiom for exactly this.
+**
+** Sharing the name would silently give `goto continue` a second meaning: today it
+** is an error unless the user wrote the matching label, and with a shared name it
+** would start resolving to the compiler's own label instead. Parentheses cannot
+** appear in an identifier, so this name cannot be written by user code.
+*/
+#define LUA_CONTINUE_LABEL	"(continue)"
+
+
+/*
 ** nodes for block list (list of active blocks)
 */
 typedef struct BlockCnt {
@@ -513,8 +530,20 @@ static void adjust_assign (LexState *ls, int nvars, int nexps, expdesc *e) {
 */
 static l_noret jumpscopeerror (LexState *ls, Labeldesc *gt) {
   const char *varname = getstr(getlocalvardesc(ls->fs, gt->nactvar)->vd.name);
-  const char *msg = "<goto %s> at line %d jumps into the scope of local '%s'";
-  msg = luaO_pushfstring(ls->L, msg, getstr(gt->name), gt->line, varname);
+  const char *msg;
+  /* CLua: a `continue` reaches here through a synthetic label the user never
+  ** wrote, so naming "(continue)" in the message would be baffling. Describe the
+  ** statement instead. This fires for a `continue` in a repeat whose until-clause
+  ** reads a local declared after it -- jumping to the condition would skip that
+  ** local's initialisation. */
+  if (eqstr(gt->name, luaS_newliteral(ls->L, LUA_CONTINUE_LABEL))) {
+    msg = "<continue> at line %d jumps into the scope of local '%s'";
+    msg = luaO_pushfstring(ls->L, msg, gt->line, varname);
+  }
+  else {
+    msg = "<goto %s> at line %d jumps into the scope of local '%s'";
+    msg = luaO_pushfstring(ls->L, msg, getstr(gt->name), gt->line, varname);
+  }
   luaK_semerror(ls, msg);  /* raise the error */
 }
 
@@ -623,6 +652,51 @@ static int createlabel (LexState *ls, TString *name, int line,
 
 
 /*
+** CLua: does any goto pending in the CURRENT block target 'name'?
+**
+** Used to decide whether a loop needs a `continue` label at all. Only gotos at or
+** after the current block's 'firstgoto' can still be resolved by a label created
+** here, which is the same window solvegotos uses.
+*/
+static int haspendinggoto (LexState *ls, TString *name) {
+  Labellist *gl = &ls->dyd->gt;
+  int i;
+  for (i = ls->fs->bl->firstgoto; i < gl->n; i++) {
+    if (eqstr(gl->arr[i].name, name))
+      return 1;
+  }
+  return 0;
+}
+
+
+/*
+** CLua: create the `continue` label for the enclosing loop, but ONLY if some
+** `continue` in this block is actually waiting for it.
+**
+** The gate is not an optimisation, it is required for correctness of the
+** unchanged-code guarantee. createlabel calls luaK_getlabel, which sets
+** fs->lasttarget to mark a jump target -- and that suppresses code-generator
+** peepholes that may not merge instructions across a label. Verified: for
+**
+**     local k = 0  repeat k = k + 1  local a  until (nil)()
+**
+** the unmodified compiler emits a single merged `LOADNIL 1 1`, while creating a
+** label unconditionally splits it into two separate LOADNILs. So a `repeat` loop
+** that never mentions `continue` would silently compile to different bytecode
+** than before this feature existed. Gating on a pending goto keeps every loop
+** without `continue` byte-for-byte identical.
+**
+** 'last' is passed through to createlabel: it tells it the label is the final
+** non-op statement of the block, so locals may be assumed already out of scope.
+*/
+static void createcontinuelabel (LexState *ls, int last) {
+  TString *name = luaS_newliteral(ls->L, LUA_CONTINUE_LABEL);
+  if (haspendinggoto(ls, name))
+    createlabel(ls, name, ls->linenumber, last);
+}
+
+
+/*
 ** Adjust pending gotos to outer level of a block.
 */
 static void movegotosout (FuncState *fs, BlockCnt *bl) {
@@ -659,6 +733,12 @@ static l_noret undefgoto (LexState *ls, Labeldesc *gt) {
   const char *msg;
   if (eqstr(gt->name, luaS_newliteral(ls->L, "break"))) {
     msg = "break outside loop at line %d";
+    msg = luaO_pushfstring(ls->L, msg, gt->line);
+  }
+  /* CLua: mirror break's message. Without this the user would be told there is
+  ** "no visible label '(continue)'" for a label they never wrote. */
+  else if (eqstr(gt->name, luaS_newliteral(ls->L, LUA_CONTINUE_LABEL))) {
+    msg = "continue outside loop at line %d";
     msg = luaO_pushfstring(ls->L, msg, gt->line);
   }
   else {
@@ -1313,6 +1393,32 @@ static void block (LexState *ls) {
 
 
 /*
+** CLua: a loop body. Identical to 'block' except that the `continue` label is
+** created at the very end of the body, INSIDE the block, immediately before
+** leaveblock.
+**
+** The placement is the whole point and it is not interchangeable with creating the
+** label after leaveblock. leaveblock is what emits the per-iteration OP_CLOSE for
+** a body that captured a local in a closure or declared a to-be-closed variable;
+** a label created after it would leave `continue` jumping PAST that close, so
+** upvalues and <close> handlers would leak from one iteration into the next.
+** Verified on `for i=1,3 do local x=i ... end`: the jump must land on the
+** per-iteration `CLOSE`, with `FORLOOP` following it, not on the FORLOOP itself.
+**
+** 'last' is 1 because the label really is the final non-op statement of the body,
+** so createlabel may assume the body's locals are already out of scope.
+*/
+static void loopbody (LexState *ls) {
+  FuncState *fs = ls->fs;
+  BlockCnt bl;
+  enterblock(fs, &bl, 0);
+  statlist(ls);
+  createcontinuelabel(ls, 1);
+  leaveblock(fs);
+}
+
+
+/*
 ** structure to chain all variables in the left-hand side of an
 ** assignment
 */
@@ -1443,6 +1549,73 @@ static void breakstat (LexState *ls) {
 
 
 /*
+** CLua: is the current TK_NAME token the contextual keyword `continue`?
+*/
+static int iscontinuename (LexState *ls) {
+  return ls->t.token == TK_NAME &&
+         eqstr(ls->t.seminfo.ts, luaS_newliteral(ls->L, "continue"));
+}
+
+
+/*
+** CLua: does the `continue` at the current token START A STATEMENT, rather than
+** being an ordinary identifier that happens to be spelled that way?
+**
+** `continue` is a CONTEXTUAL keyword, not a reserved word. It has to be: this
+** repository already contains `function M.continue()` in repl_debug, and
+** reserving the name would break that plus any of the 685 in-tree .lua files and
+** 195 packages using it.
+**
+** One token of lookahead decides it, and the reject set below is complete rather
+** than heuristic. After a statement-initial NAME, Lua 5.4 permits exactly:
+**
+**   '='  ','        -- assignment:      continue = 1     continue, x = 1, 2
+**   '.'  '['        -- field access:    continue.x = 1   continue[1] = 2
+**   '('  ':'  '{'   -- a call:          continue(1)      continue:m()  continue{}
+**   TK_STRING       -- a call:          continue "s"
+**
+** Every other follow token is already a syntax error today, so treating those as
+** the keyword cannot change the meaning of any program that compiles now -- it
+** only gives a better message to programs that were already broken.
+**
+** NOTE luaX_lookahead advances ls->linenumber past the lookahead token, so the
+** caller must capture the line BEFORE calling this and restore ls->lastline
+** before emitting, or the jump is attributed to the following line.
+*/
+static int iscontinuestat (LexState *ls) {
+  int follow;
+  if (!iscontinuename(ls)) return 0;
+  follow = luaX_lookahead(ls);
+  switch (follow) {
+    case '=': case ',': case '.': case '[':
+    case '(': case ':': case '{': case TK_STRING:
+      return 0;             /* an ordinary identifier, not the keyword */
+    default:
+      return 1;
+  }
+}
+
+
+/*
+** CLua: continue statement. Semantically `goto (continue)`, exactly as `break`
+** is semantically `goto break` -- see breakstat directly above, whose shape this
+** mirrors.
+**
+** 'line' is passed in because the caller read it before iscontinuestat ran
+** luaX_lookahead, which moves ls->linenumber on. Restoring ls->lastline makes
+** luaK_jump attribute the jump to the `continue` token rather than to whatever
+** follows it, which matters for error messages and for debug line info.
+*/
+static void continuestat (LexState *ls, int line) {
+  FuncState *fs = ls->fs;
+  luaX_next(ls);  /* skip 'continue' (the lookahead token becomes current) */
+  ls->lastline = line;
+  newgotoentry(ls, luaS_newliteral(ls->L, LUA_CONTINUE_LABEL), line,
+               luaK_jump(fs));
+}
+
+
+/*
 ** Check whether there is already a label with the given 'name'.
 */
 static void checkrepeated (LexState *ls, TString *name) {
@@ -1476,7 +1649,7 @@ static void whilestat (LexState *ls, int line) {
   condexit = cond(ls);
   enterblock(fs, &bl, 1);
   checknext(ls, TK_DO);
-  block(ls);
+  loopbody(ls);  /* CLua: like block(), plus the `continue` label at its end */
   luaK_jumpto(fs, whileinit);
   check_match(ls, TK_END, TK_WHILE, line);
   leaveblock(fs);
@@ -1495,6 +1668,12 @@ static void repeatstat (LexState *ls, int line) {
   luaX_next(ls);  /* skip REPEAT */
   statlist(ls);
   check_match(ls, TK_UNTIL, TK_REPEAT, line);
+  /* CLua: `continue` in a repeat jumps to the CONDITION, matching C's do/while,
+  ** so the label goes here -- before cond() rather than at the end of the body.
+  ** 'last' is 0, not 1: the until-condition is still inside the scope block and
+  ** can read the body's locals, so they are NOT out of scope at this point and
+  ** createlabel must not assume otherwise. */
+  createcontinuelabel(ls, 0);
   condexit = cond(ls);  /* read condition (inside scope block) */
   leaveblock(fs);  /* finish scope */
   if (bl2.upval) {  /* upvalues? */
@@ -1553,7 +1732,7 @@ static void forbody (LexState *ls, int base, int line, int nvars, int isgen) {
   enterblock(fs, &bl, 0);  /* scope for declared variables */
   adjustlocalvars(ls, nvars);
   luaK_reserveregs(fs, nvars);
-  block(ls);
+  loopbody(ls);  /* CLua: like block(), plus the `continue` label at its end */
   leaveblock(fs);  /* end of scope for declared variables */
   fixforjump(fs, prep, luaK_getlabel(fs), 0);
   if (isgen) {  /* generic for? */
@@ -1903,7 +2082,18 @@ static void statement (LexState *ls) {
       gotostat(ls);
       break;
     }
-    default: {  /* stat -> func | assignment */
+    case TK_NAME: {  /* CLua: stat -> 'continue' | func | assignment */
+      /* `continue` is contextual, so a NAME spelled that way is only the keyword
+      ** when nothing that could continue an expression-statement follows it. The
+      ** line is captured HERE, before iscontinuestat runs luaX_lookahead, which
+      ** advances ls->linenumber past the following token. */
+      if (iscontinuestat(ls)) {
+        continuestat(ls, line);
+        break;
+      }
+      goto exprstatement;  /* an ordinary name: fall into the default case */
+    }
+    default: exprstatement: {  /* stat -> func | assignment */
       exprstat(ls);
       break;
     }

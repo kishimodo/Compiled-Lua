@@ -107,6 +107,131 @@ for _, case in ipairs(pairs_to_check) do
   end
 end
 
+-- ---- 1b. `continue` emits what the hand-written goto idiom emits -----------
+--
+-- The reference spelling is `goto continue` + `::continue::` at the end of the
+-- body, which is the documented pre-5.4 idiom and is what tests/lua/test_goto.lua
+-- already uses. The <close> and upvalue cases are the ones that matter: the label
+-- has to land INSIDE the body block, before leaveblock emits the per-iteration
+-- OP_CLOSE, or handlers and upvalues leak across iterations.
+local continue_pairs = {
+  { "numeric for",
+    "local s=0 for i=1,5 do if i==3 then continue end s=s+i end print(s)",
+    "local s=0 for i=1,5 do if i==3 then goto continue end s=s+i ::continue:: end print(s)" },
+  { "generic for",
+    "local s=0 for k,v in pairs({1,2,3}) do if v==2 then continue end s=s+v end print(s)",
+    "local s=0 for k,v in pairs({1,2,3}) do if v==2 then goto continue end s=s+v ::continue:: end print(s)" },
+  { "while",
+    "local i=0 local s=0 while i<5 do i=i+1 if i==3 then continue end s=s+i end print(s)",
+    "local i=0 local s=0 while i<5 do i=i+1 if i==3 then goto continue end s=s+i ::continue:: end print(s)" },
+  { "upvalue in body",
+    "local fs={} for i=1,3 do local x=i if i==2 then continue end fs[i]=function() return x end end print(fs[1]())",
+    "local fs={} for i=1,3 do local x=i if i==2 then goto continue end fs[i]=function() return x end ::continue:: end print(fs[1]())" },
+  { "<close> in body",
+    "local n=0 for i=1,3 do local g <close> = setmetatable({},{__close=function() n=n+1 end}) if i==2 then continue end end print(n)",
+    "local n=0 for i=1,3 do local g <close> = setmetatable({},{__close=function() n=n+1 end}) if i==2 then goto continue end ::continue:: end print(n)" },
+  { "nested loops",
+    "local s=0 for i=1,3 do for j=1,3 do if j==2 then continue end s=s+1 end end print(s)",
+    "local s=0 for i=1,3 do for j=1,3 do if j==2 then goto continue end s=s+1 ::continue:: end end print(s)" },
+  { "continue + break",
+    "local s=0 for i=1,9 do if i==2 then continue end if i>4 then break end s=s+i end print(s)",
+    "local s=0 for i=1,9 do if i==2 then goto continue end if i>4 then break end s=s+i ::continue:: end print(s)" },
+}
+local cont_identical = 0
+for _, case in ipairs(continue_pairs) do
+  local label, sugar, idiom = case[1], case[2], case[3]
+  local a, ea = build_bytes(sugar)
+  local b, eb = build_bytes(idiom)
+  if not a or not b then
+    fail("continue %s: a spelling failed to compile (%s)", label, ea or eb)
+  elseif a ~= b then
+    fail("continue %s: emits different bytes from the goto idiom (%d vs %d)",
+         label, #a, #b)
+  else
+    cont_identical = cont_identical + 1
+  end
+end
+
+-- `continue` must remain usable as an IDENTIFIER. It is a contextual keyword
+-- precisely because repl_debug/init.lua:497 defines `function M.continue()`.
+-- The last case is the discriminating one: a local named `continue` and the
+-- keyword in the same loop body.
+local ident_cases = {
+  { "method definition",  'local M={} function M.continue() return "m" end print(M.continue())', "m" },
+  { "local named continue",'local continue = 5 print(continue)',                  "5" },
+  { "table field",        'local t={continue=1} t.continue=3 print(t.continue)',  "3" },
+  { "bracket key",        'local t={} t["continue"]=4 print(t["continue"])',      "4" },
+  { "global assignment",  'continue = 9 print(continue)',                          "9" },
+  { "method call",        'local o={continue=function(s) return "c" end} print(o:continue())', "c" },
+  { "call via field",     'local g={continue=function(x) return x end} print(g.continue(6))',  "6" },
+  { "passed as an arg",   'local continue=2 local function f(x) return x end print(f(continue))', "2" },
+  { "returned",           'local continue=8 local function f() return continue end print(f())', "8" },
+  { "local AND keyword",  'local t={continue=7} local s=0 for i=1,3 do local continue=i s=s+continue+t.continue if i==2 then continue end s=s+1000 end print(s)',
+                          "2027" },
+}
+for _, case in ipairs(ident_cases) do
+  local label, src, want = case[1], case[2], case[3]
+  local path = TMP .. "\\ident.lua"
+  local f = io.open(path, "wb"); f:write(src, "\n"); f:close()
+  local code, out = run('"' .. CLUA .. '" "' .. path .. '"')
+  if code ~= 0 then
+    fail("continue-as-identifier %q failed: %s", label, trim(out):sub(1, 80))
+  elseif trim(out) ~= want then
+    fail("continue-as-identifier %q gave %q, expected %q", label, trim(out), want)
+  end
+end
+
+-- The synthetic label must be UNFORGEABLE. A user's own ::continue:: keeps
+-- working, and `goto continue` without one is still an error -- if the compiler's
+-- label were named "continue" it would silently satisfy that goto.
+do
+  local checks = {
+    { "user label still works",
+      'local s=0 for i=1,5 do if i==2 then goto continue end s=s+i ::continue:: end print(s)', "13" },
+    { "keyword and user label coexist",
+      'local r=0 for i=1,5 do if i==2 then goto continue end if i==4 then continue end r=r+i ::continue:: end print(r)', "9" },
+  }
+  for _, c in ipairs(checks) do
+    local path = TMP .. "\\lbl.lua"
+    local f = io.open(path, "wb"); f:write(c[2], "\n"); f:close()
+    local code, out = run('"' .. CLUA .. '" "' .. path .. '"')
+    if code ~= 0 or trim(out) ~= c[3] then
+      fail("%s: got %q want %q", c[1], trim(out):sub(1, 60), c[3])
+    end
+  end
+  local path = TMP .. "\\nolbl.lua"
+  local f = io.open(path, "wb"); f:write("for i=1,3 do goto continue end\n"); f:close()
+  local code, out = run('"' .. CLUA .. '" "' .. path .. '"')
+  if code == 0 then
+    fail("`goto continue` with no user label was accepted -- the synthetic label leaked")
+  elseif not out:find("no visible label 'continue'", 1, true) then
+    fail("`goto continue` without a label gave the wrong error: %s", trim(out):sub(1, 80))
+  end
+end
+
+-- Errors must name `continue`, not the internal label spelling.
+do
+  local errs = {
+    { "outside a loop",        'print(1) continue print(2)',                    "continue outside loop" },
+    { "inside a nested fn",    'for i=1,3 do local f = function() continue end end', "continue outside loop" },
+    { "repeat scope conflict", 'local n=0 repeat n=n+1 if n==1 then continue end local a=n until a>2',
+                               "<continue>" },
+  }
+  for _, c in ipairs(errs) do
+    local path = TMP .. "\\cerr.lua"
+    local f = io.open(path, "wb"); f:write(c[2], "\n"); f:close()
+    local code, out = run('"' .. CLUA .. '" "' .. path .. '"')
+    if code == 0 then
+      fail("continue error case %q was accepted", c[1])
+    elseif not out:find(c[3], 1, true) then
+      fail("continue error %q should mention %q, got: %s", c[1], c[3], trim(out):sub(1, 80))
+    end
+    if out:find("(continue)", 1, true) then
+      fail("continue error %q leaked the internal label name to the user", c[1])
+    end
+  end
+end
+
 -- ---- 2. backward compatibility: nothing existing changed meaning -----------
 --
 -- Each entry is a program plus the exact output it must produce. The operators
@@ -195,7 +320,7 @@ if #failures > 0 then
   for _, why in ipairs(failures) do print("[-] FAIL " .. NAME .. ": " .. why) end
   os.exit(1)
 end
-print(("[+] PASS %s (%d/%d sugar pairs emit byte-identical EXEs, %d compatibility "
-       .. "cases unchanged, short-circuit and comment errors verified)")
-      :format(NAME, identical, #pairs_to_check, #compat))
+print(("[+] PASS %s (%d/%d operator pairs + %d/%d continue pairs emit byte-identical EXEs, %d compatibility "
+       .. "cases unchanged, continue-as-identifier and error paths verified)")
+      :format(NAME, identical, #pairs_to_check, cont_identical, #continue_pairs, #compat))
 os.exit(0)
