@@ -125,11 +125,18 @@ else
     fail("accounting broken: %d answered + %d missed ~= %d queries",
          answered, missed, queries)
   end
-  -- Every answered query performs exactly one member lookup, and nothing else
-  -- in the tree calls LcAr_MemberByHdrOff.
-  if mem_lookups ~= answered then
-    fail("member lookups (%d) should equal answered queries (%d)",
-         mem_lookups, answered)
+  -- Every armap NAME match performs exactly one member lookup, and nothing else
+  -- in the tree calls LcAr_MemberByHdrOff. A match whose entry names no real
+  -- member resolves to NULL and is not "answered", so member lookups can exceed
+  -- answered queries only on a malformed archive -- which the linker warns about
+  -- rather than hiding.
+  if mem_lookups < answered then
+    fail("member lookups (%d) below answered queries (%d): an answered query "
+         .. "must have performed one", mem_lookups, answered)
+  end
+  if debug_out:find("armap entr[a-z]* matched a name but named no member") then
+    fail("linker reported a malformed armap entry: %s",
+         (debug_out:match("%[ar%] WARNING:[^\n]*") or "?"))
   end
   if nrounds < 1 then fail("fixpoint rounds reported as %d", nrounds) end
   if entries < 1 then fail("armap entries reported as %d", entries) end

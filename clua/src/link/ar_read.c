@@ -164,31 +164,46 @@ int LcAr_Open( const char *path, LcArchive *out, char *err, size_t errlen ) {
     return 1;
 }
 
-const LcArMember *LcAr_MemberByHdrOff( LcArchive *a, uint32_t hdr_off ) {
-    uint32_t i;
-    a->stats.mem_lookups++;
-    for ( i = 0; i < a->nmembers; i++ ) {
-        a->stats.mem_compares++;
-        if ( a->members[i].hdr_off == hdr_off ) return &a->members[i];
-    }
-    return NULL;
+/* Accounting is done AFTER each loop from the exit index, never inside it: the
+** loop that ran to `i` performed i+1 comparisons if it matched and `n` if it
+** ran out. 41 million per link is enough that a counter in the loop body would
+** measurably slow every build in order to measure it. The loop bodies below are
+** therefore byte-for-byte the uninstrumented ones. */
+static uint64_t scanned( uint32_t i, uint32_t n ) {
+    return ( i < n ) ? ( uint64_t )i + 1u : ( uint64_t )n;
 }
 
-/* Linear walk of the archive symbol index. The FIRST matching entry wins:
-** an armap may name one symbol against several members, and which member gets
-** pulled decides output bytes, so any future index must preserve that
-** precedence exactly. See docs/benchmarks/archive-symbol-lookup.md. */
-const LcArMember *LcAr_MemberDefining( LcArchive *a, const char *sym ) {
+const LcArMember *LcAr_MemberByHdrOff( LcArchive *a, uint32_t hdr_off ) {
     uint32_t i;
+    for ( i = 0; i < a->nmembers; i++ )
+        if ( a->members[i].hdr_off == hdr_off ) break;
+    a->stats.mem_lookups++;
+    a->stats.mem_compares += scanned( i, a->nmembers );
+    return ( i < a->nmembers ) ? &a->members[i] : NULL;
+}
+
+/* Linear walk of the archive symbol index. The FIRST matching entry wins, even
+** when its member_off resolves to no member -- we then return NULL and the
+** caller tries the next archive. An armap may name one symbol against several
+** members, and which member gets pulled decides output bytes, so scanning past
+** a NULL here, or letting a later duplicate win, would change the emitted
+** binary. Any future index must preserve that precedence exactly.
+** See docs/benchmarks/archive-symbol-lookup.md. */
+const LcArMember *LcAr_MemberDefining( LcArchive *a, const char *sym ) {
+    const LcArMember *found = NULL;
+    uint32_t i;
+    for ( i = 0; i < a->nindex; i++ )
+        if ( strcmp( a->index[i].symname, sym ) == 0 ) break;
+    if ( i < a->nindex )
+        found = LcAr_MemberByHdrOff( a, a->index[i].member_off );
     a->stats.queries++;
-    for ( i = 0; i < a->nindex; i++ ) {
-        a->stats.compares++;
-        if ( strcmp( a->index[i].symname, sym ) == 0 ) {
-            a->stats.hits++;
-            return LcAr_MemberByHdrOff( a, a->index[i].member_off );
-        }
-    }
-    return NULL;
+    a->stats.compares += scanned( i, a->nindex );
+    /* `matched` and `hits` are counted separately on purpose: a name can match
+    ** an armap entry whose member_off names no member, which resolves to NULL.
+    ** Blurring the two would hide a malformed archive behind a plausible tally. */
+    if ( i < a->nindex ) a->stats.matched++;
+    if ( found ) a->stats.hits++;
+    return found;
 }
 
 void LcAr_Close( LcArchive *a ) {

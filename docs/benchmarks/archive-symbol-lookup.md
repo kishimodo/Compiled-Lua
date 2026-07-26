@@ -104,20 +104,31 @@ is the worst case of a linear scan and the best case of a hash.
 **The fixpoint restart multiplies the work.** 236 rounds, because the loop
 breaks out and restarts from symbol index 0 after every pull.
 
-## Estimated saving, now cross-validated
+## Estimated saving
 
-At the measured 1.9 ns per compare — derived independently two ways: 46-51 ms for
-1,500 resolutions in the harness below (≈25.8M compares), and the counts above
-against the wall-clock times — name comparison alone accounts for:
+The harness below resolves 1,500 symbols in 46-52 ms while comparing ≈25.8M
+armap entries, which puts a single failed `strcmp` at **~1.9 ns** — most compares
+reject on the first character. Applying that to the measured counts:
 
 | Build | Compares | Estimated time | Median build | Share |
 |---|---:|---:|---:|---:|
-| `print("hello")` `-O1` | 31.2M | ~58 ms | 159 ms | **~37%** |
-| `rover/src/rover.lua` `-O1` | 41.1M | ~78 ms | 215 ms | **~36%** |
+| `print("hello")` `-O1` | 31.2M | ~59 ms | 153 ms | **~39%** |
+| `rover/src/rover.lua` `-O1` | 41.1M | ~78 ms | 180 ms | **~43%** |
 
 A hash index replaces ~1,634 string compares per query with a single probe, so
 close to all of that is recoverable. An archive *parse* cache, by contrast, is
 chasing 7-8 ms.
+
+**A measurement trap worth recording.** The first version of these counters
+incremented inside the compare loop. At 41 million compares per link that cost
+~35 ms on Rover and ~6 ms on `hello` — so the instrumentation inflated the very
+denominator it was being used to divide into, and it slowed every build for a
+diagnostic almost nobody enables. Counting after each loop from its exit index
+(`i + 1` on a match, `n` on a miss) is exactly equivalent — it reproduces the
+same 25,114 / 41,058,508 / 236 — and costs three additions per query instead of
+one per compare. The medians above are from the fixed version. If you instrument
+a hot loop, measure the instrumented build against the clean one before quoting
+any share of total time.
 
 Reproduce the counts with:
 

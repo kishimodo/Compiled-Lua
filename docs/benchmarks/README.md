@@ -73,11 +73,15 @@ Warm medians compiling `rover/src/rover.lua` with the internal linker:
 
 | Configuration | Wall time |
 |---|---:|
-| `clua check` | ~14 ms |
+| `clua check` | ~14 ms (~52 ms including process start) |
 | `-O0` | ~177 ms |
-| `-O1` | ~172 ms |
+| `-O1` | ~180 ms (median, n=9, re-measured at `bc1ea8f`) |
 | `-O2` | ~170-230 ms |
 | `-O3` | ~207 ms |
+
+`print("hello")` at `-O1` is ~153 ms (median, n=11) — a tiny program costs almost
+as much as Rover, because the link is dominated by the fixed runtime/CRT closure
+rather than by user code.
 
 The front-end check is a small fraction of a warm build, so the build is
 link-dominated.

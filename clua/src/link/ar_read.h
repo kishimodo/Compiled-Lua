@@ -46,7 +46,9 @@ typedef struct {
     ** per-scan cost by roughly the archive count. */
     uint64_t     queries;      /* LcAr_MemberDefining calls                  */
     uint64_t     compares;     /* armap entries strcmp'd across those calls   */
-    uint64_t     hits;         /* calls that found a defining member          */
+    uint64_t     matched;      /* calls whose symbol NAME matched an entry     */
+    uint64_t     hits;         /* calls that returned a member (matched, and  */
+                               /*   the entry's member_off named a real one)   */
     uint64_t     mem_lookups;  /* LcAr_MemberByHdrOff calls                   */
     uint64_t     mem_compares; /* members scanned across those calls          */
 } LcArStats;

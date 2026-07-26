@@ -772,7 +772,7 @@ static int already_pulled( Linker *L, int a, uint32_t hdr_off ) {
 **
 ** One getenv per link, not per lookup. */
 static void ar_report_stats( const Linker *L, int rounds ) {
-    unsigned long long queries = 0, compares = 0, hits = 0;
+    unsigned long long queries = 0, compares = 0, matched = 0, hits = 0;
     unsigned long long mem_lookups = 0, mem_compares = 0;
     unsigned long long entries = 0, members = 0;
     int i;
@@ -783,6 +783,7 @@ static void ar_report_stats( const Linker *L, int rounds ) {
         const LcArStats *s = &L->archives[i].stats;
         queries      += s->queries;
         compares     += s->compares;
+        matched      += s->matched;
         hits         += s->hits;
         mem_lookups  += s->mem_lookups;
         mem_compares += s->mem_compares;
@@ -804,6 +805,12 @@ static void ar_report_stats( const Linker *L, int rounds ) {
     if ( queries ) fprintf( stderr, " (%llu per query)", compares / queries );
     fprintf( stderr, "\n[ar] member lookups %llu, %llu member compares\n",
              mem_lookups, mem_compares );
+    /* A name that matched an armap entry naming no real member means the archive
+    ** is malformed; it would otherwise hide inside an ordinary-looking tally. */
+    if ( matched != hits )
+        fprintf( stderr, "[ar] WARNING: %llu armap entr%s matched a name but "
+                         "named no member\n", matched - hits,
+                 ( matched - hits ) == 1 ? "y" : "ies" );
 }
 
 static int resolve_fixpoint( Linker *L ) {
