@@ -51,7 +51,7 @@ of truth -- `clua/src/common/version.h` -- and this file in step.
 
 ### Fixed
 
-- **Rover pins `%SystemRoot%\System32	ar.exe`** instead of resolving `tar` from
+- **Rover pins `%SystemRoot%\System32\tar.exe`** instead of resolving `tar` from
   `PATH`. A GNU tar earlier on `PATH` read the absolute archive argument as its
   `hostname:file` remote syntax and failed the install. It also refuses to extract
   at all when `$SystemRoot` carries shell metacharacters, rather than falling back

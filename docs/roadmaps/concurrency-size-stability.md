@@ -4,6 +4,10 @@ Status file. Any agent may update it; keep the wording agent-neutral and cite
 evidence by commit and by a file under [`docs/audits/`](../audits/) or
 [`docs/benchmarks/`](../benchmarks/) rather than by narrative claim.
 
+Successor arc: [`language-platform.md`](language-platform.md) covers tooling
+(linter, IntelliSense), language dynamism, ecosystem, and the codebase
+reorganisation, with its own execution order.
+
 Source review: [`docs/audits/2026-07-25-concurrency-size-stability-audit.md`](../audits/2026-07-25-concurrency-size-stability-audit.md)
 and its challenge pass, [`docs/audits/2026-07-25-second-reviewer-challenge.md`](../audits/2026-07-25-second-reviewer-challenge.md).
 Measured numbers: [`docs/benchmarks/`](../benchmarks/).

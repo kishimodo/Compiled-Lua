@@ -10,7 +10,7 @@ nothing shared may hard-code a machine path or a worktree name.
 | Kind | Location | Contents |
 |---|---|---|
 | Reviews and audits | [`docs/audits/`](../../docs/audits/) | dated findings, with the commits and line numbers they were verified against |
-| Roadmap and status | [`docs/roadmaps/`](../../docs/roadmaps/) | one live status row per deliverable; edit this instead of re-litigating an audit |
+| Roadmap and status | [`docs/roadmaps/`](../../docs/roadmaps/) | one live status row per deliverable; edit this instead of re-litigating an audit. `language-platform.md` holds the tooling/language/reorg design and its execution order |
 | Benchmarks | [`docs/benchmarks/`](../../docs/benchmarks/) | measurement protocol, current baselines, per-change measured results |
 | Handoffs | [`docs/handoff/`](../../docs/handoff/) | one dated file per handoff, written for whoever runs next |
 | Coordination | `tools/agent-coordination/` | this file, the path helper, the worktree helper, the mailbox server |
