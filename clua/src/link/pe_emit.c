@@ -811,7 +811,13 @@ static void ar_report_stats( const Linker *L, int rounds ) {
     fprintf( stderr, "[ar] archive queries %llu (%llu answered, %llu missed), "
                      "%llu name compares", queries, hits, queries - hits,
              compares );
-    if ( queries ) fprintf( stderr, " (%llu per query)", compares / queries );
+    /* Two decimals, not integer division: with the index in place the ratio is
+    ** below 1 (a miss stops at the first empty slot and compares nothing), and
+    ** "%llu" would print "0 per query" -- which reads as "no comparisons
+    ** happened" rather than "0.86 each". */
+    if ( queries )
+        fprintf( stderr, " (%llu.%02llu per query)", compares / queries,
+                 ( compares * 100u / queries ) % 100u );
     fprintf( stderr, "\n[ar] member lookups %llu, %llu member compares\n",
              mem_lookups, mem_compares );
     /* A name that matched an armap entry naming no real member means the archive
