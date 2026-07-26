@@ -158,5 +158,12 @@ Measured and rejected:
   `.pdata`/`.xdata` frees 128 bytes of `.text`; the resurrection hypothesis is
   refuted and the idea is not worth pursuing.
 
+Whole-session before/after:
+
+- [`session-2026-07-25-ab.md`](session-2026-07-25-ab.md) — `7fec28f` vs the
+  delivered slice, both arms freshly built: **-9.2% Rover size**, **-54% compile
+  time**, **runtime speed unchanged**.
+
 Harnesses live in `tools/`: `bench-link.sh`, `bench-optimizer.lua`,
-`bench-armap.c`, `count-imm-sites.py`.
+`bench-armap.c`, `count-imm-sites.py`, `check-byte-identity.py`,
+`bench-runtime.lua`.
