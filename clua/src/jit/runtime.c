@@ -198,8 +198,26 @@ int Rt_Call( lua_State *L, int A, int NArgs, int NResults ) {
                NOT our C local `Func`, so re-derive it from the (corrected)
                CallInfo afterwards. Without this, the nil-pad loop and the
                L->top assignment below write through a dangling pointer into the
-               freed old stack buffer when the callee frame doesn't fit. */
-            lua_checkstack( L, Cl->p->maxstacksize + 5 );
+               freed old stack buffer when the callee frame doesn't fit.
+
+               The no-growth arm is inlined verbatim from lua_checkstack
+               (lua-5.4/src/lapi.c:111-125), which on that path does exactly the
+               bounds test and the ci->top raise below. It is behaviour-preserving
+               rather than an approximation: lua_checkstack reads `ci = L->ci`,
+               and L->ci was set to Ci immediately above, so the CallInfo it
+               adjusts is the same one. Growth still goes through the real call,
+               which is what keeps the relocation comment above true. Worth
+               inlining because every Lua-to-Lua call pays it and the overwhelmingly
+               common case is that the stack is already large enough. */
+            {
+                int NeedN = Cl->p->maxstacksize + 5;
+                if ( L->stack_last.p - L->top.p > NeedN ) {
+                    if ( Ci->top.p < L->top.p + NeedN )
+                        Ci->top.p = L->top.p + NeedN;
+                } else {
+                    lua_checkstack( L, NeedN );
+                }
+            }
             Func = Ci->func.p;
             /* Nil-pad missing fixed arguments. Mirrors upstream
                luaD_precall's `for (; narg < nfixparams; narg++)
