@@ -181,9 +181,6 @@ bool lc_optimize(LcModule *m, const LcPassConfig *cfg) {
        and falsify a proof -- AOT-DEBUGREFLECT-001). The checked fastpaths,
        which re-verify tags at run time, are unaffected. */
     bool no_proofs = lc_module_uses_debug(m) || lc_module_reflects_globals(m);
-    /* TEMPORARY MEASUREMENT PROBE (revert before commit): count how many call
-       sites ip_typeprop could resolve on a module the gate currently rejects. */
-    if (getenv("CLUA_PROBE_PROOFS")) no_proofs = false;
     /* M2: interprocedural argument/return type propagation runs the local
        inference in three phases (baseline -> callee param entries -> callers
        with return summaries); the final phase leaves the same per-inst

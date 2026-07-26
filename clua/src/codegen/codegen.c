@@ -217,11 +217,10 @@ int LcCg_EmitRestoreL( LcCodeBuf *B ) {
  *  M0: no cache reload — registers are memory-resident.
  */
 int LcCg_EmitReloadRdiAndCache( LcCodeBuf *B ) {
-    if ( !LcCg_EmitRestoreL( B ) ) return 0;  /* rcx = rbx */
-    if ( !X64Emit_MovMemToReg( B, X64_RAX, X64_RCX, LC_OFF_CI ) ) return 0;
+    /* MEASUREMENT PROBE (revert before commit): 5 instr / 20 B -> 3 / 11 B. */
+    if ( !X64Emit_MovMemToReg( B, X64_RAX, X64_RBX, LC_OFF_CI ) ) return 0;
     if ( !X64Emit_MovMemToReg( B, X64_RAX, X64_RAX, LC_OFF_CI_FUNC ) ) return 0;
-    if ( !X64Emit_MovRegToReg( B, X64_RDI, X64_RAX ) ) return 0;
-    if ( !X64Emit_AddRegImm32( B, X64_RDI, 16 ) ) return 0;
+    if ( !X64Emit_LeaRegMem( B, X64_RDI, X64_RAX, 16 ) ) return 0;
     /* M0: registers are memory-resident; no cache reload (M1 enables RegAlloc) */
     return 1;
 }
