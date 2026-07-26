@@ -164,18 +164,29 @@ int LcAr_Open( const char *path, LcArchive *out, char *err, size_t errlen ) {
     return 1;
 }
 
-const LcArMember *LcAr_MemberByHdrOff( const LcArchive *a, uint32_t hdr_off ) {
+const LcArMember *LcAr_MemberByHdrOff( LcArchive *a, uint32_t hdr_off ) {
     uint32_t i;
-    for ( i = 0; i < a->nmembers; i++ )
+    a->stats.mem_lookups++;
+    for ( i = 0; i < a->nmembers; i++ ) {
+        a->stats.mem_compares++;
         if ( a->members[i].hdr_off == hdr_off ) return &a->members[i];
+    }
     return NULL;
 }
 
-const LcArMember *LcAr_MemberDefining( const LcArchive *a, const char *sym ) {
+/* Linear walk of the archive symbol index. The FIRST matching entry wins:
+** an armap may name one symbol against several members, and which member gets
+** pulled decides output bytes, so any future index must preserve that
+** precedence exactly. See docs/benchmarks/archive-symbol-lookup.md. */
+const LcArMember *LcAr_MemberDefining( LcArchive *a, const char *sym ) {
     uint32_t i;
+    a->stats.queries++;
     for ( i = 0; i < a->nindex; i++ ) {
-        if ( strcmp( a->index[i].symname, sym ) == 0 )
+        a->stats.compares++;
+        if ( strcmp( a->index[i].symname, sym ) == 0 ) {
+            a->stats.hits++;
             return LcAr_MemberByHdrOff( a, a->index[i].member_off );
+        }
     }
     return NULL;
 }

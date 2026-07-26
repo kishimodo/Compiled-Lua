@@ -1,8 +1,9 @@
 # Internal linker: archive symbol resolution
 
-Measured 2026-07-25 at `7fec28f` against the tree's own `ar_read.o`, so this
-times the shipped code rather than a reimplementation. Reproduce with
-`tools/bench-armap.c` (see the bottom of this file).
+Measured 2026-07-25 against the tree's own `ar_read.o` at `7fec28f`, so this
+times the shipped code rather than a reimplementation, and re-measured with
+in-linker counters at `37c84e2`. Reproduce with `tools/bench-armap.c` and with
+`CLUA_GC_DEBUG=1` (see below).
 
 ## Why this exists
 
@@ -69,25 +70,63 @@ Two nested linear scans, neither touched by `092122b`:
   symbol index 0** whenever anything was pulled, so every still-unresolved symbol
   is re-scanned once per fixpoint round.
 
-## What it implies
+## Measured: what a real link actually does
 
-A hash index would take the per-lookup cost to roughly nothing, the same way
-`gsym_find` did. On a warm ~170 ms Rover build the saving is bounded by the
-number of lookups a real link performs:
+The estimate above left one open variable — how many lookups a real link
+performs. `CLUA_GC_DEBUG` now counts them, so it is no longer an estimate:
 
-| Lookups per link | Saving | Share of a ~170 ms build |
-|---:|---:|---:|
-| 1,000 | ~35 ms | ~20% |
-| 3,000 | ~97 ms | ~57% |
+| Build | Archive queries | Name compares | Compares/query | Fixpoint rounds |
+|---|---:|---:|---:|---:|
+| `print("hello")` `-O1` | 19,111 | **31,224,382** | 1,633 | 183 |
+| 3-line table probe `-O1` | 25,114 | **41,058,508** | 1,634 | 236 |
+| `rover/src/rover.lua` `-O1` | 25,114 | **41,058,508** | 1,634 | 236 |
 
-**The open uncertainty is that lookup count**, and it is the reason this note
-does not claim a single figure. A `hello` build reports 994 contributions
-(656 kept, 338 dropped), which bounds the pulled-object count but not the number
-of symbol queries — the fixpoint restart means queries can exceed distinct
-undefined symbols by the round count. Counting the calls behind `CLUA_GC_DEBUG`
-settles it and should precede the fix.
+Read the unit carefully: **one query is one `(symbol, archive)` pair**, not one
+symbol resolution. A resolution asks each of the 12 archives in turn until one
+answers, so resolutions are roughly `queries / 12` — about 2,000, which is what
+the earlier estimate guessed. Dividing compares by resolutions instead of by
+queries overstates the per-scan cost by an order of magnitude, and the report
+labels itself to prevent exactly that mistake.
 
-An archive *parse* cache, by contrast, is chasing 7-8 ms.
+Three things fall out of these numbers:
+
+**The cost is a fixed per-link tax, not proportional to program size.** A
+three-line probe and the 2,555-line Rover produce *identical* counts, because
+archive resolution is driven by the runtime/CRT closure rather than by user code.
+`hello` differs only because it enables fewer libraries. So this is not a win
+that scales with program size — it is a win every build gets, including the
+smallest ones.
+
+**98% of queries are misses.** Only 465 of 25,114 queries find a defining
+member; the other 24,649 scan an archive's whole index and return nothing. A miss
+is the worst case of a linear scan and the best case of a hash.
+
+**The fixpoint restart multiplies the work.** 236 rounds, because the loop
+breaks out and restarts from symbol index 0 after every pull.
+
+## Estimated saving, now cross-validated
+
+At the measured 1.9 ns per compare — derived independently two ways: 46-51 ms for
+1,500 resolutions in the harness below (≈25.8M compares), and the counts above
+against the wall-clock times — name comparison alone accounts for:
+
+| Build | Compares | Estimated time | Median build | Share |
+|---|---:|---:|---:|---:|
+| `print("hello")` `-O1` | 31.2M | ~58 ms | 159 ms | **~37%** |
+| `rover/src/rover.lua` `-O1` | 41.1M | ~78 ms | 215 ms | **~36%** |
+
+A hash index replaces ~1,634 string compares per query with a single probe, so
+close to all of that is recoverable. An archive *parse* cache, by contrast, is
+chasing 7-8 ms.
+
+Reproduce the counts with:
+
+```sh
+CLUA_GC_DEBUG=1 clua build rover/src/rover.lua -O1 -o out.exe
+```
+
+`tools/test-link-stats.lua` asserts the report is self-consistent and that
+enabling it does not change a single output byte.
 
 ## Determinism constraint on any fix
 
@@ -110,4 +149,6 @@ gcc -std=c99 -O2 -I clua/src -o bench-armap.exe \
 
 Numbers are wall-clock on a single machine under normal desktop load. The
 per-lookup figure is stable across query counts, which is the property that
-matters here; the absolute milliseconds are not a controlled benchmark.
+matters here; the absolute milliseconds are not a controlled benchmark. The
+*counts* from `CLUA_GC_DEBUG` are exact and machine-independent — prefer them,
+and treat the derived milliseconds as the softer half of the claim.

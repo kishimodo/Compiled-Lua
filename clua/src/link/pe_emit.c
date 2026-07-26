@@ -759,12 +759,61 @@ static int already_pulled( Linker *L, int a, uint32_t hdr_off ) {
     return 0;
 }
 
+/* CLUA_GC_DEBUG: report what archive symbol resolution actually cost.
+**
+** The quantity that predicts link time is the number of armap NAME COMPARES,
+** not the archive count or the megabytes read: LcAr_MemberDefining walks its
+** archive's whole symbol index, the loop below asks every archive in order, and
+** the outer fixpoint restarts from symbol 0 after every pull, so unresolved
+** symbols are rescanned once per round. Reading and indexing all ten CRT
+** archives measures 7-8 ms; a single resolution measures ~33 us. This report
+** exists to turn the remaining "how many lookups does a real link do?" estimate
+** into a number. See docs/benchmarks/archive-symbol-lookup.md.
+**
+** One getenv per link, not per lookup. */
+static void ar_report_stats( const Linker *L, int rounds ) {
+    unsigned long long queries = 0, compares = 0, hits = 0;
+    unsigned long long mem_lookups = 0, mem_compares = 0;
+    unsigned long long entries = 0, members = 0;
+    int i;
+
+    if ( !getenv( "CLUA_GC_DEBUG" ) ) return;
+
+    for ( i = 0; i < L->narchives; i++ ) {
+        const LcArStats *s = &L->archives[i].stats;
+        queries      += s->queries;
+        compares     += s->compares;
+        hits         += s->hits;
+        mem_lookups  += s->mem_lookups;
+        mem_compares += s->mem_compares;
+        entries      += L->archives[i].nindex;
+        members      += L->archives[i].nmembers;
+    }
+
+    fprintf( stderr, "[ar] %d archive(s), %llu armap entries, %llu members, "
+                     "%d fixpoint round(s)\n", L->narchives, entries, members,
+             rounds );
+    /* "queries" counts (symbol, archive) pairs: one scan of one archive's
+    ** index. A single symbol resolution asks several archives in turn, so
+    ** queries exceed resolutions by roughly the archive count -- the label says
+    ** so because dividing by the wrong denominator overstates the per-scan cost
+    ** by an order of magnitude. */
+    fprintf( stderr, "[ar] archive queries %llu (%llu answered, %llu missed), "
+                     "%llu name compares", queries, hits, queries - hits,
+             compares );
+    if ( queries ) fprintf( stderr, " (%llu per query)", compares / queries );
+    fprintf( stderr, "\n[ar] member lookups %llu, %llu member compares\n",
+             mem_lookups, mem_compares );
+}
+
 static int resolve_fixpoint( Linker *L ) {
     int changed = 1;
+    int rounds  = 0;
 
     while ( changed ) {
         int i;
         changed = 0;
+        rounds++;
         /* Walk every currently-known symbol. Pulling a member can append new
         ** symbols (handled by the outer while + nsyms re-read each pass) and
         ** realloc the array, so re-index L->syms[i] every iteration and never
@@ -806,6 +855,7 @@ static int resolve_fixpoint( Linker *L ) {
             if ( changed ) break; /* array may have moved; restart the pass */
         }
     }
+    ar_report_stats( L, rounds );
     return 1;
 }
 
