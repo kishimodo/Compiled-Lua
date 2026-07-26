@@ -137,6 +137,21 @@ Output stays reproducible: two `-O1` builds of Rover share SHA-256
   `Rt_ShiftI` and `Rt_OrderISlow`. Matches at O0, O1, O2 and O3.
 - **Mutation-verified:** dropping `REX.R` from the zero tier makes the compiled
   binary segfault at O0 and O1, so the differential test demonstrably bites.
+- **Tier coverage of the differential fixture, measured** rather than assumed, by
+  scanning its own compiled binary for the anchored shim shape (260 call sites):
+
+  | argument | zero | positive | negative |
+  |---|---:|---:|---:|
+  | `a` (RDX) | 41 | 219 | **0** |
+  | `b` (R8) | 94 | 135 | 31 |
+  | `c` (R9) | 141 | 95 | 24 |
+
+  So eight of the nine (register × tier) combinations are exercised end-to-end
+  against the interpreter. The ninth, RDX-negative, is **unreachable from
+  codegen** — argument `a` is always a register index or `0` — and is covered by
+  the exact-byte unit test only. A naive unanchored byte count suggests otherwise
+  (`48 C7 C2` is also an ordinary CRT encoding, and appears 3 times); the anchored
+  count is the one to trust.
 
 ### Not done here
 
