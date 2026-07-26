@@ -65,6 +65,18 @@ of truth -- `clua/src/common/version.h` -- and this file in step.
   `docs/benchmarks/` records every measurement with its method, including one
   **negative** result (unrooting `.pdata`/`.xdata` frees 128 bytes of `.text`, so
   the resurrection hypothesis is refuted and the idea should not be re-proposed).
+- `docs/roadmaps/no-crt.md` plans CRT-free output (`--crt=none`), with the measured
+  dependency surface in `docs/benchmarks/no-crt-baseline.md`: of 552 external
+  symbols, **100** are a genuine libc dependency (93 UCRT imports plus 7 static
+  mingw). Two findings shape the plan -- `libmingwex.a` provides none of the
+  transcendentals, so an own libm is unavoidable and the oracle must be rebuilt
+  against the same libc; and the Lua core already avoids CRT `setjmp` via
+  `__builtin_setjmp`. Recorded up front: the CRT is **already** outside our
+  binaries (they import `api-ms-win-crt-*`), so `--crt=none` is a
+  self-containment and determinism feature and a net **size increase** -- the size
+  lever is `-ffunction-sections` on the runtime instead.
+- `docs/handoff/2026-07-26-ultracode-prompt.md` holds the kickoff prompt for the
+  platform + no-CRT arc, delegating detail to the roadmaps so it cannot go stale.
 
 ## [0.2.0-beta.6] - 2026-06-13
 

@@ -8,6 +8,14 @@ This is a **design document with an execution order**, not a status file. Per-it
 status belongs in [`concurrency-size-stability.md`](concurrency-size-stability.md)
 or a successor once items start landing.
 
+**Companion plan.** Shipping binaries with no CRT dependency is in scope for this
+arc and is designed separately in [`no-crt.md`](no-crt.md), because it is a
+self-contained track with its own risk profile (it hinges on correctly-rounded
+float conversion, and it forces a decision about the differential oracle). Its
+items are `N0`–`N10` and they are placed in the execution order below as Phase B′
+(§7). Read that document before touching `clua/src/libc/` or the linker's
+archive-set selection.
+
 ---
 
 ## 0. What already exists (survey, not assumption)
@@ -25,6 +33,7 @@ Anything designed here has to extend these, not duplicate them:
 | Package manager | `rover/src/rover.lua` (2,627 lines) | Transactional store, locks, semver, signed indexes. Single file, `cmd.exe`-driven |
 | Packages | 195 total | Substantial stdlib already |
 | Editor integration | — | **None.** No LSP, no `.vscode`, no `textDocument` anywhere |
+| C runtime | `build/bin/sysroot/` (10 archives) | Output imports `api-ms-win-crt-*` (UCRT); **100 libc symbols** are a genuine dependency. No own libc — see [`no-crt.md`](no-crt.md) |
 
 **The central architectural problem:** three independent front ends. A linter and
 IntelliSense cannot be built cheaply on top of that, and the two existing analysis
@@ -345,6 +354,26 @@ Rationale: every later item touches codegen or the linker. Splitting first means
 feature commits are small and reviewable; splitting later means a merge across a
 moved file for every feature in flight.
 
+### Phase B′ — no-CRT track (parallel with C–E; see [`no-crt.md`](no-crt.md))
+
+Independent of the front end, so it runs as a third track. Gated to **start after
+item 4** (the `pe_emit.c` split), because `N2` touches the archive-set selection
+that split is about to move — landing `N2` first means a merge across a moved file.
+
+`N0`–`N2` (surface audit, the libc-vs-CRT differential harness, and `--crt=`
+plumbing with no behaviour change) are worth landing even if the rest is deferred:
+they make the dependency measurable and buy the gate before any implementation
+exists. `N7`/`N8` (correctly-rounded `printf` float conversion and `strtod`) are
+over half the total effort and carry essentially all the risk. `N9` flips
+`clua-interp.exe` onto the same libc and **must** land before `--crt=none` is
+called usable — see `no-crt.md` §4 for why that is the only sound answer to the
+oracle problem.
+
+Two things not to get wrong: `--crt=ucrt` stays the default, and `--crt=none` is
+**not** a size optimisation (`no-crt.md` §0 and §8 — it is a net increase; the real
+size lever is `-ffunction-sections` on the runtime, which belongs in
+`concurrency-size-stability.md`).
+
 ### Phase C — the front end (the keystone)
 
 8. `fe/lexer.c` + `fe/cst.c` + `fe/span.c`, with the lexer replacing the lint
@@ -423,3 +452,7 @@ compatibility, not copying, and is actively desirable.
 - **No unmeasured performance claims.** Every item that claims a size or speed
   effect gets an entry in `docs/benchmarks/` with its method, per the rules already
   in that directory.
+- **No weakening the differential suite.** This applies with particular force to
+  the no-CRT track, where an own libm *will* differ from `ucrtbase` in the last
+  ulp. The answer is to rebuild the oracle against the same libc
+  ([`no-crt.md`](no-crt.md) §4), never to loosen the comparison.
