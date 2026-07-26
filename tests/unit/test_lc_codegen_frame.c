@@ -27,7 +27,15 @@ int main( void ) {
     CHECK( LcCodeBuf_Init( &B, 64 ) == 1 );
 
     /* ---- prologue ---- */
-    CHECK( LcCg_EmitPrologue( &B ) == 1 );
+    /* The prologue and epilogue now take an explicit frame descriptor instead
+       of reading file-scope globals, so the two must be handed the SAME object:
+       an asymmetric frame returns with a corrupt RSP. This case uses the plain
+       frame (no xmm spill, zero bias), which is what the byte assertions below
+       were written against. */
+    LcCgFrame frame;
+    frame.savedpc_bias = 0;
+    frame.save_xmm     = 0;
+    CHECK( LcCg_EmitPrologue( &B, &frame ) == 1 );
     size_t after_prologue = B.used;
     CHECK( after_prologue > 8 );        /* 8 pushes + sub rsp + several movs + add */
     CHECK( B.bytes[0] == 0x57 );        /* PUSH RDI (reg 7, no REX) */
@@ -48,7 +56,7 @@ int main( void ) {
            B.bytes[17] == 0x00 && B.bytes[18] == 0x00 );
 
     /* ---- epilogue ---- */
-    CHECK( LcCg_EmitEpilogue( &B ) == 1 );
+    CHECK( LcCg_EmitEpilogue( &B, &frame ) == 1 );
     CHECK( B.used > after_prologue );
     /* ADD RSP,0x28 must mirror the prologue's SUB RSP,0x28 exactly. */
     CHECK( B.bytes[after_prologue + 0] == 0x48 &&

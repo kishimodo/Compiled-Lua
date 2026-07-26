@@ -23,6 +23,11 @@ check, e.g.
     nm build/bin/obj/codegen/codegen.o | grep -E "^[0-9a-f]+ [bBdD] "
 
 which lists the mutable file-scope objects that remain.
+
+Every input path must be STABLE across runs: the compiled binary embeds its
+source path in each Proto, so building the same program from a differently named
+directory changes the output bytes. The generated input therefore lives at a
+fixed path under build/tmp/ rather than in a fresh temp directory.
 """
 from __future__ import annotations
 
@@ -30,7 +35,6 @@ import hashlib
 import pathlib
 import subprocess
 import sys
-import tempfile
 
 LEVELS = ("-O0", "-O1", "-O2")
 
@@ -57,7 +61,13 @@ def main(argv: list[str]) -> int:
         print(f"{clua} not built", file=sys.stderr)
         return 2
 
-    work = pathlib.Path(tempfile.mkdtemp(prefix="clua-byteid-"))
+    # A FIXED path, not a fresh temp directory. The compiled binary embeds its
+    # source path in every Proto, so a randomly named directory changes the
+    # output bytes on every run and the tool reports a divergence for a tree that
+    # did not change. This was found the hard way -- two consecutive runs of the
+    # earlier version disagreed about `hello` while agreeing on everything else.
+    work = root / "build" / "tmp" / "byteid"
+    work.mkdir(parents=True, exist_ok=True)
     hello = work / "hello.lua"
     hello.write_text('print("hello")\n', encoding="ascii")
 
@@ -82,10 +92,6 @@ def main(argv: list[str]) -> int:
             print(f"{name:14} {lvl:4} {out.stat().st_size:>9,}  {digest}")
             out.unlink()
     hello.unlink()
-    try:
-        work.rmdir()
-    except OSError:
-        pass
     return rc
 
 

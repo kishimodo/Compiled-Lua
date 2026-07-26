@@ -25,9 +25,9 @@ Conventions for editing this file:
 | 3 | Index the internal linker's symbol and contribution lookups | done | `092122b`; [`benchmarks/linker-index.md`](../benchmarks/linker-index.md) — real but small (-1.9% Rover, -4.6% hello); removes the scaling cliff |
 | 4 | Hoist the `savedpc` base into the frame prologue | done | `9d3ded2` (from `f39a1bd`); [`benchmarks/codegen-savedpc.md`](../benchmarks/codegen-savedpc.md) — Rover `.text` -9%, whole PE -7.6% |
 | 5 | Byte-identity/reproducibility gates, then `-Oz` lowering (selective prologue saves, outlined slow paths); make `-O2`/`-O3` honest | in progress | `-O2` is byte-identical to `-O1` today; `-O1` costs Rover ~14 KB over `-O0`. **imm32 helper arguments moved out of this row** — measurement shows it is not a tradeoff and must not be gated behind `-Oz`; see the tracker below |
-| 6 | Optimizer verifier, codegen context isolation, deterministic IDs, build header-dependency tracking, parallel-safe build jobs | open | `lc_module_verify` returns `true` unconditionally; `codegen.c` still holds `g_lc_opt_level`, `g_res_*`, `g_savedpc_bias` |
+| 6 | Optimizer verifier, codegen context isolation, deterministic IDs, build header-dependency tracking, parallel-safe build jobs | partly done | **codegen context isolation done** (6 globals -> 0, [`benchmarks/codegen-context.md`](../benchmarks/codegen-context.md)); **header-dependency tracking done**; `lc_module_verify` still returns `true` unconditionally |
 | 7 | Split Rover solve/fetch/verify/install; real backtracking solver; bounded concurrent fetch and verification | open | `resolve_graph` still installs while resolving |
-| 8 | Parallelize compiler-local work; overlap immutable archive-index loading; keep deterministic layout/publication barriers | blocked by 6 | needs codegen context isolation first |
+| 8 | Parallelize compiler-local work; overlap immutable archive-index loading; keep deterministic layout/publication barriers | unblocked, open | codegen state is now isolated. Remaining shared surface before a worker pool: the allocator, `LcBr_Resolve`'s stderr diagnostics, and `lc_codegen`'s output ordering — see [`benchmarks/codegen-context.md`](../benchmarks/codegen-context.md) |
 | 9 | Incremental cache / build-server mode, UTF-16 long-path and process layer, full Windows fault matrix | open | audit sections "Windows stability" and "Test additions required". **Deprioritised:** the archive-*parse* cache this row inherited from audit item 10 is worth only 7-8 ms; the lookup index below is the real linker win |
 
 ## Current work in flight (2026-07-25)
@@ -44,7 +44,7 @@ above stays as the strategic order.
 | 5 | **imm32 helper-call arguments** | done | **-73,216 bytes** measured (-12.0% of Rover's `.text`, -9.9% whole file), against a 73,124 prediction; hello unchanged. Unconditional, not behind `-Oz`. [`helper-call-args.md`](../benchmarks/helper-call-args.md) |
 | 6 | **Hash the archive symbol index** | done | **-52% warm build** (rover -O1 180->87 ms, hello 153->76 ms); 41,058,508 name compares -> 21,537 with every resolution count bit-identical; output byte-identical. [`archive-symbol-lookup.md`](../benchmarks/archive-symbol-lookup.md) |
 | 7 | `-MMD -MP` header dependencies | done | touching `ir.h` rebuilds 7 objects including `lift.o`; a struct-layout change in `ar_read.h` rebuilds both objects sharing its `sizeof`, where before it rebuilt neither. `tools/test-build-header-deps.lua` |
-| 8 | Codegen context isolation | open | row 6 prerequisite; must follow step 5, same file |
+| 8 | Codegen context isolation | done | 6 mutable file-scope objects -> 0 (`nm`), all 18 byte-identity rows unchanged. [`codegen-context.md`](../benchmarks/codegen-context.md); gated by `tools/test-codegen-no-globals.lua` |
 | 9 | Implement `lc_module_verify` | open | a safety control that only appears active |
 | 10 | Make `-O2`/`-O3` honest | open | `-O1` and `-O2` share SHA-256 `e474660e…0d21bde` |
 
@@ -86,5 +86,6 @@ Independent of the order above, and each blocking a claim rather than a commit:
    job counts;
 3. a green full suite from `build\run-tests.bat`, read together with the
    harness caveats in the audit;
-4. no new file-scope mutable state in `clua/src/codegen/` — row 6 exists to
-   drain that list, not to grow it.
+4. no new file-scope mutable state in `clua/src/codegen/` — the list is now
+   empty and `tools/test-codegen-no-globals.lua` keeps it that way. Put
+   per-compilation values in `LcCgCtx` and per-function values in `LcCgFnCtx`.

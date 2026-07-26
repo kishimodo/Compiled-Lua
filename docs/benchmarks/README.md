@@ -129,6 +129,8 @@ Implemented changes:
   **-73,216 bytes** on Rover, -12% of `.text`, `hello` unchanged.
 - [`archive-symbol-lookup.md`](archive-symbol-lookup.md) — per-archive armap and
   member indexes: **-52% warm build time**, output byte-identical.
+- [`codegen-context.md`](codegen-context.md) — codegen's six mutable file-scope
+  objects drained to zero; a pure refactor, so the evidence is what did not move.
 
 Measured and rejected:
 

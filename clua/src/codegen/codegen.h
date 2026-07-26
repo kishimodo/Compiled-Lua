@@ -86,6 +86,13 @@ typedef struct LcCodeModule {
 } LcCodeModule;
 
 /* Compile the optimized module. Each LcFunc -> one LcCompiledFunc. */
+/* Per-compilation codegen configuration: written once from the module before any
+   function is generated, then READ-ONLY, so it is shareable by const pointer
+   across future per-function workers. */
+typedef struct LcCgCtx {
+    int opt_level;   /* 0 = faithful boxed baseline; >=1 the M1 typed fastpaths */
+} LcCgCtx;
+
 LcCodeModule *lc_codegen(LcModule *m);
 void          lc_codemodule_free(LcCodeModule *cm);
 
@@ -99,8 +106,17 @@ void          lc_codemodule_free(LcCodeModule *cm);
 /*   SUB RSP,0x20 (shadow space) -> 96B frame, 16-aligned at calls.    */
 /*   Helper ABI: RCX=L, RDX/R8/R9=args, RAX=ret.                       */
 /* ------------------------------------------------------------------ */
-int LcCg_EmitPrologue        ( LcCodeBuf *B );  /* save regs, SUB RSP, RBX=L, RDI=ci->func+16 */
-int LcCg_EmitEpilogue        ( LcCodeBuf *B );  /* ADD RSP, pop regs, RET                     */
+/* Everything the prologue and every epilogue must AGREE on, for one function.
+   Pass the SAME object to both: an asymmetric frame returns to the runtime with
+   a corrupt RSP. Was a pair of file-scope globals in codegen.c until the
+   per-function state was isolated. */
+typedef struct LcCgFrame {
+    int32_t savedpc_bias;  /* RBP = Proto.code + bias; cancels at every site   */
+    int     save_xmm;      /* function uses float residency: spill xmm6-10     */
+} LcCgFrame;
+
+int LcCg_EmitPrologue        ( LcCodeBuf *B, const LcCgFrame *F );
+int LcCg_EmitEpilogue        ( LcCodeBuf *B, const LcCgFrame *F );
 int LcCg_EmitRestoreL        ( LcCodeBuf *B );  /* MOV RCX, RBX                               */
 int LcCg_EmitReloadRdiAndCache( LcCodeBuf *B ); /* recompute RDI after a stack-relocating call */
 
