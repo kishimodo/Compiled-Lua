@@ -48,14 +48,22 @@ framing overstated the present cost:
   (656 kept, 338 dropped), so the replaced scans covered roughly a thousand
   entries, not a pathological set;
 - the run-to-run spread of about +-25 ms is **wider than the Rover delta**;
-- the remaining ~165 ms of a link-dominated build is archive parsing (13.9 MB
-  CRT sysroot) plus PE writing, not symbol resolution.
+- the remaining ~165 ms of a link-dominated build is elsewhere.
 
 The change removes a scaling cliff and is a prerequisite for larger inputs and
 for any future linker threading. It is not the source of a large wall-clock win
-today. The next linker performance target is a validated archive-index cache
-with overlapped archive loading — roadmap row 9 / audit delivery item 10 — and
-that is still unmeasured.
+today.
+
+**Where "elsewhere" actually is — corrected 2026-07-25.** This note originally
+attributed the remaining time to parsing the 13.9 MB CRT sysroot and named an
+archive-index cache as the next target. Measurement says otherwise: reading and
+indexing all ten archives takes **7-8 ms**, whereas the *archive symbol* lookups
+this commit never touched cost **~33 us each** over a 19,775-entry linear scan.
+`092122b` indexed `gsym_find` and the contribution map; `LcAr_MemberDefining` in
+`ar_read.c` is still a linear `strcmp` walk, with a nested linear member scan on
+every hit, called per unresolved symbol per archive and restarted on every
+fixpoint round. See [`archive-symbol-lookup.md`](archive-symbol-lookup.md). The
+parse cache is chasing 8 ms; the armap index is worth tens.
 
 ## Regression cover
 

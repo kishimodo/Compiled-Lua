@@ -80,8 +80,14 @@ Warm medians compiling `rover/src/rover.lua` with the internal linker:
 | `-O3` | ~207 ms |
 
 The front-end check is a small fraction of a warm build, so the build is
-link-dominated. The remaining floor is archive parsing (a 13.9 MB CRT sysroot)
-plus PE writing, not symbol resolution.
+link-dominated.
+
+**Corrected 2026-07-25:** the earlier claim that the remaining floor is "archive
+parsing plus PE writing, not symbol resolution" is wrong. Reading and indexing all
+ten CRT archives (14 MB) measures **7-8 ms**, while archive *symbol resolution*
+costs **~33 us per lookup** against a 19,775-entry linear scan — tens of
+milliseconds of a ~170 ms build. See
+[`archive-symbol-lookup.md`](archive-symbol-lookup.md).
 
 ## Harnesses
 
@@ -110,5 +116,18 @@ to recompile that one object with the flags from the build log and relink
 
 ## Files
 
+Implemented changes:
+
 - [`linker-index.md`](linker-index.md) — symbol/contribution indexing (`092122b`).
 - [`codegen-savedpc.md`](codegen-savedpc.md) — `savedpc` base hoist (`9d3ded2`).
+
+Measured opportunities, not yet implemented:
+
+- [`helper-call-args.md`](helper-call-args.md) — 4,724 helper-call sites spend
+  141,720 bytes on `imm64` argument loads; 73,124 recoverable, no tradeoff.
+- [`archive-symbol-lookup.md`](archive-symbol-lookup.md) — ~33 us per archive
+  symbol resolution over a 19,775-entry linear scan; the parse it was blamed on
+  is only 7-8 ms.
+
+Harnesses live in `tools/`: `bench-link.sh`, `bench-optimizer.lua`,
+`bench-armap.c`, `count-imm-sites.py`.
