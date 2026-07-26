@@ -273,6 +273,20 @@ int lc_drive( const LcDriverOptions *opt ) {
         }
     }
 
+    /* Verify the IR that is about to be code-generated, at EVERY level. The
+    ** optimizer's own verify_each checks only run when lc_optimize runs, and it
+    ** is skipped entirely at -O0 -- which is precisely the configuration used to
+    ** isolate a suspected miscompile, so it is the last place that should go
+    ** unchecked. Cheap: one walk of the IR against the source Proto. */
+    {
+        char verr[256] = { 0 };
+        if ( !lc_module_verify( m, verr, sizeof verr ) ) {
+            fprintf( stderr, "aotc: internal error: malformed IR before codegen: %s\n",
+                     verr[0] ? verr : "(no detail)" );
+            goto cleanup;
+        }
+    }
+
     /* ---- 5. codegen ---- */
     cm = lc_codegen( m );
     if ( cm == NULL ) {

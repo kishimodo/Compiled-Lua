@@ -137,10 +137,32 @@ static bool lc_module_reflects_globals(LcModule *m) {
 }
 
 
+/* Run the IR verifier if the caller asked for it, and report WHICH pass left the
+** IR malformed. Before this, LcPassConfig.verify_each was declared, set to true
+** by the driver, and never read -- a safety control that only appeared active.
+**
+** A verification failure is a hard error, not a warning: the IR is the input to
+** codegen, so continuing past a malformed module means emitting native code from
+** it. Better a failed compile with a located message than a binary nobody can
+** explain. */
+static bool opt_verify(LcModule *m, const LcPassConfig *cfg, const char *after) {
+  char err[256];
+  if (!cfg || !cfg->verify_each) return true;
+  if (lc_module_verify(m, err, sizeof err)) return true;
+  fprintf(stderr, "clua: internal error: IR verification failed after %s: %s\n",
+          after, err[0] ? err : "(no detail)");
+  return false;
+}
+
 bool lc_optimize(LcModule *m, const LcPassConfig *cfg) {
   if (!m || !cfg) return false;
 
+  /* Verify what we were HANDED before touching it: a failure here is the lifter's
+  ** or the front end's, not any pass's, and saying so saves the next bisect. */
+  if (!opt_verify(m, cfg, "lift (module entry to the optimizer)")) return false;
+
   lc_build_callgraph(m);
+  if (!opt_verify(m, cfg, "lc_build_callgraph")) return false;
 
   for (uint32_t i = 0; i < m->nfuncs; i++) {
     LcFunc *f = m->funcs[i];
@@ -172,6 +194,7 @@ bool lc_optimize(LcModule *m, const LcPassConfig *cfg) {
       lc_pass_raw_table(f);
     }
     lc_pass_inline_small(m);
+    if (!opt_verify(m, cfg, "the -O1 pass group")) return false;
   }
 
   if (cfg->opt_level >= 2 && cfg->interprocedural) {
@@ -179,12 +202,16 @@ bool lc_optimize(LcModule *m, const LcPassConfig *cfg) {
     lc_pass_monomorphize(m);
     lc_pass_ip_devirt(m);
     lc_pass_dead_global(m);
+    if (!opt_verify(m, cfg, "the -O2 interprocedural pass group")) return false;
   }
 
   if (cfg->opt_level >= 3 && cfg->escape_analysis) {
     lc_pass_escape(m);
     lc_pass_scalar_replace(m);
     for (uint32_t i = 0; i < m->nfuncs; i++) lc_pass_barrier_elide(m->funcs[i]);
+    /* scalar_replace REWRITES instructions (NEWTABLE becomes LOADNIL), so this
+    ** is the one -O group that actually mutates shape today. */
+    if (!opt_verify(m, cfg, "the -O3 escape/scalar-replacement group")) return false;
   }
 
   /* lowering prep — always */
@@ -192,6 +219,9 @@ bool lc_optimize(LcModule *m, const LcPassConfig *cfg) {
     lc_pass_lower(m->funcs[i]);
     lc_pass_safepoints(m->funcs[i]);
   }
+
+  /* The boundary that matters: whatever leaves here goes straight into codegen. */
+  if (!opt_verify(m, cfg, "lowering prep (final optimizer boundary)")) return false;
 
   return true;
 }
