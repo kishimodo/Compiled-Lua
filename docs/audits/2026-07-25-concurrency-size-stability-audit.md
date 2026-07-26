@@ -162,6 +162,23 @@ The emitted Rover user object was 538,070 bytes:
 - Proto blob: `0x13d38` bytes;
 - the top-level `luac_fn_0` alone: `0x6507a` bytes.
 
+Re-measured at `092122b` on `claude/final-integration`, so that any later size
+work has a current reference point rather than a stale one:
+
+| Build | `-O0` | `-O1` | `-O2` |
+|---|---:|---:|---:|
+| `print("hello")` | 137,216 | 137,216 | 137,216 |
+| `rover/src/rover.lua` | 784,384 | 799,232 | 799,232 |
+
+Rover grew from the 689,152 bytes recorded above to 799,232 bytes at `-O1`.
+This is **not** a code-generation size regression: `rover/src/rover.lua` itself
+grew from 1,972 to 2,555 lines when the transactional store, locking, and
+rollback work landed. The `-O1` over `-O0` penalty is unchanged in character
+(14,848 bytes here), and `-O2` still emits exactly the same bytes as `-O1`,
+which continues to confirm that the higher `-O` levels do no additional work.
+Any future `emit_store_savedpc` hoisting or `-Oz` lowering should be measured
+against these two numbers, not against the older table.
+
 The front-end check is a small fraction of total warm build time. Link/archive
 processing and native code volume are therefore higher-value targets than
 parser-only parallelism.
