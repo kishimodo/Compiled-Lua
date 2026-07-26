@@ -1487,6 +1487,30 @@ local function foreign_warning(name, source)
     .. "and accepted or denied.", name, source))
 end
 
+-- Resolve the tar to extract with. PINNED to the bsdtar that ships in
+-- %SystemRoot%\System32 (Windows 10 1803+) rather than whatever `tar` PATH
+-- happens to offer, for two independent reasons:
+--   1. a GNU tar earlier on PATH -- Git for Windows installs one at
+--      usr\bin\tar.exe -- reads our absolute "C:\...\pkg.tgz" archive argument
+--      as GNU tar's `hostname:file` REMOTE syntax and dies with
+--      "Cannot connect to C: resolve failed". bsdtar has no remote syntax at
+--      all, so an absolute -f argument is unambiguous.
+--   2. this extracts an UNTRUSTED archive, and GNU tar and bsdtar differ on
+--      absolute member names, `..` components, symlinks and hardlinks. Which
+--      binary defines the extraction sandbox must not be decided by the
+--      caller's PATH.
+-- $SystemRoot reaches cmd.exe interpolated, so it gets the same allowlist
+-- treatment as every other environment-derived path here.
+local function tar_exe()
+  local root = os.getenv("SystemRoot") or os.getenv("windir")
+  if not root or root == "" or not shell_safe_path(root) then return nil end
+  local exe = bs(root) .. "\\System32\\tar.exe"
+  local f = io.open(exe, "rb")           -- io.open, not exists(): exists()
+  if not f then return nil end           -- slurps the whole file first
+  f:close()
+  return exe
+end
+
 -- Fetch github.com/<owner>/<repo> into a PRIVATE per-operation %TEMP% staging
 -- dir (never the old predictable %TEMP%\rover-foreign\<owner>-<repo>, which a
 -- second rover would delete mid-extract) and locate the package root (the
@@ -1520,7 +1544,34 @@ local function fetch_github(owner, repo)
   end
   local ex = work .. "\\x"
   if not ensure_dir(ex) then return bail("cannot create the extract directory " .. ex) end
-  if not sh('tar -xzf "' .. tgz .. '" -C "' .. ex .. '" >nul 2>&1') then
+  local tarbin = tar_exe()
+  local cmd
+  if tarbin then
+    -- bsdtar has no remote-archive syntax, so absolute arguments are safe, and
+    -- keeping them absolute means no `cd` -- which matters because cmd cannot
+    -- `cd /d` into a UNC path, and %TEMP% can be one.
+    cmd = '"' .. tarbin .. '" -xzf "' .. tgz .. '" -C "' .. ex .. '" >nul 2>&1'
+  else
+    -- No System32 tar on this host (pre-1803 Windows). Fall back to PATH, with
+    -- BOTH paths relative to the staging directory. Measured, not assumed: an
+    -- MSYS GNU tar (Git for Windows) fails on either absolute argument, and in
+    -- two different ways --
+    --   -xzf "C:\...\pkg.tgz"  -> "Cannot connect to C: resolve failed"
+    --                             (parsed as GNU tar's hostname:file syntax)
+    --   -C   "C:\...\x"        -> mangled to "C\:\\Users\\..." by MSYS path
+    --                             translation, then "Cannot open"
+    -- so making only the archive relative, as a first attempt at this did, is
+    -- not enough. `ex` is always work.."\\x", so "x" names it from `work`.
+    -- Accepted limit: this arm uses `cd /d` and so does not support a UNC
+    -- %TEMP%. The pinned arm above does, and is the one that runs in practice.
+    io.stderr:write("[!] WARNING: no " .. (os.getenv("SystemRoot") or "%SystemRoot%")
+                    .. "\\System32\\tar.exe; extracting with whatever 'tar' is "
+                    .. "on PATH. Which tar runs decides how absolute member "
+                    .. "names, '..' and symlinks inside the archive are "
+                    .. "handled.\n")
+    cmd = 'cd /d "' .. work .. '" && tar -xzf "pkg.tgz" -C "x" >nul 2>&1'
+  end
+  if not sh(cmd) then
     return bail("failed to extract the tarball (tar.exe, shipped with Windows 10+, is required)")
   end
   -- A codeload tarball wraps everything in <repo>-<branch>/; a hand-built one
@@ -1867,6 +1918,7 @@ if os.getenv("ROVER_PKG_TEST") then
     github_pkg_name = github_pkg_name,
     default_registry = default_registry,
     OFFICIAL_REGISTRY = OFFICIAL_REGISTRY, REPO_REGISTRY = REPO_REGISTRY,
+    tar_exe = tar_exe,
   }
   return
 end

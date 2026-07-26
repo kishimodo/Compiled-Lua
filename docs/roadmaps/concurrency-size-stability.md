@@ -40,7 +40,7 @@ above stays as the strategic order.
 | 1 | Record this session's measurements in `docs/benchmarks/` | done | [`helper-call-args.md`](../benchmarks/helper-call-args.md), [`archive-symbol-lookup.md`](../benchmarks/archive-symbol-lookup.md), harnesses `tools/count-imm-sites.py` and `tools/bench-armap.c` |
 | 2 | Archive symbol-lookup counter behind `CLUA_GC_DEBUG` | done | `04abf0a` — 19,111-25,114 archive queries and 31-41M name compares per link, a fixed per-link tax independent of program size |
 | 3 | Measure the `.pdata`/`.xdata` rooting cost | done, negative | [`link-gc-unwind-roots.md`](../benchmarks/link-gc-unwind-roots.md) — unrooting frees 128 bytes of `.text`, total ~3 KB. Hypothesis refuted; the `hello` floor needs a different lead |
-| 4 | Pin the system `tar` in the test runner | open | environment fault that makes a green suite look broken |
+| 4 | Pin the system `tar` in the test runner | done | pinned at the call site; case C7 proves PATH immunity, and reverting the pin fails only that case |
 | 5 | **imm32 helper-call arguments** | open | **-73,124 bytes** = 12.4% of Rover's `.text`; 4,724 sites, 0 immediates needing >32 bits, every `Rt_*` param is `int` |
 | 6 | **Hash the archive symbol index** | open | **~33 us per lookup** over 19,775 entries; parse is only 7-8 ms |
 | 7 | `-MMD -MP` header dependencies | open | removes the documented stale-object trap that yields silent empty-output binaries |
@@ -68,10 +68,15 @@ Independent of the order above, and each blocking a claim rather than a commit:
   unclaimed on purpose.
 - **Remove developer-machine path defaults** from `build/*.bat`; discover the
   toolchain from `PATH` or an explicit toolchain file.
-- **Pin the system `tar`** in the test runner. GNU `tar.exe` ahead of
-  `C:\Windows\System32\tar.exe` on `PATH` reads a `C:\...` destination as a
-  remote host and fails `test-pkgmgr-foreign`. Environment fault, not a code
-  regression, but it is a trap left in place.
+- ~~**Pin the system `tar`** in the test runner.~~ **Done.** Rover pins
+  `%SystemRoot%\System32\tar.exe` at the one call site that extracts a foreign
+  tarball, and `tools/test-pkgmgr-foreign.lua` case C7 puts a hostile `tar` first
+  on `PATH`, then asserts the install still succeeds *and* that the hostile
+  binary was never invoked. `PATH` was deliberately **not** mutated in
+  `build/*.bat`: immunity came from removing the dependency, and a blanket
+  `System32` prepend would re-resolve `find`/`sort`/`curl`/`bash` for the whole
+  build to serve zero remaining callers. The separate "remove developer-machine
+  path defaults" bullet above is still open.
 
 ## Invariants every slice must preserve
 

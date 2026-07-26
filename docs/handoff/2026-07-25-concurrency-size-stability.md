@@ -40,10 +40,12 @@ Proven, each with its evidence:
 - The mutation evidence for `savedpc` pc-exactness, which is the part that would
   otherwise be taken on trust.
 
-Environment trap, not a code fault: `test-pkgmgr-foreign` fails whenever a GNU
-`tar.exe` precedes `C:\Windows\System32\tar.exe` on `PATH`, because GNU tar reads
-a `C:\...` destination as a remote host. Prepend the system directory — never
-replace `PATH`, or `powershell.exe` drops off it and the sysroot step dies.
+The `tar` shadowing trap is **fixed**, not worked around: Rover pins
+`%SystemRoot%\System32\tar.exe` at the extraction call site, so a GNU `tar.exe`
+earlier on `PATH` can no longer break `test-pkgmgr-foreign`, and case C7 of that
+test proves it by hijacking `PATH` deliberately. General guidance that still
+stands: when you do edit `PATH` for a build, **prepend, never replace** —
+replacing it drops `powershell.exe` off `PATH` and the sysroot step dies.
 
 ## Not done / not claimed
 
