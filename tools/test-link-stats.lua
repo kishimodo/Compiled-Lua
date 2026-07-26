@@ -121,23 +121,13 @@ else
   mem_lookups  = tonumber(mem_lookups)
   mem_compares = tonumber(mem_compares)
 
-  if answered + missed ~= queries then
-    fail("accounting broken: %d answered + %d missed ~= %d queries",
-         answered, missed, queries)
-  end
-  -- Every armap NAME match performs exactly one member lookup, and nothing else
-  -- in the tree calls LcAr_MemberByHdrOff. A match whose entry names no real
-  -- member resolves to NULL and is not "answered", so member lookups can exceed
-  -- answered queries only on a malformed archive -- which the linker warns about
-  -- rather than hiding.
-  if mem_lookups < answered then
-    fail("member lookups (%d) below answered queries (%d): an answered query "
-         .. "must have performed one", mem_lookups, answered)
-  end
   if debug_out:find("armap entr[a-z]* matched a name but named no member") then
     fail("linker reported a malformed armap entry: %s",
          (debug_out:match("%[ar%] WARNING:[^\n]*") or "?"))
   end
+  -- Floors: these catch a report of all zeros, i.e. a link that resolved nothing
+  -- or instrumentation that stopped counting. They are the only lower bounds
+  -- worth keeping -- see the note below.
   if nrounds < 1 then fail("fixpoint rounds reported as %d", nrounds) end
   if entries < 1 then fail("armap entries reported as %d", entries) end
   if members < 1 then fail("archive members reported as %d", members) end
@@ -145,14 +135,63 @@ else
   if answered < 1 then
     fail("no symbol resolved from any archive; the link cannot have worked")
   end
-  -- Holds whether the armap is scanned linearly or indexed, so replacing the
-  -- scan with a hash does not turn this test red.
-  if compares < answered then
-    fail("name compares (%d) below answered queries (%d): an answered query "
-         .. "must have examined at least one entry", compares, answered)
+
+  -- Deliberately NOT asserted, because each is guaranteed by construction and
+  -- therefore cannot fail -- an assertion that cannot fail is coverage theatre:
+  --   * answered + missed == queries   -- pe_emit.c prints "missed" as
+  --                                       (queries - hits); it is one value
+  --                                       formatted twice.
+  --   * mem_lookups >= answered        -- every hits++ in ar_read.c is preceded
+  --                                       by a LcAr_MemberByHdrOff call, which
+  --                                       increments mem_lookups.
+  --   * compares >= answered           -- a hit needs probes >= 1 before
+  --                                       "compares += probes".
+  --   * mem_compares >= 1 when answered > 0
+  -- The load-bearing assertions are byte-identity, silence-by-default, the
+  -- malformed-armap warning, the floors above, and the two RATIO CEILINGS below.
+
+  -- Property 3: the lookups are indexed, not linearly scanned.
+  --
+  -- This is the assertion that actually guards the hash index. Before it existed
+  -- a Rover link made 41 million name compares over 25,114 queries -- about
+  -- 1,633 per query -- because every lookup walked one archive's whole armap
+  -- (20,339 entries across the sysroot). With the index the measured ratio is
+  -- 0.85 (hello) and 0.86 (Rover): below 1, because a miss stops at the first
+  -- empty slot and compares nothing.
+  --
+  -- A ceiling of 8 leaves roughly 9x headroom over the worst plausible behaviour
+  -- of a hash kept at load factor <= 0.5 (~1.5 probes for a hit, ~1 for a miss),
+  -- while still catching a silent revert to the linear scan by over 200x. It is
+  -- deliberately loose: the point is to detect an order-of-magnitude regression,
+  -- not to pin a number that shifts when the sysroot changes.
+  --
+  -- Without this, forcing ar_build_sym_index to bail makes every lookup take the
+  -- O(n) fallback and the entire suite stays green. That was true until this
+  -- check existed, and it is exactly the regression it exists to catch.
+  local MAX_COMPARES_PER_QUERY = 8
+  if queries > 0 and compares > queries * MAX_COMPARES_PER_QUERY then
+    fail("name compares (%d) over %d queries is %.1f per query, above the "
+         .. "ceiling of %d: the armap index is not being used -- lookups have "
+         .. "fallen back to the linear scan",
+         compares, queries, compares / queries, MAX_COMPARES_PER_QUERY)
   end
-  if answered > 0 and mem_compares < 1 then
-    fail("member lookups happened but no member compares were counted")
+  if mem_lookups > 0 and mem_compares > mem_lookups * MAX_COMPARES_PER_QUERY then
+    fail("member compares (%d) over %d lookups is %.1f each, above the ceiling "
+         .. "of %d: the member index is not being used",
+         mem_compares, mem_lookups, mem_compares / mem_lookups,
+         MAX_COMPARES_PER_QUERY)
+  end
+
+  -- The linker reports archives that fell back. One is expected: libmoldname.a
+  -- carries no armap entries, so there is no index to build and its fallback
+  -- loop is empty. A wholesale failure to index would show up in the ratios
+  -- above, but report the count too, because a rising number here is the
+  -- earliest visible symptom.
+  local fallback = tonumber(debug_out:match("%[ar%] (%d+) archive%(s%) on the linear fallback")) or 0
+  if fallback > 2 then
+    fail("%d archives fell back to the linear scan (expected at most 2, for "
+         .. "archives with an empty armap): the index is failing to build",
+         fallback)
   end
 end
 

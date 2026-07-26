@@ -45,27 +45,55 @@ Consequences for anyone reproducing these notes:
   A `.text` win can vanish in the whole-PE number because the PE file alignment
   is 512 bytes.
 
-## Current size baseline
+## Size baselines
 
-Re-measured at `7fec28f`, whole-file bytes, invoked from the repository root as
-`clua build rover/src/rover.lua -O<n>`:
+Both tables are whole-file bytes, invoked from the repository root as
+`clua build <src> -O<n>`. **Keep both.** The upper one is what the arc started
+from; the lower one is what it ended at, and a later reader needs the pair to
+check a delta rather than trust one.
+
+### Baseline at `7fec28f` (start of the arc)
 
 | Build | `-O0` | `-O1` | `-O2` |
 |---|---:|---:|---:|
 | `print("hello")` | 137,216 | 137,216 | 137,216 |
 | `rover/src/rover.lua` | 724,480 | 739,328 | 739,328 |
 
-`-O1` and `-O2` are byte-identical here, SHA-256
-`e474660e25b1481c3c8ccbe9147e4c72e11b5e91964640152eba673ac0d21bde`, and a repeat
-build reproduces it exactly.
+`-O1` and `-O2` byte-identical, SHA-256
+`e474660e25b1481c3c8ccbe9147e4c72e11b5e91964640152eba673ac0d21bde`.
+
+### Current, re-measured at `7dc2b11` (2026-07-26)
+
+| Build | `-O0` | `-O1` | `-O2` | | `.text` `-O0` | `.text` `-O1` |
+|---|---:|---:|---:|---|---:|---:|
+| `print("hello")` | 137,216 | 137,216 | 137,216 | | 114,736 | 114,736 |
+| `rover/src/rover.lua` | 655,872 | 670,720 | 670,720 | | 521,726 | 536,446 |
+
+`-O1` and `-O2` still byte-identical, SHA-256
+`c7b3601d84008040f867810e2ae35d65c3e47e66b2e14dcd237ff7c1afb02fa5`, and a repeat
+build reproduces it exactly. Every figure here agrees with the after-arm column of
+[`session-2026-07-25-ab.md`](session-2026-07-25-ab.md), measured independently.
+
+**Same-invocation delta, which answers the caveat below:** Rover `-O1`
+739,328 → 670,720 = **−68,608 = −9.28%**; `-O0` 724,480 → 655,872 = **−68,608 =
+−9.47%**. The A/B document reports −9.22% because its before-arm used 738,816,
+one 512-byte alignment block below the repo-root figure. The two agree to within
+0.06 percentage points, so nothing turns on the difference — but the number to
+quote for a repo-root build is −9.28%, because both of its ends were measured the
+same way.
+
+One confound applies to the upper table and not the lower: 739,328 predates the
+`clean-objs` rebuild described above, which changed every emitted binary. It is
+the right *documented* starting point, but it is not bit-comparable to a
+post-rebuild build; the `.text` deltas in the A/B document, whose arms were both
+freshly built, are the stronger evidence.
 
 **Caveat found while re-measuring:** whole-file size moves with the *length of
 the source path*, because each of Rover's 97 Protos embeds it. Building the same
 bytes as `rover.lua` from its own directory gives 723,456 / 738,304 — about 1 KB
-smaller at both levels, purely from the shorter string. The `savedpc` note's
-`-O1` figure of 738,816 sits between the two, so it was taken with a third
-invocation form. Always record the invocation, and never compare a build made one
-way against a build made another: that alone fabricates a ~1 KB "win".
+smaller at both levels, purely from the shorter string. Always record the
+invocation, and never compare a build made one way against a build made another:
+that alone fabricates a ~1 KB "win".
 
 Read alongside:
 

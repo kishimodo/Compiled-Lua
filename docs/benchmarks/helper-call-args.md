@@ -59,9 +59,12 @@ across all 18 signatures in `clua/src/jit/runtime.h` — so the callee reads onl
 73,124 bytes is **12.4% of Rover's 590,910-byte `.text`** and about 10% of the
 whole 724,480-byte file — larger than the `savedpc` hoist, which removed 60,160.
 
-A further 2,552 bytes sit in 319 `mov rax, imm64 0` sequences (from the
+A further 2,576 bytes sit in 322 `mov rax, imm64 0` sequences (from the
 `X64Emit_MovImm64ToReg( B, X64_RAX, 0 )` sites in `codegen.c`), each replaceable
-by a two-byte `xor eax, eax`.
+by a two-byte `xor eax, eax`. (An earlier draft of this paragraph said 319 sites /
+2,552 bytes, taken from a count made before the `tar` pin grew Rover's source;
+322 / 2,576 is the figure that matches the "Not done here" section below and the
+current tree. 322 × 8 = 2,576, so the two numbers move together.)
 
 ## Two things worth stating plainly
 
@@ -126,6 +129,15 @@ not move, as predicted — 4 call sites, and the 512-byte PE alignment absorbs t
 
 Output stays reproducible: two `-O1` builds of Rover share SHA-256
 `4c2b5a77d4ad567d…`, and `-O2` is byte-identical to `-O1`.
+
+**That SHA no longer reproduces, and neither does any other in this directory.**
+All of them predate the `clean-objs` rebuild recorded in [`README.md`](README.md),
+which found 342 untracked objects and changed every emitted binary. The *property*
+still holds and is still checked — two consecutive builds agree, and
+`tools/check-byte-identity.py` verifies all 18 rows — but the specific digest is a
+historical artefact. Rover `-O1` today is
+`c7b3601d84008040f867810e2ae35d65c3e47e66b2e14dcd237ff7c1afb02fa5`. Compare
+digests only within one tree state.
 
 ### Verified
 

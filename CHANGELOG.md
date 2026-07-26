@@ -17,10 +17,17 @@ of truth -- `clua/src/common/version.h` -- and this file in step.
   three-line program benefits as much as Rover. Output is byte-identical.
 - **Emitted binaries about 9% smaller.** Helper-call arguments are loaded as
   32-bit immediates (`xor`/`mov r32,imm32`/sign-extending `mov r64,imm32` chosen by
-  the value's sign) rather than 64-bit ones, saving 73,216 bytes on Rover -- 11.4%
-  of its `.text`. Unconditional at every `-O` level, because it is not a
-  size/speed tradeoff. `print("hello")` does not change: the win scales with user
-  code volume.
+  the value's sign) rather than 64-bit ones. Two figures, because they answer
+  different questions and must not be spliced: the change *itself* saves **73,216
+  bytes of Rover's `.text` (-12.0%)**, measured against a fixed source in a
+  single-tree A/B; across the whole release the **net** `.text` saving is **69,248
+  bytes (-11.4%)**, and whole-file Rover `-O1` falls 739,328 -> 670,720 (-9.28%).
+  The 3,968-byte difference is not a regression: Rover's own source grew by about
+  50 lines in the same period (the `tar` pin), so part of the codegen win is spent
+  carrying new code. Unconditional at every `-O` level, because it is not a
+  size/speed tradeoff. `print("hello")` does not change at all: its 137,216 bytes
+  are runtime and CRT, so the win scales with user code volume, not with the
+  compiler.
 - **Runtime speed of generated code is unchanged**, measured and stated rather
   than assumed (`docs/benchmarks/session-2026-07-25-ab.md`). Neither change
   targeted runtime.
@@ -58,6 +65,24 @@ of truth -- `clua/src/common/version.h` -- and this file in step.
   to a less trusted extractor for an untrusted archive.
 - Code generation keeps no mutable file-scope state (six objects -> zero), which
   unblocks per-function parallel codegen. Emitted output is byte-identical.
+- **`windows.ToWide`/`FromWide` failed on any string longer than their fixed
+  scratch buffers** (2048 WCHARs / 4096 bytes): `MultiByteToWideChar` /
+  `WideCharToMultiByte` return 0 on insufficient buffer, which these helpers raise
+  as "conversion failed". Both now ask the API for the required size and convert
+  into an exactly sized buffer -- the standard Win32 two-call idiom, which also
+  allocates *less* than before for short strings. Windows allows 32,767 characters
+  per environment variable, so no fixed size was ever correct. A source comment
+  claimed the sizing call had to be avoided because it desynchronised the FFI
+  marshaller; that note blamed "the JIT codegen path" and is stale (there is no
+  JIT in the tree), and the same idiom was already in production in
+  `dotnet/init.lua`. Re-tested directly with a 6,000-character round trip.
+  Found because `test_env` failed only under `build\run-tests.bat`, whose
+  prepended toolchain directories push this machine's `PATH` to 4,218 bytes so the
+  `PATH=...` entry overflowed by 127 bytes; under a plain shell the same `PATH` is
+  4,084 bytes and every run passed, which is why this looked environment-dependent
+  rather than broken. `tests/packages/test_env.lua` now builds 2,100/4,200/6,000-
+  character values itself, so coverage no longer depends on the ambient `PATH`
+  length -- verified to fail against the old implementation in both helpers.
 
 ### Internal
 

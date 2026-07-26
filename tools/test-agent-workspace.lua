@@ -77,18 +77,38 @@ for kind, rel in pairs(SHARED_DIRS) do
   end
 end
 
+-- Naming a file here is the only thing that stops it being deleted silently: the
+-- >=1-markdown-per-directory check above is satisfied by any single leftover
+-- file, so a measurement document is not protected by living in the right folder.
+-- Every entry is a MEASURED RESULT or a plan that later work is expected to read
+-- -- exactly the material the arc existed to stop evaporating.
 local REQUIRED = {
   "docs/audits/2026-07-25-concurrency-size-stability-audit.md",
   "docs/audits/2026-07-25-second-reviewer-challenge.md",
   "docs/roadmaps/concurrency-size-stability.md",
+  "docs/roadmaps/language-platform.md",
+  "docs/roadmaps/no-crt.md",
   "docs/benchmarks/README.md",
   "docs/benchmarks/linker-index.md",
   "docs/benchmarks/codegen-savedpc.md",
+  -- the whole-session A/B: the only place all three number classes (size,
+  -- compile time, runtime speed) are recorded together with their method
+  "docs/benchmarks/session-2026-07-25-ab.md",
+  "docs/benchmarks/helper-call-args.md",
+  "docs/benchmarks/archive-symbol-lookup.md",
+  "docs/benchmarks/codegen-context.md",
+  -- the recorded NEGATIVE result; deleting it invites re-proposing the idea
+  "docs/benchmarks/link-gc-unwind-roots.md",
+  "docs/benchmarks/no-crt-baseline.md",
   "docs/handoff/README.md",
   "tools/agent-coordination/README.md",
   "tools/agent-coordination/repo-paths.py",
   "tools/agent-coordination/server.py",
   "tools/agent-coordination/new-worktree.ps1",
+  -- the harness behind the runtime-speed row; run-tests.lua discovers only
+  -- tools/test-*.lua, so nothing else would notice this going missing
+  "tools/bench-runtime.lua",
+  "tools/check-byte-identity.py",
 }
 for _, rel in ipairs(REQUIRED) do
   if not exists(rel) then fail("missing shared file: %s", rel) end

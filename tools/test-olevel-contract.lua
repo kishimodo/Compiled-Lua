@@ -86,8 +86,24 @@ for _, lvl in ipairs({ "-Ofast", "-Os", "-Oz", "-O9", "-O4", "-O-1", "-O2x" }) d
   end
 
   os.remove(out)
-  code = run('"' .. AOTC .. '" ' .. lvl .. ' "' .. SRC .. '" -o "' .. out .. '"')
-  if code == 0 then fail("aotc accepted unsupported level %s (exit 0)", lvl) end
+  -- Assert the MESSAGE as well as the exit code. Testing only `code ~= 0` is
+  -- fail-open: run() returns -1 when io.popen cannot spawn at all, and -1 would
+  -- score a launch failure as a correct rejection -- so this half of the check
+  -- would keep passing on a machine where aotc.exe never ran.
+  local acode, atxt = run('"' .. AOTC .. '" ' .. lvl .. ' "' .. SRC
+                          .. '" -o "' .. out .. '"')
+  if acode == 0 then
+    fail("aotc accepted unsupported level %s (exit 0)", lvl)
+  elseif acode == -1 then
+    fail("aotc could not be launched for %s, so its rejection was never "
+         .. "actually tested", lvl)
+  elseif not atxt:find("unsupported optimization level", 1, true) then
+    fail("aotc rejected %s without saying why (exit %s): %s", lvl,
+         tostring(acode), trim(atxt):sub(1, 90))
+  end
+  if exists(out) then
+    fail("aotc produced an executable for the rejected level %s", lvl)
+  end
 end
 
 -- ---- 2. supported levels still work --------------------------------------
@@ -128,6 +144,23 @@ end
 -- match, the -O1 pass group silently stopped running.
 if bytes["-O0"] and bytes["-O1"] and bytes["-O0"] == bytes["-O1"] then
   fail("-O0 and -O1 emit identical bytes: the -O1 typed fastpaths are not running")
+end
+
+-- -O3 must differ from -O2 ON THIS FIXTURE. The help text calls -O3 "real, but
+-- narrow", and the only thing making that true is lc_pass_scalar_replace; the
+-- fixture is shaped to give it a table field to promote. Without this check the
+-- claim rested on nothing -- if the pass stopped firing, or never fired on this
+-- fixture at all, every other assertion here would still pass.
+--
+-- Deliberately scoped to the fixture, because "narrow" is literal: `clua build
+-- rover/src/rover.lua` emits BYTE-IDENTICAL output at -O2 and -O3 (measured
+-- 2026-07-26, both 670,720 bytes, same SHA-256). So -O3 has no effect on the
+-- largest real program in the tree, and asserting a general -O2 =/= -O3 would be
+-- false. See docs/roadmaps/concurrency-size-stability.md.
+if bytes["-O2"] and bytes["-O3"] and bytes["-O2"] == bytes["-O3"] then
+  fail("-O3 emits the same bytes as -O2 on a fixture built to exercise scalar "
+       .. "replacement: the -O3 pass group is no longer doing anything, so the "
+       .. "help text's \"-O3 (real, but narrow)\" is now false")
 end
 
 -- ---- 4. the help text describes what actually happens -------------------

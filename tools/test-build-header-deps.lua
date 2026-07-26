@@ -86,8 +86,14 @@ for _, mk in ipairs({ "build/Makefile", "build/Makefile.luac" }) do
              .. "time and -MT eats the following -c", mk)
       end
     end
-    if not text:find("CFLAGS%s*%+=%s*%$%(DEPFLAGS%)") then
-      fail("%s does not append DEPFLAGS to CFLAGS", mk)
+    -- Anchored to the start of a line ON PURPOSE. Unanchored, this pattern also
+    -- matches `EMBEDDED_LUA_CFLAGS += $(DEPFLAGS)` and every other name ending
+    -- in CFLAGS, so deleting the plain `CFLAGS += $(DEPFLAGS)` -- the one line
+    -- that covers obj/**, lua/**, ffi, driver and the ~230 generated
+    -- packages.mk rules -- would leave this check satisfied by a derivative.
+    if not text:find("\nCFLAGS%s*%+=%s*%$%(DEPFLAGS%)") then
+      fail("%s does not append DEPFLAGS to plain CFLAGS (a name merely ENDING "
+           .. "in CFLAGS does not count)", mk)
     end
   end
 end
@@ -105,9 +111,14 @@ local COVERED_VARS = {
 for _, mk in ipairs({ "build/Makefile", "build/Makefile.luac" }) do
   local text = read(mk)
   if text then
-    -- confirm each variable we rely on really does carry the flags
+    -- Confirm each variable we rely on really does carry the flags. Anchored to
+    -- a line start, so a COMMENTED-OUT append ("#FOO += $(DEPFLAGS)") does not
+    -- count as confirmation -- and so a name merely ending in the same suffix
+    -- cannot confirm a different variable.
     for v in pairs(COVERED_VARS) do
-      if text:find(v .. "%s*%+=%s*%$%(DEPFLAGS%)") then COVERED_VARS[v] = "yes" end
+      if text:find("\n" .. v .. "%s*%+=%s*%$%(DEPFLAGS%)") then
+        COVERED_VARS[v] = "yes"
+      end
     end
     for _, line in ipairs(logical_lines(text)) do
       if line:sub(1, 1) == "\t" and line:find("%-c%s") and line:find("%-o%s") then
@@ -122,6 +133,30 @@ for _, mk in ipairs({ "build/Makefile", "build/Makefile.luac" }) do
                mk, trim(line):sub(1, 90))
         end
       end
+    end
+  end
+end
+
+-- Check 2 above accepts a recipe because it names a variable listed in
+-- COVERED_VARS -- but that list is SEEDED `true`, and the confirmation loop only
+-- upgrades entries to "yes". Without the check below, an entry that never got
+-- its `+= $(DEPFLAGS)` stays truthy and every recipe using it is waved through:
+-- the coverage claim would rest on the list, not on the makefiles.
+--
+-- AOT_RT_CFLAGS is the one legitimate exception: it does not append, it DERIVES
+-- from EMBEDDED_RT_CFLAGS (which does append) via `:=`. An exemption with no
+-- check of its own would be a fresh hole, so assert the derivation still holds.
+do
+  local base = read("build/Makefile") or ""
+  if not base:find("AOT_RT_CFLAGS%s*:=%s*%$%(EMBEDDED_RT_CFLAGS%)") then
+    fail("AOT_RT_CFLAGS no longer derives from EMBEDDED_RT_CFLAGS, so it is no "
+         .. "longer exempt from needing its own `+= $(DEPFLAGS)`")
+  end
+  for v, state in pairs(COVERED_VARS) do
+    if state ~= "yes" and v ~= "AOT_RT_CFLAGS" then
+      fail("%s is trusted to carry dependency flags by check 2, but neither "
+           .. "makefile appends `+= $(DEPFLAGS)` to it: every recipe using it "
+           .. "is silently untracked", v)
     end
   end
 end

@@ -58,8 +58,22 @@ Section attribution — the reason whole-file size alone would have misled:
 `.text` falls by **128 bytes**. That is the whole resurrection effect.
 
 Section GC tally for `hello -O1`: `kept 656, dropped 338 (21,152 B)` becomes
-`kept 581, dropped 413 (24,332 B)` — 75 more sections dropped, worth 3,180 bytes,
-which is the unwind tables themselves plus 128 bytes of code and 44 of rdata.
+`kept 581, dropped 413 (24,332 B)` — 75 more sections dropped, worth 3,180 bytes.
+
+Two arithmetic notes, recorded because this document's entire value is its
+numbers:
+
+- **The 3,180 does not fully decompose.** The section table above loses
+  1,536 (`.pdata`) + 1,512 (`.xdata`) + 128 (`.text`) + 44 (`.rdata`) = 3,220,
+  which is 40 bytes more than the tally moved. The 40 bytes are unattributed;
+  they are immaterial to the −3 KB conclusion, but the gap is real and should not
+  be smoothed over by anyone re-deriving these figures.
+- **The arm-A tally is 21,152 B; today's tree reports 21,104 B** for the same
+  build (`kept 656, dropped 338` — the section *counts* are identical). The
+  48-byte difference is the `clean-objs` rebuild described in
+  [`README.md`](README.md), which changed every emitted binary. Arm A's absolute
+  figures are pre-rebuild; the **delta** between the two arms is what this
+  measurement rests on, and it is unaffected.
 
 ## Why the hypothesis was wrong
 

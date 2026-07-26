@@ -273,6 +273,12 @@ int main( void ) {
         uint32_t *edges = ( uint32_t * )calloc( 1, sizeof( uint32_t ) );
         uint32_t *ncall = ( uint32_t * )calloc( m->nfuncs, sizeof( uint32_t ) );
         uint32_t **rows = ( uint32_t ** )calloc( m->nfuncs, sizeof( uint32_t * ) );
+        /* Assert the setup allocations BEFORE guarding on them. Without this the
+        ** guard silently skips the two checks below on allocation failure and the
+        ** test still passes with a quietly lower count -- the exact class of
+        ** unasserted guard this file was swept for once already. The `if` stays
+        ** so a genuine failure cannot dereference NULL. */
+        CHECK( edges && ncall && rows );
         if ( edges && ncall && rows ) {
             edges[0] = m->nfuncs + 3;
             rows[0]  = edges;

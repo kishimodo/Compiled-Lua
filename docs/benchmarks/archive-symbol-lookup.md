@@ -207,13 +207,27 @@ build all produce Rover `-O1` at SHA-256 `4c2b5a77d4ad567d…`.
 lists `dupSym` twice — first against `firstmbr.o`, then `secondmbr.o` — and
 asserts the answer is `firstmbr.o`. It also asserts a later-listed unique name is
 still reachable, that absent and near-miss names resolve to `NULL`, that
-`hdr_off` lookups are exact, and that a repeat query answers identically (the
-index is lazily built, so the first and second lookups take different paths).
+`hdr_off` lookups are exact, and that a repeat query answers identically.
+
+**Correction (2026-07-26).** An earlier version of this paragraph justified the
+repeat-query check by saying the index is lazily built "so the first and second
+lookups take different paths". That is **false**: `ar_build_sym_index` runs
+*inside* the first `LcAr_MemberDefining` call, before that call's own lookup, so
+both queries take the indexed path. The check is still worth keeping — it pins
+idempotence — but it exercises no distinct code path and must not be cited as
+covering the fallback.
 
 Written and run against the *unmodified linear scan* first, which is what proves
 the fixture encodes existing behavior rather than the new implementation's.
-Mutation-verified: changing the duplicate branch to last-insertion-wins fails two
-of its checks.
+Mutation-verified twice:
+
+- changing the duplicate branch to last-insertion-wins fails two of its checks
+  (the first-insertion-wins assertion and the byte-identity half);
+- forcing both index builders to bail, so every lookup takes the O(n) fallback,
+  **used to leave the entire suite green.** `tools/test-link-stats.lua` now
+  asserts a ceiling of 8 name compares per query; the mutation reports 1,634.9
+  and fails. That ceiling is the only thing standing between a silent revert to
+  the linear scan and a green run.
 
 ## Determinism constraint on any fix
 
@@ -233,6 +247,23 @@ gcc -std=c99 -O2 -I clua/src -o bench-armap.exe \
     tools/bench-armap.c build/bin/obj/link/ar_read.o
 ./bench-armap.exe build/bin/sysroot 1500
 ```
+
+**This recipe no longer reproduces the per-lookup figures above** (~33 µs per
+resolution, ~1.9 ns per compare), because `ar_read.o` now *contains* the hash
+index — the harness measures the post-change code and reports the fast path. Those
+two numbers were what turned an estimate into the millisecond claim, and they are
+now only obtainable from the pre-index object:
+
+```sh
+git stash                      # or check out 7fec28f into a second worktree
+# rebuild build/bin/obj/link/ar_read.o, then run the recipe above
+```
+
+The claim they supported does not depend on re-deriving them: the compares are
+counted exactly by `CLUA_GC_DEBUG` (41,058,508 → 21,537, both reproducible
+today), and the wall-clock end of it is measured independently in
+[`session-2026-07-25-ab.md`](session-2026-07-25-ab.md). Recorded here so nobody
+re-runs the recipe, gets a fast number, and concludes the old figure was wrong.
 
 Numbers are wall-clock on a single machine under normal desktop load. The
 per-lookup figure is stable across query counts, which is the property that

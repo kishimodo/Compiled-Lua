@@ -164,11 +164,20 @@ int LcAr_Open( const char *path, LcArchive *out, char *err, size_t errlen ) {
     return 1;
 }
 
-/* Accounting is done AFTER each loop from the exit index, never inside it: the
-** loop that ran to `i` performed i+1 comparisons if it matched and `n` if it
-** ran out. 41 million per link is enough that a counter in the loop body would
-** measurably slow every build in order to measure it. The loop bodies below are
-** therefore byte-for-byte the uninstrumented ones. */
+/* The LINEAR SCANS account after the loop from the exit index, never inside it:
+** a loop that ran to `i` performed i+1 comparisons if it matched and `n` if it
+** ran out. That matters because a linear scan runs 41 million times per link, so
+** a counter in the loop body would measurably slow every build in order to
+** measure it -- and it is what this helper is for. Those loop bodies really are
+** byte-for-byte the uninstrumented ones.
+**
+** The two INDEXED probe loops do NOT use this helper and are not uninstrumented:
+** they carry `probes++` in-body, because a hash probe has no monotonic exit
+** index to reconstruct a count from -- it walks a scattered slot sequence. The
+** cost is acceptable there precisely because the index reduced the loop to about
+** one iteration per query (0.85 measured), which is also why the two counters
+** stay comparable: both charge one unit per actual key comparison, and neither
+** charges the empty-slot terminator that ends a probe without comparing. */
 static uint64_t scanned( uint32_t i, uint32_t n ) {
     return ( i < n ) ? ( uint64_t )i + 1u : ( uint64_t )n;
 }

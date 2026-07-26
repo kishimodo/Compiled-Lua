@@ -107,8 +107,9 @@ static int32_t lc_savedpc_bias_for( int sizecode ) {
 /* retargeted onto X64Emit_*(B,...). The ONLY M0 deviation: skip the    */
 /* cache-register preload/reload loop (M0 keeps every Lua register      */
 /* memory-resident at [RDI + N*16]; M1 enables register residency).     */
-/* The PUSH/POP of all 7 callee-saved regs is preserved so the frame    */
-/* shape + future .pdata unwind match v1 exactly.                       */
+/* All 8 callee-saved regs used (RDI, RBX, R12-R15, RSI, RBP) are      */
+/* PUSHed and POPped, so the frame shape is symmetric; see the          */
+/* prologue docstring below for why the reservation is 0x28, not 0x20.  */
 /* ------------------------------------------------------------------ */
 
 /*!

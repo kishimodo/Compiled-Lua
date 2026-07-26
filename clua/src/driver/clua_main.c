@@ -3,14 +3,14 @@
 **
 ** The single binary a user interacts with (the rustc/go of CLua):
 **
-**   clua build <main.lua> [-o <out.exe>] [-O0|-O1|-O2] [-L <pkg>] [--keep-temps]
+**   clua build <main.lua> [-o <out.exe>] [-O0|-O1|-O2|-O3] [-L <pkg>] [--keep-temps]
 **   clua run   <main.lua> [build flags] [-- <program args...>]
 **   clua check <main.lua>
 **   clua version | help
 **   clua <main.lua>          (implicit `build`)
 **
 ** Differences from aotc.exe (the low-level driver kept for test infra):
-** -O1 is the default, the output name derives from the input
+** -O2 is the default (aotc defaults to -O0), the output name derives from the input
 ** (dir/app.lua -> app.exe in the CWD), and `run` compiles to %TEMP% and
 ** executes in place. Both front-ends share lc_drive() — same pipeline,
 ** same fidelity guarantees.
@@ -116,7 +116,10 @@ static int parse_build_args( CluaArgs *a, int argc, char **argv, int from,
     int i, nforce = 0;
 
     memset( a, 0, sizeof( *a ) );
-    a->opt.opt_level = 2;                       /* clua default: -O2, whole-program (M2 interprocedural) */
+    a->opt.opt_level = 2;                       /* clua default. NOTE: -O2 currently emits the SAME BYTES
+                                                ** as -O1 -- the M2 interprocedural passes are stubs. The
+                                                ** default is 2 for forward compatibility, and usage()
+                                                ** says so per level rather than implying work happens. */
     a->opt.ld_internal = -1;                    /* env (CLUA_LD) decides   */
 
     for ( i = from; i < argc; i++ ) {

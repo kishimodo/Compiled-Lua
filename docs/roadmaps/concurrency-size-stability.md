@@ -41,16 +41,37 @@ above stays as the strategic order.
 
 | Step | Work | Status | Measured basis |
 |---|---|---|---|
-| 1 | Record this session's measurements in `docs/benchmarks/` | done | [`helper-call-args.md`](../benchmarks/helper-call-args.md), [`archive-symbol-lookup.md`](../benchmarks/archive-symbol-lookup.md), harnesses `tools/count-imm-sites.py` and `tools/bench-armap.c` |
+| 1 | Record this session's measurements in `docs/benchmarks/` | done | **[`session-2026-07-25-ab.md`](../benchmarks/session-2026-07-25-ab.md) is the deliverable** — whole-session A/B across all three number classes (size, compile time, **runtime speed**), both arms freshly built. Per-change: [`helper-call-args.md`](../benchmarks/helper-call-args.md), [`archive-symbol-lookup.md`](../benchmarks/archive-symbol-lookup.md), [`codegen-context.md`](../benchmarks/codegen-context.md), [`link-gc-unwind-roots.md`](../benchmarks/link-gc-unwind-roots.md). Harnesses `tools/count-imm-sites.py`, `tools/bench-armap.c`, `tools/bench-runtime.lua`, `tools/check-byte-identity.py` |
 | 2 | Archive symbol-lookup counter behind `CLUA_GC_DEBUG` | done | `04abf0a` — 19,111-25,114 archive queries and 31-41M name compares per link, a fixed per-link tax independent of program size |
 | 3 | Measure the `.pdata`/`.xdata` rooting cost | done, negative | [`link-gc-unwind-roots.md`](../benchmarks/link-gc-unwind-roots.md) — unrooting frees 128 bytes of `.text`, total ~3 KB. Hypothesis refuted; the `hello` floor needs a different lead |
-| 4 | Pin the system `tar` in the test runner | done | pinned at the call site; case C7 proves PATH immunity, and reverting the pin fails only that case |
+| 4 | Pin the system `tar` (**at Rover's call site, not in the test runner** — the original phrasing misdirected: immunity came from removing the dependency, and `build/*.bat` mutates no `PATH`) | done | `rover/src/rover.lua` `tar_exe()` pins `%SystemRoot%\System32\tar.exe`; case C7 puts a hostile `tar` first on `PATH` and asserts the install still succeeds *and* the hostile binary was never invoked. Mutation-verified: reverting the pin makes C7 fail with the fake tar invoked. Also verified against the shipped AOT `rover.exe`, and the hostile-`SystemRoot` path fails closed |
 | 5 | **imm32 helper-call arguments** | done | **-73,216 bytes** measured (-12.0% of Rover's `.text`, -9.9% whole file), against a 73,124 prediction; hello unchanged. Unconditional, not behind `-Oz`. [`helper-call-args.md`](../benchmarks/helper-call-args.md) |
 | 6 | **Hash the archive symbol index** | done | **-52% warm build** (rover -O1 180->87 ms, hello 153->76 ms); 41,058,508 name compares -> 21,537 with every resolution count bit-identical; output byte-identical. [`archive-symbol-lookup.md`](../benchmarks/archive-symbol-lookup.md) |
 | 7 | `-MMD -MP` header dependencies | done | touching `ir.h` rebuilds 7 objects including `lift.o`; a struct-layout change in `ar_read.h` rebuilds both objects sharing its `sizeof`, where before it rebuilt neither. `tools/test-build-header-deps.lua` |
 | 8 | Codegen context isolation | done | 6 mutable file-scope objects -> 0 (`nm`), all 18 byte-identity rows unchanged. [`codegen-context.md`](../benchmarks/codegen-context.md); gated by `tools/test-codegen-no-globals.lua` |
-| 9 | Implement `lc_module_verify` | done | structural checks on the memory form, invoked after every mutating pass group **and** unconditionally before codegen (the `-O0` gap). `tests/unit/test_lc_ir_verify.c`: 44 checks, 18 fail against the old `return true` |
-| 10 | Make `-O2`/`-O3` honest | done | strict `-O` parsing in both drivers (`-Os`/`-Oz`/`-Ofast`/`-O9` were silently becoming `-O0` or "everything"), per-level help text stating what each actually runs, and `tools/test-olevel-contract.lua` — whose `-O1 == -O2` assertion keeps the claim true rather than merely written down |
+| 9 | Implement `lc_module_verify` | done | structural checks on the memory form, invoked after every mutating pass group **and** unconditionally before codegen (the `-O0` gap). `tests/unit/test_lc_ir_verify.c`: **55 checks** (44 at `8ae7d3f`; `8b868a1` added more and swept unasserted `if` guards), of which **21 assert a rejection** and so fail against the old `err[0]='\0'; return true` |
+| 10 | Make `-O2`/`-O3` honest | done | **`-O3` is narrower than "narrow": on `rover/src/rover.lua` it emits BYTE-IDENTICAL output to `-O2`** (measured 2026-07-26, both 670,720 bytes, same SHA-256), so its one real pass (`scalar_replace`) does nothing on the largest real program in the tree. It does fire on a small fixture (512 bytes smaller), which `tools/test-olevel-contract.lua` now pins. Plus strict `-O` parsing in both drivers (`-Os`/`-Oz`/`-Ofast`/`-O9` were silently becoming `-O0` or "everything"), per-level help text stating what each actually runs, and `tools/test-olevel-contract.lua` — whose `-O1 == -O2` assertion keeps the claim true rather than merely written down |
+
+## Measured outcome of the arc
+
+Kept here, not only in `docs/benchmarks/`, because a roadmap that records what was
+attempted but not what it achieved is where numbers evaporate. Full method,
+ranges and caveats in
+[`session-2026-07-25-ab.md`](../benchmarks/session-2026-07-25-ab.md); current
+absolute sizes in [`README.md`](../benchmarks/README.md).
+
+| Dimension | Result |
+|---|---|
+| **Binary size** | Rover `-O1` 739,328 → 670,720 whole-file (**−9.28%** same-invocation), `.text` 605,694 → 536,446 (**−11.43%**). `print("hello")` **unchanged at 137,216** — its bytes are runtime and CRT, so it does not move with user code |
+| **Compile time** | Warm `-O1` medians: Rover 187 → **86 ms**, hello 153 → **73 ms**, benchmark 174 → **74 ms** (**−52…−57%**). Arms do not overlap. Nearly all of it is the archive symbol index, a fixed per-link saving |
+| **Runtime speed** | **Unchanged.** min-of-13 251.4 → 250.9 ms (−0.18%), p25 +0.37%, median +1.30% — every estimator inside the 4.7–6.1 ms (~2%) jitter floor. This is the *expected* result: imm32 executes the same instructions with shorter encodings, and the archive index is compile-time only. Nothing in the arc targeted runtime and nothing regressed it |
+| **Correctness** | 697 pass / 0 fail / 5 expected skips; all 18 byte-identity rows reproducible; `-O1` ≡ `-O2` still pinned |
+
+The runtime figure is the one that had *not* been measured until it was asked for.
+It is recorded as a null result with the jitter floor quantified, because a
+sub-noise number reported as a win is worse than no number. Resolving a sub-1%
+runtime effect would need a quiet machine or instruction counting rather than
+wall clock — see the method caveats in the A/B document.
 
 ## Standing prerequisites
 
