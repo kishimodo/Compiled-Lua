@@ -144,6 +144,77 @@ medians from a single machine under normal desktop load; they are not a
 controlled benchmark environment and the run-to-run spread (roughly +-25 ms)
 is wider than the measured delta for the Rover case.
 
+## savedpc hoisting: measured result and proof of semantics (implemented)
+
+Delivery item 4 — hoisting the stable `Proto`/`CallInfo` state used by
+`emit_store_savedpc` — landed as `f39a1bd` and was integrated here as `9d3ded2`
+after independent review.
+
+`emit_store_savedpc` previously re-walked `L -> ci -> func -> LClosure ->
+Proto -> code` (5 loads + add + store, 29 bytes) before every throw-capable op.
+Four of those five loads are frame-invariant, so the walk is now done once in
+the prologue into `RBP`, and each site collapses to reload `ci`, `LEA` the
+pointer, store it (12–15 bytes). `RBP` is biased by a per-function constant so
+the displacement window is centred on zero and most sites reach the 3-byte
+shorter `disp8` encoding; the bias cancels algebraically between prologue and
+site, so the stored pointer is bit-identical to the unbiased value.
+
+Independently verified rather than taken on trust:
+
+- `RBP` is genuinely free: it appears nowhere else in `clua/src/codegen/`
+  outside this machinery, and the frame's other callee-saved registers
+  (`RBX`, `RDI`, `RSI`, `R12`–`R15`) are already committed;
+- the frame stays ABI-correct: 8 pushes (64) + return address (8) = 72, so the
+  reserve had to move from `0x20` to `0x28` to leave `RSP` 16-aligned at helper
+  calls, and the epilogue mirrors the push order exactly;
+- unwinding cannot be affected because AOT functions emit no unwind data at all
+  (`cf->unwind = NULL`, `codegen.c:2071`);
+- the VEH recovery trampoline treats `RBP` as an ordinary callee-saved register
+  restored from the `jmp_buf` (`_JUMP_BUFFER` offset +24, `ffi/veh.c:201`), not
+  as a frame-pointer chain, so reusing it is consistent with crash recovery;
+- the `OP_TAILCALL` hazard is closed: `lower_tailcall` ends in
+  `LcCg_EmitEpilogue`, so the body returns immediately and no `savedpc` site
+  ever executes against a rebound `ci`;
+- the `RBP`-base `disp == 0` encoding trap (mod=00 with r/m=101 means
+  RIP-relative) was already handled in `x64_emit.c:378,463` and is now pinned by
+  a unit assertion.
+
+Measured size effect, comparing `0e63dd5` against `9d3ded2`:
+
+| Target | `-O0` before | `-O0` after | `-O1` before | `-O1` after |
+|---|---:|---:|---:|---:|
+| `print("hello")` | 137,216 | 137,216 | 137,216 | 137,216 |
+| `rover/src/rover.lua` | 784,384 | 724,480 | 799,232 | 738,816 |
+
+Rover loses 59,904 bytes at `-O0` (-7.64%) and 60,416 bytes at `-O1` (-7.56%);
+`-O2` remains byte-identical to `-O1`. Measured on whole-file size — the
+commit's own "-9%" figure is the `.text` delta, a smaller denominator, and both
+are consistent. **`hello` does not change at all** at any level, which is the
+expected result and worth stating plainly: a trivial program has almost no
+throw-capable user ops, so its binary is dominated by runtime and CRT bytes that
+this change does not touch. This is a win proportional to user code volume, not
+a fixed-overhead win.
+
+Output remains byte-reproducible: two builds of Rover at `-O1` share SHA-256
+`1dfa6f9fe76cbc0ff38341536960549c3b5ce3ac97f68f4262da7ef7cdf70ae9`.
+
+Semantics were proved by mutation, not merely asserted. `savedpc` must be
+**pc**-exact rather than line-exact, because `ldebug`'s `varinfo` decodes the
+instruction at that pc to name the operand. `tests/differential/aot_savedpc_precision.lua`
+pins that across a small body, several throw sites sharing one source line, and
+a body long enough to put sites on both sides of the bias and outside the
+`disp8` window at each end. Injecting a deliberate off-by-one at the store site
+(`pc + 1` to `pc + 2`) makes the compiled binary report
+`field 'deeper'` where the interpreter reports `field 'deep'`, so the test
+demonstrably fails when the invariant is broken; it passes against the
+interpreter oracle at O0, O1, O2 and O3 with the mutation reverted.
+
+Remaining limitation: `g_savedpc_bias` is another file-scope global in
+`codegen.c`, so it joins `g_lc_opt_level` and the `g_res_*` state on the list of
+things that must move into a codegen context before any per-function
+parallelism is attempted. It does not make the existing reentrancy problem
+worse, but it does make it one item longer.
+
 ## Measured baseline
 
 Warm local runs compiling `rover/src/rover.lua` with the internal linker:
@@ -461,8 +532,10 @@ The independent second pass changed the priority of several performance items:
    measured gain was only 1.9% on Rover and 4.6% on a tiny program; see the
    linker-index section above for why, and prefer item 10 for the next linker
    performance work.
-4. Hoist stable `CallInfo`/`Proto` state used by `emit_store_savedpc`; this is
-   the largest code-volume opportunity identified by the second review.
+4. Hoist stable `CallInfo`/`Proto` state used by `emit_store_savedpc`
+   (implemented, `9d3ded2`). It was indeed the largest code-volume opportunity:
+   Rover shrank 7.6% at both `-O0` and `-O1`. `print("hello")` did not move at
+   all — see the savedpc section above for the measurement and for why.
 5. Add golden byte-identity/reproducibility gates, then implement `-Oz`
    lowering: imm32 helper arguments, selective prologues, and outlined slow
    paths. Make `-O2`/`-O3` behavior honest or implement their advertised work.
