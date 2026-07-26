@@ -1,5 +1,6 @@
-/* test_lc_link_symindex.c -- regression cover for the internal linker's global
- * symbol index and (object,section) contribution index (pe_emit.c).
+/* test_lc_link_symindex.c -- regression cover for the internal linker's symbol
+ * indexes: the global GSym table and (object,section) contribution index in
+ * pe_emit.c, plus the per-archive armap and member lookups in ar_read.c.
  *
  * The linker resolves symbols through an open-addressed hash whose slot array
  * is rebuilt (rehashed) every time the load factor crosses 0.7, while the GSym
@@ -17,6 +18,7 @@
  */
 #include "test_harness.h"
 #include "link/pe_emit.h"
+#include "link/ar_read.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -193,8 +195,177 @@ static void test_wide_symbol_table(void) {
     remove( exe2 );
 }
 
+/* ------------------------------------------------------------------------
+ * Archive symbol index: duplicate-name precedence.
+ *
+ * LcAr_MemberDefining answers with the FIRST armap entry, in index order, whose
+ * name matches. A GNU armap may legitimately name one symbol against several
+ * members, and which member the linker pulls decides the emitted bytes -- so
+ * that precedence is a correctness property, not an implementation detail.
+ *
+ * The linear scan gets it right by construction. Any index (a hash, a sorted
+ * table, anything) can silently invert it: build the table with
+ * last-insertion-wins, or iterate the armap descending, and every lookup still
+ * "works" while pulling a different member. Nothing else in the suite would
+ * notice, because both members satisfy the symbol.
+ *
+ * So this builds a two-member archive whose armap lists "dupSym" twice -- first
+ * against firstmbr.o, then against secondmbr.o -- and asserts the answer is
+ * firstmbr.o. It also asserts a name absent from the armap yields NULL, and that
+ * every armap entry is reachable, which is what a broken probe loop breaks.
+ * ---------------------------------------------------------------------- */
+
+/* One archive member: 60-byte header (name padded, size decimal) + payload. */
+static size_t ar_put_member( uint8_t *p, const char *name, const uint8_t *data,
+                             size_t len ) {
+    char hdr[60];
+    size_t n = 0;
+    memset( hdr, ' ', sizeof hdr );
+    memcpy( hdr, name, strlen( name ) );
+    {
+        char szbuf[16];
+        snprintf( szbuf, sizeof szbuf, "%-10u", (unsigned)len );
+        memcpy( hdr + 48, szbuf, 10 );
+    }
+    hdr[58] = '`'; hdr[59] = '\n';
+    memcpy( p, hdr, 60 );          n += 60;
+    memcpy( p + n, data, len );    n += len;
+    if ( len & 1 ) p[n++] = '\n';  /* members are 2-byte aligned */
+    return n;
+}
+
+static void test_armap_duplicate_precedence(void) {
+    /* Two distinct minimal COFF payloads, so the members differ in content as
+       well as in name (a same-size same-bytes pair would hide a mix-up). */
+    uint8_t coff_a[20] = {0}, coff_b[24] = {0};
+    uint8_t ar[1024];
+    size_t pos = 0;
+    uint32_t off_first, off_second;
+    char path[512];
+    const char *tmp = getenv( "TEMP" );
+
+    p16( coff_a + 0, 0x8664 );
+    p16( coff_b + 0, 0x8664 );
+
+    memcpy( ar, "!<arch>\n", 8 );
+    pos = 8;
+
+    /* The armap must carry the members' header offsets, so lay out the index
+       first with the sizes known: 3 entries ("dupSym" twice, "onlySecond"). */
+    {
+        const char *names = "dupSym\0dupSym\0onlySecond";  /* 6+1 +6+1 +10+1 */
+        const uint32_t nsym = 3;
+        const uint32_t namelen = 7 + 7 + 11;
+        const uint32_t idx_payload = 4 + nsym * 4 + namelen;
+        const uint32_t idx_total = 60 + idx_payload + ( idx_payload & 1 );
+        const uint32_t first_hdr = (uint32_t)( 8 + idx_total );
+        const uint32_t first_total =
+            60 + (uint32_t)sizeof coff_a + ( sizeof coff_a & 1 );
+        char hdr[60];
+        uint32_t i;
+
+        off_first  = first_hdr;
+        off_second = first_hdr + first_total;
+
+        memset( hdr, ' ', sizeof hdr );
+        hdr[0] = '/';
+        {
+            char szbuf[16];
+            snprintf( szbuf, sizeof szbuf, "%-10u", idx_payload );
+            memcpy( hdr + 48, szbuf, 10 );
+        }
+        hdr[58] = '`'; hdr[59] = '\n';
+        memcpy( ar + pos, hdr, 60 ); pos += 60;
+
+        /* BE count, then one BE member-header offset per symbol, then names. */
+        ar[pos+0]=0; ar[pos+1]=0; ar[pos+2]=0; ar[pos+3]=(uint8_t)nsym; pos += 4;
+        {   /* dupSym -> first, dupSym -> second, onlySecond -> second */
+            const uint32_t offs[3] = { off_first, off_second, off_second };
+            for ( i = 0; i < nsym; i++ ) {
+                ar[pos+0]=(uint8_t)(offs[i]>>24); ar[pos+1]=(uint8_t)(offs[i]>>16);
+                ar[pos+2]=(uint8_t)(offs[i]>>8);  ar[pos+3]=(uint8_t)offs[i];
+                pos += 4;
+            }
+        }
+        memcpy( ar + pos, names, namelen ); pos += namelen;
+        if ( idx_payload & 1 ) ar[pos++] = '\n';
+    }
+
+    pos += ar_put_member( ar + pos, "firstmbr.o/",  coff_a, sizeof coff_a );
+    pos += ar_put_member( ar + pos, "secondmbr.o/", coff_b, sizeof coff_b );
+
+    if ( !tmp ) tmp = ".";
+    snprintf( path, sizeof path, "%s\\clua_ardup_%d.a", tmp, (int)getpid() );
+    {
+        FILE *f = fopen( path, "wb" );
+        CHECK_NOT_NULL( f );
+        if ( !f ) return;
+        fwrite( ar, 1, pos, f );
+        fclose( f );
+    }
+
+    {
+        LcArchive a;
+        char err[256] = {0};
+        int ok = LcAr_Open( path, &a, err, sizeof err );
+        CHECK_MSG( ok, err[0] ? err : "ar open failed" );
+        if ( ok ) {
+            const LcArMember *m;
+            CHECK_EQ_INT( (int)a.nindex, 3 );
+            CHECK_EQ_INT( (int)a.nmembers, 2 );
+
+            /* THE INVARIANT: first armap entry wins. Building an index with
+               last-insertion-wins, or iterating the armap descending, returns
+               secondmbr.o here and changes which member a real link pulls. */
+            m = LcAr_MemberDefining( &a, "dupSym" );
+            CHECK_NOT_NULL( m );
+            if ( m ) CHECK_MSG( strcmp( m->name, "firstmbr.o" ) == 0,
+                                "duplicate armap name must resolve to the FIRST "
+                                "entry's member" );
+
+            /* a later-listed unique name must still be reachable: this is what
+               a probe loop that stops early, or a table that drops colliding
+               inserts, gets wrong */
+            m = LcAr_MemberDefining( &a, "onlySecond" );
+            CHECK_NOT_NULL( m );
+            if ( m ) CHECK_MSG( strcmp( m->name, "secondmbr.o" ) == 0,
+                                "unique armap name resolved to the wrong member" );
+
+            /* absent name -> NULL, not a stale slot's member */
+            CHECK_MSG( LcAr_MemberDefining( &a, "nosuchsymbol" ) == NULL,
+                       "a name absent from the armap must not resolve" );
+            /* near-misses that share a hash-relevant prefix/suffix */
+            CHECK_MSG( LcAr_MemberDefining( &a, "dupSy" ) == NULL, "prefix matched" );
+            CHECK_MSG( LcAr_MemberDefining( &a, "dupSymX" ) == NULL, "extension matched" );
+            CHECK_MSG( LcAr_MemberDefining( &a, "" ) == NULL, "empty name matched" );
+
+            /* every member is findable by its own header offset */
+            m = LcAr_MemberByHdrOff( &a, off_first );
+            CHECK_NOT_NULL( m );
+            if ( m ) CHECK_MSG( strcmp( m->name, "firstmbr.o" ) == 0,
+                                "hdr_off lookup returned the wrong member" );
+            m = LcAr_MemberByHdrOff( &a, off_second );
+            CHECK_NOT_NULL( m );
+            if ( m ) CHECK_MSG( strcmp( m->name, "secondmbr.o" ) == 0,
+                                "hdr_off lookup returned the wrong member" );
+            CHECK_MSG( LcAr_MemberByHdrOff( &a, 0xDEADBEEFu ) == NULL,
+                       "an unknown hdr_off must not resolve" );
+
+            /* repeat every query: a lazily built index must answer a second
+               time exactly as it did the first */
+            m = LcAr_MemberDefining( &a, "dupSym" );
+            if ( m ) CHECK_MSG( strcmp( m->name, "firstmbr.o" ) == 0,
+                                "second lookup of a duplicate name differed" );
+
+            LcAr_Close( &a );
+        }
+    }
+    remove( path );
+}
+
 int main(void) {
     TEST_BEGIN("lc_link_symindex");
     test_wide_symbol_table();
+    test_armap_duplicate_precedence();
     TEST_END();
 }

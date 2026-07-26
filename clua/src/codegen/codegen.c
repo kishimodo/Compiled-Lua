@@ -226,6 +226,23 @@ int LcCg_EmitReloadRdiAndCache( LcCodeBuf *B ) {
     return 1;
 }
 
+/* The three argument moves below use the imm32 encoder, not the imm64 one, and
+** that is a pure size change rather than an ABI bet:
+**
+**   * X64Emit_MovImm32ToReg leaves the register bit-identical to what
+**     `mov r64, imm64` of (uint64_t)(int64_t)x left there, for every value -- it
+**     sign-extends negatives instead of taking the shorter zero-extending form.
+**     So no argument about how many bits the callee reads is required, though
+**     for the record every Rt_* symbol reachable here takes `int` parameters.
+**   * The zero tier clobbers EFLAGS, which is dead at this point: the next
+**     instruction this shim emits is always the CALL, and an arbitrary C callee
+**     may destroy flags anyway.
+**
+** Measured on rover: 4,724 call sites, 30 bytes of argument loads each, none of
+** the 14,172 immediates needing more than 32 bits.
+** See docs/benchmarks/helper-call-args.md. */
+enum { LC_CHK_INT_IS_32BIT = 1 / ( ( int )sizeof( int ) == 4 ) };
+
 /*!
  * @brief
  *  Helper-call shim: load L into RCX and three integer args into the Win64
@@ -236,9 +253,9 @@ int LcCg_EmitReloadRdiAndCache( LcCodeBuf *B ) {
 int LcCg_EmitHelperCall3( LcCodeBuf *B, const char *Sym,
                           int a, int b, int c, int reload_after ) {
     if ( !LcCg_EmitRestoreL( B ) ) return 0;                          /* RCX = L */
-    if ( !X64Emit_MovImm64ToReg( B, X64_RDX, ( uint64_t )( int64_t )a ) ) return 0;
-    if ( !X64Emit_MovImm64ToReg( B, X64_R8,  ( uint64_t )( int64_t )b ) ) return 0;
-    if ( !X64Emit_MovImm64ToReg( B, X64_R9,  ( uint64_t )( int64_t )c ) ) return 0;
+    if ( !X64Emit_MovImm32ToReg( B, X64_RDX, ( int32_t )a ) ) return 0;
+    if ( !X64Emit_MovImm32ToReg( B, X64_R8,  ( int32_t )b ) ) return 0;
+    if ( !X64Emit_MovImm32ToReg( B, X64_R9,  ( int32_t )c ) ) return 0;
     if ( !X64Emit_CallSym( B, Sym ) ) return 0;
     if ( reload_after && !LcCg_EmitReloadRdiAndCache( B ) ) return 0;
     return 1;

@@ -38,6 +38,43 @@ int X64Emit_MovImm64ToReg( LcCodeBuf *Buf, X64_GPR_T Dst, uint64_t Imm ) {
     return 1;
 }
 
+/* Materialise the SAME 64-bit value X64Emit_MovImm64ToReg would leave in Dst,
+   i.e. (uint64_t)(int64_t)Imm, in 2-7 bytes instead of 10:
+
+     Imm == 0 : XOR r32, r32          31 /r        2-3 bytes
+     Imm  > 0 : MOV r32, imm32        B8+rd id     5-6 bytes  (zero-extends)
+     Imm  < 0 : MOV r64, imm32        REX.W C7 /0 id  7 bytes (sign-extends)
+
+   The negative tier deliberately spends REX.W rather than the 1-byte-shorter
+   32-bit form, because `mov r32, imm32` ZERO-extends: for a negative value that
+   leaves a different 64-bit register than the imm64 form did. Sign-extending
+   keeps every tier bit-identical to what it replaces, which turns this from an
+   ABI argument ("the callee only reads 32 bits") into a value-identity one.
+
+   The only behavioural difference from a plain MOV is that the zero tier
+   clobbers EFLAGS. Callers must not use this where flags are live. */
+int X64Emit_MovImm32ToReg( LcCodeBuf *Buf, X64_GPR_T Dst, int32_t Imm ) {
+    if ( Imm == 0 ) {
+        /* THE HAZARD: reg and rm both name Dst, so a high register needs REX.R
+           *and* REX.B. 45 31 C0 = xor r8d,r8d (correct); 41 31 C0 = xor
+           r8d,eax (garbage); 31 C0 = xor eax,eax (leaves R8 untouched). */
+        if ( IsHi( Dst ) &&
+             !AppendByte( Buf, REX_BASE | REX_R | REX_B ) )              return 0;
+        if ( !AppendByte( Buf, 0x31 ) )                                  return 0;
+        return AppendByte( Buf, ModRm( 3, Lo3( Dst ), Lo3( Dst ) ) );
+    }
+    if ( Imm > 0 ) {
+        if ( IsHi( Dst ) && !AppendByte( Buf, REX_BASE | REX_B ) )       return 0;
+        if ( !AppendByte( Buf, 0xB8 | ( unsigned char )Lo3( Dst ) ) )    return 0;
+        return AppendBytes( Buf, &Imm, 4 );
+    }
+    if ( !AppendByte( Buf, REX_BASE | REX_W | ( IsHi( Dst ) ? REX_B : 0 ) ) )
+        return 0;
+    if ( !AppendByte( Buf, 0xC7 ) )                                      return 0;
+    if ( !AppendByte( Buf, ModRm( 3, 0, Lo3( Dst ) ) ) )                 return 0;
+    return AppendBytes( Buf, &Imm, 4 );
+}
+
 int X64Emit_MovRegToReg( LcCodeBuf *Buf, X64_GPR_T Dst, X64_GPR_T Src ) {
     unsigned char Rex = REX_BASE | REX_W
                       | ( IsHi( Src ) ? REX_R : 0 )

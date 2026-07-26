@@ -24,7 +24,7 @@ Conventions for editing this file:
 | 2 | Atomic compiler output publication and transactional Rover store/locks | done | `ca29c16`, `ef3694e`, `ba74dba`, `2c067c8`; `tools/test-pkgmgr-transactions.lua`, 16-way concurrent build stress |
 | 3 | Index the internal linker's symbol and contribution lookups | done | `092122b`; [`benchmarks/linker-index.md`](../benchmarks/linker-index.md) — real but small (-1.9% Rover, -4.6% hello); removes the scaling cliff |
 | 4 | Hoist the `savedpc` base into the frame prologue | done | `9d3ded2` (from `f39a1bd`); [`benchmarks/codegen-savedpc.md`](../benchmarks/codegen-savedpc.md) — Rover `.text` -9%, whole PE -7.6% |
-| 5 | Byte-identity/reproducibility gates, then `-Oz` lowering (selective prologue saves, outlined slow paths); make `-O2`/`-O3` honest | open | `-O2` is byte-identical to `-O1` today; `-O1` costs Rover ~14 KB over `-O0`. **imm32 helper arguments moved out of this row** — measurement shows it is not a tradeoff and must not be gated behind `-Oz`; see the tracker below |
+| 5 | Byte-identity/reproducibility gates, then `-Oz` lowering (selective prologue saves, outlined slow paths); make `-O2`/`-O3` honest | in progress | `-O2` is byte-identical to `-O1` today; `-O1` costs Rover ~14 KB over `-O0`. **imm32 helper arguments moved out of this row** — measurement shows it is not a tradeoff and must not be gated behind `-Oz`; see the tracker below |
 | 6 | Optimizer verifier, codegen context isolation, deterministic IDs, build header-dependency tracking, parallel-safe build jobs | open | `lc_module_verify` returns `true` unconditionally; `codegen.c` still holds `g_lc_opt_level`, `g_res_*`, `g_savedpc_bias` |
 | 7 | Split Rover solve/fetch/verify/install; real backtracking solver; bounded concurrent fetch and verification | open | `resolve_graph` still installs while resolving |
 | 8 | Parallelize compiler-local work; overlap immutable archive-index loading; keep deterministic layout/publication barriers | blocked by 6 | needs codegen context isolation first |
@@ -41,7 +41,7 @@ above stays as the strategic order.
 | 2 | Archive symbol-lookup counter behind `CLUA_GC_DEBUG` | done | `04abf0a` — 19,111-25,114 archive queries and 31-41M name compares per link, a fixed per-link tax independent of program size |
 | 3 | Measure the `.pdata`/`.xdata` rooting cost | done, negative | [`link-gc-unwind-roots.md`](../benchmarks/link-gc-unwind-roots.md) — unrooting frees 128 bytes of `.text`, total ~3 KB. Hypothesis refuted; the `hello` floor needs a different lead |
 | 4 | Pin the system `tar` in the test runner | done | pinned at the call site; case C7 proves PATH immunity, and reverting the pin fails only that case |
-| 5 | **imm32 helper-call arguments** | open | **-73,124 bytes** = 12.4% of Rover's `.text`; 4,724 sites, 0 immediates needing >32 bits, every `Rt_*` param is `int` |
+| 5 | **imm32 helper-call arguments** | done | **-73,216 bytes** measured (-12.0% of Rover's `.text`, -9.9% whole file), against a 73,124 prediction; hello unchanged. Unconditional, not behind `-Oz`. [`helper-call-args.md`](../benchmarks/helper-call-args.md) |
 | 6 | **Hash the archive symbol index** | open | **~33 us per lookup** over 19,775 entries; parse is only 7-8 ms |
 | 7 | `-MMD -MP` header dependencies | open | removes the documented stale-object trap that yields silent empty-output binaries |
 | 8 | Codegen context isolation | open | row 6 prerequisite; must follow step 5, same file |

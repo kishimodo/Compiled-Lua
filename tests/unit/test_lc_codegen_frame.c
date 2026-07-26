@@ -18,6 +18,8 @@
 #include "codegen/codegen.h"
 #include "codegen/x64_emit.h"
 
+#include <string.h>   /* memcmp, for the exact-byte-stream assertions */
+
 int main( void ) {
     LcCodeBuf B;
     TEST_BEGIN( "lc_codegen_frame" );
@@ -93,15 +95,68 @@ int main( void ) {
     CHECK( LcCg_EmitRestoreL( &D ) == 1 );
     CHECK( D.used == 3 && D.bytes[0] == 0x48 && D.bytes[1] == 0x89 && D.bytes[2] == 0xD9 );
 
-    /* ---- helper-call shim records one CALL rel32 reloc against the symbol ---- */
+    /* ---- helper-call shim: exact byte stream, all three argument tiers ----
+       The shim loads its three int arguments with the imm32 encoder, so these
+       assert the WHOLE stream, not just the reloc. A missing REX.B on R8/R9
+       would silently load EAX/ECX instead and pass a wrong argument -- a
+       miscompile a size measurement would happily report as a bigger win. */
     LcCodeBuf E;
     CHECK( LcCodeBuf_Init( &E, 32 ) == 1 );
     CHECK( LcCg_EmitHelperCall3( &E, "Rt_Len", 1, 2, 3, 0 ) == 1 );
     CHECK( E.nrelocs == 1 && E.relocs[0].kind == LC_RELOC_REL32 );
+    {   /* 48 89 D9 | BA 01.. | 41 B8 02.. | 41 B9 03.. | E8 00 00 00 00 */
+        static const unsigned char want[] = {
+            0x48, 0x89, 0xD9,
+            0xBA, 0x01, 0x00, 0x00, 0x00,
+            0x41, 0xB8, 0x02, 0x00, 0x00, 0x00,
+            0x41, 0xB9, 0x03, 0x00, 0x00, 0x00,
+            0xE8, 0x00, 0x00, 0x00, 0x00
+        };
+        CHECK( E.used == sizeof( want ) );
+        CHECK( memcmp( E.bytes, want, sizeof( want ) ) == 0 );
+        CHECK( E.relocs[0].offset == 21 );
+    }
+
+    /* all-zero arguments: xor tier, and the R8/R9 forms need REX.R *and* REX.B */
+    LcCodeBuf E2;
+    CHECK( LcCodeBuf_Init( &E2, 32 ) == 1 );
+    CHECK( LcCg_EmitHelperCall3( &E2, "Rt_Close", 0, 0, 0, 0 ) == 1 );
+    {   /* 48 89 D9 | 31 D2 | 45 31 C0 | 45 31 C9 | E8 00 00 00 00 */
+        static const unsigned char want[] = {
+            0x48, 0x89, 0xD9,
+            0x31, 0xD2,
+            0x45, 0x31, 0xC0,
+            0x45, 0x31, 0xC9,
+            0xE8, 0x00, 0x00, 0x00, 0x00
+        };
+        CHECK( E2.used == sizeof( want ) );
+        CHECK( memcmp( E2.bytes, want, sizeof( want ) ) == 0 );
+        CHECK( E2.nrelocs == 1 && E2.relocs[0].offset == 12 );
+    }
+
+    /* negative arguments (real: NArgs/NResults == -1 for multret) must
+       SIGN-extend, so the 64-bit register matches the old imm64 form exactly */
+    LcCodeBuf E3;
+    CHECK( LcCodeBuf_Init( &E3, 32 ) == 1 );
+    CHECK( LcCg_EmitHelperCall3( &E3, "Rt_Call", 0, -1, -1, 0 ) == 1 );
+    {   /* 48 89 D9 | 31 D2 | 49 C7 C0 FF.. | 49 C7 C1 FF.. | E8 00 00 00 00 */
+        static const unsigned char want[] = {
+            0x48, 0x89, 0xD9,
+            0x31, 0xD2,
+            0x49, 0xC7, 0xC0, 0xFF, 0xFF, 0xFF, 0xFF,
+            0x49, 0xC7, 0xC1, 0xFF, 0xFF, 0xFF, 0xFF,
+            0xE8, 0x00, 0x00, 0x00, 0x00
+        };
+        CHECK( E3.used == sizeof( want ) );
+        CHECK( memcmp( E3.bytes, want, sizeof( want ) ) == 0 );
+        CHECK( E3.nrelocs == 1 && E3.relocs[0].offset == 20 );
+    }
 
     LcCodeBuf_Free( &B );
     LcCodeBuf_Free( &C );
     LcCodeBuf_Free( &D );
     LcCodeBuf_Free( &E );
+    LcCodeBuf_Free( &E2 );
+    LcCodeBuf_Free( &E3 );
     TEST_END();
 }
