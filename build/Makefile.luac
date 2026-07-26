@@ -79,9 +79,18 @@ aotc: $(BUILD_DIR)/aotc.exe
 # the source in a cold tree). Flags must match the embedded archives' ABI
 # surface: include dirs + CLUA_TARGET_WINDOWS_X64 (+ LUA_COMPAT_5_3) govern
 # the Lua struct layouts.
+# The size flags below match build/Makefile's EMBEDDED_RT_CFLAGS. This object was
+# the only one of ours compiled with NO -O and no -ffunction-sections, which cost
+# 3 KB in every emitted PE and made it the exe's only real .pdata/.xdata producer
+# (372 + 364 bytes of unwind tables that AOT-generated functions never emit).
+# None of these flags touch the ABI surface -- the include dirs and the two -D
+# defines are what govern the Lua struct layouts, and they are unchanged.
 $(BUILD_DIR)/aot_entry.o: $(SRC_DIR)/runtime/aot_entry.c
 	$(CC) -std=c99 -I$(SRC_DIR) -I$(LUA_DIR) \
 	    -DCLUA_TARGET_WINDOWS_X64=1 -DLUA_COMPAT_5_3 \
+	    -Os -g0 -ffunction-sections -fno-asynchronous-unwind-tables \
+	    -fno-unwind-tables -fmerge-all-constants -fmerge-constants \
+	    -fstack-protector-strong -fcf-protection=none \
 	    $(DEPFLAGS) -c $< -o $@
 
 .PHONY: aot-entry
