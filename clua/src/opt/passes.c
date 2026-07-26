@@ -180,7 +180,45 @@ bool lc_optimize(LcModule *m, const LcPassConfig *cfg) {
        hoists the global env as a value (either path can reach debug.setlocal
        and falsify a proof -- AOT-DEBUGREFLECT-001). The checked fastpaths,
        which re-verify tags at run time, are unaffected. */
-    bool no_proofs = lc_module_uses_debug(m) || lc_module_reflects_globals(m);
+    bool uses_debug   = lc_module_uses_debug(m);
+    bool reflects_env = !uses_debug && lc_module_reflects_globals(m);
+    bool no_proofs    = uses_debug || reflects_env;
+
+    /* Say so. This gate is a MEASURED 1.3-1.5x on arithmetic-heavy code and it
+    ** fires on shapes a user cannot reasonably guess:
+    **
+    **   * any module carrying the STRING "debug" anywhere -- a log-level name, a
+    **     field key, a message -- because the scan is over constants, not over
+    **     reachability (see lc_module_uses_debug's own caveat above);
+    **   * any chunk with more than 255 constants that also touches a global,
+    **     because lcode then spills the access to GETUPVAL _ENV + LOADK +
+    **     GETTABLE, which lc_module_reflects_globals cannot distinguish from real
+    **     reflection. Measured: the same 20M-iteration integer loop ran 103 ms
+    **     with one constant and 152 ms with 300 -- a 48% penalty for a
+    **     constant-count threshold unrelated to what the code does.
+    **
+    ** Silently losing a third to a half of arithmetic performance for either
+    ** reason is worse than a line on stderr, so this is on by default and goes to
+    ** stderr rather than stdout -- it must not perturb the differential suite's
+    ** stdout diffs. CLUA_QUIET_PROOFS=1 silences it for callers that compile in
+    ** bulk.
+    **
+    ** Narrowing the second case needs a real "does this instruction read register
+    ** A" dataflow query, which Lua 5.4's opcode tables do not expose; two
+    ** structural approximations were tried and both were wrong about the emitted
+    ** shape, so the guard stays conservative until the analysis is done properly.
+    ** See docs/benchmarks/session-2026-07-26-speed-and-size.md. */
+    if (no_proofs && getenv("CLUA_QUIET_PROOFS") == NULL) {
+      fprintf(stderr,
+              "clua: note: type proofs disabled for this module (%s), which "
+              "costs roughly 1.3-1.5x on arithmetic-heavy code\n",
+              uses_debug
+                ? "a function carries the string constant \"debug\""
+                : "a global is reached through _ENV in a register, which lcode "
+                  "emits once a chunk has more than 255 constants");
+      fprintf(stderr,
+              "clua: note: set CLUA_QUIET_PROOFS=1 to silence this\n");
+    }
     /* M2: interprocedural argument/return type propagation runs the local
        inference in three phases (baseline -> callee param entries -> callers
        with return summaries); the final phase leaves the same per-inst

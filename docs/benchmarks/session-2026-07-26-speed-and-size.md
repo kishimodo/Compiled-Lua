@@ -153,6 +153,47 @@ The design note motivating §3 predicted **1.41×** on a 40M-call kernel from B1
 Measured here it is **1.24×** on calls. Recorded so the larger figure is not
 carried forward.
 
+### The `no_proofs` gate is worse than "a silent cliff" — it hits Rover
+
+`passes.c` disables `ip_typeprop` (and therefore tag-check elision and unboxed
+register residency) when a module either carries the string constant `"debug"` or
+reaches a global through `_ENV` in a register. Measured cost on an identical
+20M-iteration integer loop:
+
+| trigger | before | after | penalty |
+|---|---:|---:|---:|
+| one extra constant vs 300 constants + a global | 103 ms | 152 ms | **1.48×** |
+| adding `local _ = "debug"` | 107 ms | 159 ms | 1.49× |
+| adding `local _ = _G` | 107 ms | 141 ms | 1.32× |
+
+**`rover/src/rover.lua` trips it.** The project's own flagship program compiles
+with proofs off, because it has more than 255 constants and touches a global — so
+`lcode` spills the access to `GETUPVAL _ENV` + `LOADK` + `GETTABLE`, which
+`lc_module_reflects_globals` cannot distinguish from real reflection. That is also
+why an earlier analysis found Rover resolving only 5 of its 1,054 call sites.
+
+Verified emission, from `luac -l` on a 300-constant chunk:
+
+```
+310  [2]  GETUPVAL  1 0            ; _ENV        <- small file emits instead:
+311  [2]  LOADK     2 "GlobalAcc"                ;  SETTABUP 0 1 2 ; _ENV "GlobalAcc"
+312  [2]  LOADI     3 0
+313  [2]  SETTABLE  1 2 3
+```
+
+A diagnostic now names which of the two causes fired (`CLUA_QUIET_PROOFS=1`
+silences it). The gate itself is **deliberately still conservative.** Two
+structural approximations were attempted and both were wrong about the emitted
+shape — the first checked for `GETFIELD`/`SETFIELD` (never occurs; the key is in a
+register), the second bailed on any unrecognised instruction and so never fired
+past the first `LOADI`. Narrowing it soundly needs a real "does this instruction
+read register A" query, which Lua 5.4's opcode tables do not expose — 5.4 dropped
+5.3's per-operand `OpArgMask`. Being permissive here is a **miscompile**, not a
+slow binary, so it waits for a proper dataflow pass rather than a third guess.
+
+Blast radius measured: 4 of 59 differential tests, 1 of the first 60 packages, and
+Rover.
+
 ### The honest ceiling
 
 Roughly **1.5–3× over the interpreter on general Lua, 3–5× on array-numeric code,
