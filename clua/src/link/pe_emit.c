@@ -761,26 +761,35 @@ static int already_pulled( Linker *L, int a, uint32_t hdr_off ) {
 
 /* CLUA_GC_DEBUG: report what archive symbol resolution actually cost.
 **
-** The quantity that predicts link time is the number of armap NAME COMPARES,
-** not the archive count or the megabytes read: LcAr_MemberDefining walks its
-** archive's whole symbol index, the loop below asks every archive in order, and
-** the outer fixpoint restarts from symbol 0 after every pull, so unresolved
-** symbols are rescanned once per round. Reading and indexing all ten CRT
-** archives measures 7-8 ms; a single resolution measures ~33 us. This report
-** exists to turn the remaining "how many lookups does a real link do?" estimate
-** into a number. See docs/benchmarks/archive-symbol-lookup.md.
+** The loop below asks every archive about every unresolved symbol, and the outer
+** fixpoint restarts from symbol 0 after every pull, so unresolved symbols are
+** re-queried once per round -- 25,114 archive queries for one Rover link.
+**
+** `compares` now counts strcmps along a HASH PROBE CHAIN, not armap entries
+** walked: LcAr_MemberDefining builds a per-archive index on first query. A
+** healthy link therefore reports about 1 compare per query. A figure in the
+** thousands means either the index degraded to the linear fallback (allocation
+** failure) or the hash has collapsed -- the "on the fallback scan" line below
+** distinguishes the two. Before the index this read ~1,634 per query, which was
+** ~43% of a warm build. See docs/benchmarks/archive-symbol-lookup.md.
 **
 ** One getenv per link, not per lookup. */
 static void ar_report_stats( const Linker *L, int rounds ) {
     unsigned long long queries = 0, compares = 0, matched = 0, hits = 0;
     unsigned long long mem_lookups = 0, mem_compares = 0;
     unsigned long long entries = 0, members = 0;
+    int fallback = 0;
     int i;
 
     if ( !getenv( "CLUA_GC_DEBUG" ) ) return;
 
     for ( i = 0; i < L->narchives; i++ ) {
         const LcArStats *s = &L->archives[i].stats;
+        /* -1 means the index could not be built (allocation failure, or an
+        ** archive with no entries) and lookups fell back to the linear scan.
+        ** Report it: a silent degradation looks exactly like a slow machine. */
+        if ( L->archives[i].sym_index_state == -1 ||
+             L->archives[i].mem_index_state == -1 ) fallback++;
         queries      += s->queries;
         compares     += s->compares;
         matched      += s->matched;
@@ -811,6 +820,9 @@ static void ar_report_stats( const Linker *L, int rounds ) {
         fprintf( stderr, "[ar] WARNING: %llu armap entr%s matched a name but "
                          "named no member\n", matched - hits,
                  ( matched - hits ) == 1 ? "y" : "ies" );
+    if ( fallback )
+        fprintf( stderr, "[ar] %d archive(s) on the linear fallback scan "
+                         "(no index built)\n", fallback );
 }
 
 static int resolve_fixpoint( Linker *L ) {

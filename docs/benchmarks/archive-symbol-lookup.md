@@ -139,6 +139,72 @@ CLUA_GC_DEBUG=1 clua build rover/src/rover.lua -O1 -o out.exe
 `tools/test-link-stats.lua` asserts the report is self-consistent and that
 enabling it does not change a single output byte.
 
+## Implemented
+
+Two lazily built open-addressed FNV-1a indexes per `LcArchive` — name → armap
+entry, and `hdr_off` → member — using the same hash and slot encoding as the
+linker's existing `gsym_find`. Slots hold *index + 1* with `0` as the empty
+sentinel and the key is re-read from the underlying array on every probe, so a
+slot cannot go stale. Capacity is the smallest power of two ≥ `2n + 16`, giving a
+load factor ≤ 0.5 so a probe always terminates on an empty slot — an unterminated
+probe would be a compiler *hang*, which on a build server looks like a stuck link
+rather than a crash. `n > 2^28` or an allocation failure leaves
+`*_index_state = -1` and lookups keep using the linear scan, which stays in the
+file.
+
+Built on first query rather than in `LcAr_Open`, so an archive that is opened and
+never asked about pays nothing. That makes the first lookup a *write*: if a
+future change shares one `LcArchive` across threads, the indexes must be built
+before the archive is published.
+
+### The accounting is the proof
+
+Everything that describes *resolution* is bit-identical; only the two compare
+counts collapse:
+
+| `[ar]` field | Linear | Indexed |
+|---|---:|---:|
+| archives / armap entries / members | 12 / 20,339 / 9,957 | **same** |
+| fixpoint rounds | 236 | **same** |
+| archive queries | 25,114 | **same** |
+| answered / missed | 465 / 24,649 | **same** |
+| member lookups | 465 | **same** |
+| **name compares** | **41,058,508** | **21,537** (1,906× fewer) |
+| **member compares** | **322,100** | **536** |
+
+A different query, answered, missed or round count would mean resolution itself
+changed, and the commit would not land. One archive reports "on the linear
+fallback scan": `libmoldname.a` has zero armap symbols, so no index is built —
+visible in the report rather than silent.
+
+### Measured wall-clock
+
+| Build | Before | After | Delta |
+|---|---:|---:|---:|
+| `rover/src/rover.lua` `-O1` (n=9) | 180 ms | **87 ms** | **-93 ms (-52%)** |
+| `print("hello")` `-O1` (n=11) | 153 ms | **76 ms** | **-77 ms (-50%)** |
+
+Spreads are tight (rover 83-90 ms, hello 71-87 ms), so the delta is far outside
+run-to-run noise for once. This beats the ~43% estimate above because the member
+scan collapsed as well, and because the surviving work is cache-resident.
+
+Output is unchanged: the pre-index build, the indexed build, and a repeat indexed
+build all produce Rover `-O1` at SHA-256 `4c2b5a77d4ad567d…`.
+
+### Regression cover
+
+`tests/unit/test_lc_link_symindex.c` builds a two-member archive whose armap
+lists `dupSym` twice — first against `firstmbr.o`, then `secondmbr.o` — and
+asserts the answer is `firstmbr.o`. It also asserts a later-listed unique name is
+still reachable, that absent and near-miss names resolve to `NULL`, that
+`hdr_off` lookups are exact, and that a repeat query answers identically (the
+index is lazily built, so the first and second lookups take different paths).
+
+Written and run against the *unmodified linear scan* first, which is what proves
+the fixture encodes existing behavior rather than the new implementation's.
+Mutation-verified: changing the duplicate branch to last-insertion-wins fails two
+of its checks.
+
 ## Determinism constraint on any fix
 
 `LcAr_MemberDefining` returns the **first** armap entry, in index order, whose

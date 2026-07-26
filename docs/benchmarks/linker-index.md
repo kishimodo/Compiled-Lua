@@ -59,11 +59,13 @@ attributed the remaining time to parsing the 13.9 MB CRT sysroot and named an
 archive-index cache as the next target. Measurement says otherwise: reading and
 indexing all ten archives takes **7-8 ms**, whereas the *archive symbol* lookups
 this commit never touched cost **~33 us each** over a 19,775-entry linear scan.
-`092122b` indexed `gsym_find` and the contribution map; `LcAr_MemberDefining` in
-`ar_read.c` is still a linear `strcmp` walk, with a nested linear member scan on
-every hit, called per unresolved symbol per archive and restarted on every
-fixpoint round. See [`archive-symbol-lookup.md`](archive-symbol-lookup.md). The
-parse cache is chasing 8 ms; the armap index is worth tens.
+`092122b` indexed `gsym_find` and the contribution map but left
+`LcAr_MemberDefining` in `ar_read.c` a linear `strcmp` walk, with a nested linear
+member scan on every hit, called per unresolved symbol per archive and restarted
+on every fixpoint round. Indexing *that* — see
+[`archive-symbol-lookup.md`](archive-symbol-lookup.md) — cut the warm build in
+half, which is where the win this note went looking for actually was. The parse
+cache was chasing 8 ms.
 
 ## Regression cover
 

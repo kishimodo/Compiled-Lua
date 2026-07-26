@@ -64,6 +64,27 @@ typedef struct {
     size_t       sympool_len;
     char         path[260];
     LcArStats    stats;       /* lookup accounting; see LcArStats            */
+
+    /* Lazily built lookup indexes. Open-addressed, power-of-two capacity,
+    ** linear probing. A slot holds an INDEX PLUS ONE into the array it indexes
+    ** -- 0 is the empty sentinel -- never a pointer, and the key is re-read from
+    ** that array on every probe, so a slot can never be silently stale.
+    **
+    ** state: 0 = not built yet, 1 = built, -1 = no index (empty or allocation
+    ** failure) and lookups fall back to the linear scan, which stays in the file
+    ** and stays correct.
+    **
+    ** Built on FIRST QUERY rather than in LcAr_Open, so an archive that is
+    ** opened and never asked about pays nothing -- which matters because a link
+    ** opens twelve archives and queries them unevenly. That makes the first
+    ** lookup a WRITE: if a future change shares one LcArchive across threads,
+    ** build the indexes before publishing the archive. */
+    uint32_t    *sym_slots;      /* armap index + 1                          */
+    uint32_t     sym_slot_cap;
+    int          sym_index_state;
+    uint32_t    *mem_slots;      /* member index + 1                        */
+    uint32_t     mem_slot_cap;
+    int          mem_index_state;
 } LcArchive;
 
 int  LcAr_Open( const char *path, LcArchive *out, char *err, size_t errlen );

@@ -42,7 +42,7 @@ above stays as the strategic order.
 | 3 | Measure the `.pdata`/`.xdata` rooting cost | done, negative | [`link-gc-unwind-roots.md`](../benchmarks/link-gc-unwind-roots.md) — unrooting frees 128 bytes of `.text`, total ~3 KB. Hypothesis refuted; the `hello` floor needs a different lead |
 | 4 | Pin the system `tar` in the test runner | done | pinned at the call site; case C7 proves PATH immunity, and reverting the pin fails only that case |
 | 5 | **imm32 helper-call arguments** | done | **-73,216 bytes** measured (-12.0% of Rover's `.text`, -9.9% whole file), against a 73,124 prediction; hello unchanged. Unconditional, not behind `-Oz`. [`helper-call-args.md`](../benchmarks/helper-call-args.md) |
-| 6 | **Hash the archive symbol index** | open | **~33 us per lookup** over 19,775 entries; parse is only 7-8 ms |
+| 6 | **Hash the archive symbol index** | done | **-52% warm build** (rover -O1 180->87 ms, hello 153->76 ms); 41,058,508 name compares -> 21,537 with every resolution count bit-identical; output byte-identical. [`archive-symbol-lookup.md`](../benchmarks/archive-symbol-lookup.md) |
 | 7 | `-MMD -MP` header dependencies | open | removes the documented stale-object trap that yields silent empty-output binaries |
 | 8 | Codegen context isolation | open | row 6 prerequisite; must follow step 5, same file |
 | 9 | Implement `lc_module_verify` | open | a safety control that only appears active |

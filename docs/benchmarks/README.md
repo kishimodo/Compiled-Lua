@@ -74,23 +74,22 @@ Warm medians compiling `rover/src/rover.lua` with the internal linker:
 | Configuration | Wall time |
 |---|---:|
 | `clua check` | ~14 ms (~52 ms including process start) |
-| `-O0` | ~177 ms |
-| `-O1` | ~180 ms (median, n=9, re-measured at `bc1ea8f`) |
-| `-O2` | ~170-230 ms |
-| `-O3` | ~207 ms |
+| `-O1`, before the archive index | ~180 ms (median, n=9, at `bc1ea8f`) |
+| `-O1`, **current** | **~87 ms** (median, n=9, range 83-90) |
 
-`print("hello")` at `-O1` is ~153 ms (median, n=11) — a tiny program costs almost
-as much as Rover, because the link is dominated by the fixed runtime/CRT closure
-rather than by user code.
+`print("hello")` at `-O1` went from ~153 ms to **~76 ms** (median, n=11). A tiny
+program still costs almost as much as Rover, because the link is dominated by the
+fixed runtime/CRT closure rather than by user code — halving that fixed cost is
+what the archive index did.
 
 The front-end check is a small fraction of a warm build, so the build is
 link-dominated.
 
-**Corrected 2026-07-25:** the earlier claim that the remaining floor is "archive
-parsing plus PE writing, not symbol resolution" is wrong. Reading and indexing all
-ten CRT archives (14 MB) measures **7-8 ms**, while archive *symbol resolution*
-costs **~33 us per lookup** against a 19,775-entry linear scan — tens of
-milliseconds of a ~170 ms build. See
+**Corrected 2026-07-25, then fixed:** the earlier claim that the remaining floor
+is "archive parsing plus PE writing, not symbol resolution" was wrong. Reading and
+indexing all ten CRT archives (14 MB) measures 7-8 ms, while archive *symbol
+resolution* was 41 million string compares per link — about 43% of a warm build.
+Indexing it halved the build. See
 [`archive-symbol-lookup.md`](archive-symbol-lookup.md).
 
 ## Harnesses
@@ -124,14 +123,16 @@ Implemented changes:
 
 - [`linker-index.md`](linker-index.md) — symbol/contribution indexing (`092122b`).
 - [`codegen-savedpc.md`](codegen-savedpc.md) — `savedpc` base hoist (`9d3ded2`).
+- [`helper-call-args.md`](helper-call-args.md) — imm32 helper-call arguments:
+  **-73,216 bytes** on Rover, -12% of `.text`, `hello` unchanged.
+- [`archive-symbol-lookup.md`](archive-symbol-lookup.md) — per-archive armap and
+  member indexes: **-52% warm build time**, output byte-identical.
 
-Measured opportunities, not yet implemented:
+Measured and rejected:
 
-- [`helper-call-args.md`](helper-call-args.md) — 4,724 helper-call sites spend
-  141,720 bytes on `imm64` argument loads; 73,124 recoverable, no tradeoff.
-- [`archive-symbol-lookup.md`](archive-symbol-lookup.md) — ~33 us per archive
-  symbol resolution over a 19,775-entry linear scan; the parse it was blamed on
-  is only 7-8 ms.
+- [`link-gc-unwind-roots.md`](link-gc-unwind-roots.md) — unrooting
+  `.pdata`/`.xdata` frees 128 bytes of `.text`; the resurrection hypothesis is
+  refuted and the idea is not worth pursuing.
 
 Harnesses live in `tools/`: `bench-link.sh`, `bench-optimizer.lua`,
 `bench-armap.c`, `count-imm-sites.py`.
