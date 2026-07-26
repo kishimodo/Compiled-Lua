@@ -272,8 +272,13 @@ const LcArMember *LcAr_MemberByHdrOff( LcArchive *a, uint32_t hdr_off ) {
         uint64_t probes = 0;
         for ( ;; ) {
             uint32_t s = a->mem_slots[p];
-            probes++;
+            /* Count only slots actually COMPARED, so this counter means the same
+            ** thing as LcAr_MemberDefining's: the empty terminator ends the probe
+            ** without a comparison and must not be charged. Incrementing above
+            ** this break instead overstated every miss by one and made the two
+            ** counters non-comparable. */
             if ( s == 0 ) break;
+            probes++;
             if ( a->members[ s - 1 ].hdr_off == hdr_off ) {
                 a->stats.mem_lookups++;
                 a->stats.mem_compares += probes;
