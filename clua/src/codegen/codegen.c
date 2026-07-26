@@ -217,7 +217,29 @@ int LcCg_EmitRestoreL( LcCodeBuf *B ) {
  *  M0: no cache reload — registers are memory-resident.
  */
 int LcCg_EmitReloadRdiAndCache( LcCodeBuf *B ) {
-    /* MEASUREMENT PROBE (revert before commit): 5 instr / 20 B -> 3 / 11 B. */
+    /* Three instructions / 11 bytes, down from five / 20. Two independent folds,
+    ** both of which make the sequence strictly safer rather than merely shorter:
+    **
+    **   * Read L->ci straight out of RBX. RBX already holds L for the whole
+    **     function (see the prologue docstring), so the previous
+    **     LcCg_EmitRestoreL -- a bare MOV RCX, RBX -- copied L into RCX only to
+    **     dereference it one instruction later. Nothing depended on the reload
+    **     leaving L in RCX: RCX is the Win64 first-argument register and every
+    **     helper-call site sets it explicitly just before the CALL (see
+    **     LcCg_EmitHelperCall3 below). Not clobbering it here is one fewer
+    **     surprise, not one more.
+    **   * LEA 16(%rax), %rdi instead of MOV %rax,%rdi + ADD $16,%rdi. Same
+    **     address, one instruction, and LEA does not write flags where ADD did --
+    **     so no lowering that runs after a reload can be affected except
+    **     favourably.
+    **
+    ** Measured on rover/src/rover.lua at -O1, both arms rebuilt from source
+    ** (obj/codegen/codegen.o explicitly, because Makefile.luac pulls backend
+    ** objects by wildcard and will happily relink a stale one):
+    **   .text 536,590 -> 502,926 = -33,664 bytes, -6.27%
+    **   whole file 671,232 -> 637,440
+    ** The win is large because a reload follows most helper calls -- roughly 3,700
+    ** sites in rover. */
     if ( !X64Emit_MovMemToReg( B, X64_RAX, X64_RBX, LC_OFF_CI ) ) return 0;
     if ( !X64Emit_MovMemToReg( B, X64_RAX, X64_RAX, LC_OFF_CI_FUNC ) ) return 0;
     if ( !X64Emit_LeaRegMem( B, X64_RDI, X64_RAX, 16 ) ) return 0;
