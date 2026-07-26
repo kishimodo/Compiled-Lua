@@ -52,8 +52,15 @@ for current status.
 - **Linker latent wrong-code:** an empty bounds-check body, unchecked `REL32`
   truncation, and `ADDR32` ImageBase truncation with a `DIR64`-typed base
   relocation because `RelocSite` carried no type field. *(fixed in `0ff2175`)*
-- **`.pdata`/`.xdata` are unconditionally rooted** in `gc_sections`, which
-  resurrects the CRT functions they describe. Still open, and a size item.
+- ~~**`.pdata`/`.xdata` are unconditionally rooted** in `gc_sections`, which
+  resurrects the CRT functions they describe.~~ **Withdrawn 2026-07-25 —
+  measured and refuted.** Unrooting them frees 128 bytes of `.text`, not the
+  tens of KB implied: the CRT is not built with `-ffunction-sections`, so there
+  is one `.text` per object member, GC granularity is already per-object, and
+  there is no per-function dead code for `.pdata` to resurrect. The total saving
+  is ~3 KB, which is the unwind tables' own bytes, and taking it means shipping
+  without SEH data. The original "they are tiny" comment was correct. See
+  [`../benchmarks/link-gc-unwind-roots.md`](../benchmarks/link-gc-unwind-roots.md).
 - **Rover:** `list_files` compared an absolute `dir /b /s` line against a
   possibly-relative prefix, so `publish` against the default relative
   `REPO_REGISTRY` silently emitted `init.lua`-only hashes and an empty file list.

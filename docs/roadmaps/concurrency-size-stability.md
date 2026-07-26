@@ -38,8 +38,8 @@ above stays as the strategic order.
 | Step | Work | Status | Measured basis |
 |---|---|---|---|
 | 1 | Record this session's measurements in `docs/benchmarks/` | done | [`helper-call-args.md`](../benchmarks/helper-call-args.md), [`archive-symbol-lookup.md`](../benchmarks/archive-symbol-lookup.md), harnesses `tools/count-imm-sites.py` and `tools/bench-armap.c` |
-| 2 | Archive symbol-lookup counter behind `CLUA_GC_DEBUG` | open | turns "1,000-3,000 lookups" into a number before step 6 is sized |
-| 3 | Measure the `.pdata`/`.xdata` rooting cost | open | only identified lead that could move the 137,216-byte `hello` floor |
+| 2 | Archive symbol-lookup counter behind `CLUA_GC_DEBUG` | done | `04abf0a` — 19,111-25,114 archive queries and 31-41M name compares per link, a fixed per-link tax independent of program size |
+| 3 | Measure the `.pdata`/`.xdata` rooting cost | done, negative | [`link-gc-unwind-roots.md`](../benchmarks/link-gc-unwind-roots.md) — unrooting frees 128 bytes of `.text`, total ~3 KB. Hypothesis refuted; the `hello` floor needs a different lead |
 | 4 | Pin the system `tar` in the test runner | open | environment fault that makes a green suite look broken |
 | 5 | **imm32 helper-call arguments** | open | **-73,124 bytes** = 12.4% of Rover's `.text`; 4,724 sites, 0 immediates needing >32 bits, every `Rt_*` param is `int` |
 | 6 | **Hash the archive symbol index** | open | **~33 us per lookup** over 19,775 entries; parse is only 7-8 ms |
