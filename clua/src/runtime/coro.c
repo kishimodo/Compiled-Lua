@@ -296,11 +296,47 @@ static int LuaFn_IsYieldable( lua_State *L ) {
 /* coroutine.close(co) -> true | nil, msg */
 static int LuaFn_Close( lua_State *L ) {
     PCORO_T Co = CheckCoro( L, 1 );
+
+    /* RAISES rather than returning nil+message. Verified against a reference Lua
+    ** 5.4 built from lua-5.4/src: pcall(coroutine.close, running_co) yields
+    ** (false, "cannot close a running coroutine") there, where returning two
+    ** values made pcall report success and hand the caller a nil it had no reason
+    ** to check. */
     if ( Co->Status == STATUS_RUNNING || Co->Status == STATUS_NORMAL ) {
-        lua_pushnil( L );
-        lua_pushstring( L, "cannot close a running coroutine" );
-        return 2;
+        return luaL_error( L, "cannot close a running coroutine" );
     }
+
+    /* Run the coroutine's pending to-be-closed variables BEFORE destroying the
+    ** fiber. Without this every `<close>` handler in an abandoned coroutine was
+    ** silently skipped, so file handles, locks and FFI allocations held by
+    ** to-be-closed variables leaked -- and the leak was invisible because the
+    ** function still returned true.
+    **
+    ** lua_closethread also resets the thread's stack, which is what makes a
+    ** subsequent DeleteFiber safe: the fiber's Lua-side state is already torn down
+    ** in an ordered way rather than abandoned mid-frame.
+    **
+    ** Reference behaviour, checked against a Lua 5.4 built from lua-5.4/src:
+    **   a `<close>` handler runs and coroutine.close returns true
+    **   a handler that errors makes it return (false, err) -- not (true, nil)
+    ** Both were wrong here before. */
+    if ( Co->L != NULL ) {
+        int St = lua_closethread( Co->L, L );
+        if ( St != LUA_OK ) {
+            /* Hand the error object back as the second result. It is on the
+            ** coroutine's stack; move it across before the fiber goes away. */
+            if ( Co->Fiber != NULL ) { DeleteFiber( Co->Fiber ); Co->Fiber = NULL; }
+            Co->Status = STATUS_DEAD;
+            lua_pushboolean( L, 0 );
+            if ( lua_gettop( Co->L ) > 0 ) {
+                lua_xmove( Co->L, L, 1 );
+            } else {
+                lua_pushstring( L, "error in __close metamethod" );
+            }
+            return 2;
+        }
+    }
+
     if ( Co->Fiber != NULL ) {
         DeleteFiber( Co->Fiber );
         Co->Fiber = NULL;
