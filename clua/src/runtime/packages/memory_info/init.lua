@@ -238,8 +238,19 @@ function M.working_set_detail(pid)
             end
             count = count + n
         end
-        addr = base + size
-        if addr <= base then break end  -- overflow guard
+        -- Progress must be measured against the address we QUERIED, not against
+        -- the base VirtualQuery handed back. Those differ at the top of the x64
+        -- user address space: querying 0x7fffffff0000 returns a region whose
+        -- base+size lands back on 0x7fffffff0000, so `addr` stops advancing.
+        -- Comparing to `base` did not catch that, and because `count` also stops
+        -- growing once there are no further MEM_COMMIT regions, `count <
+        -- MAX_PAGES` never became false -- an infinite loop. Measured before this
+        -- fix: addr frozen at 0x7fffffff0000 and count frozen at 7,992 across
+        -- 400,000 iterations. It was invisible because test_memory_info skipped
+        -- for want of a MEMORYSTATUSEX typedef and so never ran this path.
+        local next_addr = base + size
+        if next_addr <= addr then break end
+        addr = next_addr
     end
 
     if count == 0 then

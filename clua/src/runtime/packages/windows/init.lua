@@ -120,6 +120,44 @@ typedef struct _PROCESS_INFORMATION {
     DWORD  dwThreadId;
 } PROCESS_INFORMATION;
 
+/* SYSTEM_INFO's first member is a union of dwOemId with a
+** { wProcessorArchitecture, wReserved } pair. The pair form is declared here
+** because it is the one callers actually read and it is layout-identical to the
+** union -- the cdecl parser has no anonymous-union support, and introducing a
+** dependency on one for a field nobody uses would be gratuitous.
+** dwActiveProcessorMask is ULONG_PTR, i.e. 8 bytes on x64, so it is declared as a
+** pointer-sized field rather than DWORD; getting that wrong shifts every
+** subsequent member. Callers in the cpu and memory_info packages keep private
+** mirrors of this layout (SYSTEM_INFO_CPU / SYSTEM_INFO_MEM) and cast to
+** SYSTEM_INFO *; this typedef is what makes those signatures resolvable. */
+typedef struct _SYSTEM_INFO {
+    WORD   wProcessorArchitecture;
+    WORD   wReserved;
+    DWORD  dwPageSize;
+    LPVOID lpMinimumApplicationAddress;
+    LPVOID lpMaximumApplicationAddress;
+    void  *dwActiveProcessorMask;
+    DWORD  dwNumberOfProcessors;
+    DWORD  dwProcessorType;
+    DWORD  dwAllocationGranularity;
+    WORD   wProcessorLevel;
+    WORD   wProcessorRevision;
+} SYSTEM_INFO;
+
+/* GlobalMemoryStatusEx requires the caller to set dwLength to sizeof before the
+** call, so the field order and widths here are load-bearing. */
+typedef struct _MEMORYSTATUSEX {
+    DWORD     dwLength;
+    DWORD     dwMemoryLoad;
+    ULONGLONG ullTotalPhys;
+    ULONGLONG ullAvailPhys;
+    ULONGLONG ullTotalPageFile;
+    ULONGLONG ullAvailPageFile;
+    ULONGLONG ullTotalVirtual;
+    ULONGLONG ullAvailVirtual;
+    ULONGLONG ullAvailExtendedVirtual;
+} MEMORYSTATUSEX;
+
 typedef struct _MEMORY_BASIC_INFORMATION {
     PVOID  BaseAddress;
     PVOID  AllocationBase;
