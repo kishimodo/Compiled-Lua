@@ -1,9 +1,21 @@
 # CLua (LuaC) — working notes
 
-> **Joint Codex sessions:** use a separate `claude/<task>` worktree and the
-> optional `clua-coordination` MCP mailbox. Read `AGENTS.md` and
-> `tools/agent-coordination/README.md`. The mailbox is not needed for ordinary
-> Claude-only sessions.
+> **Shared agent workspace:** reviews live in [`docs/audits/`](docs/audits/),
+> live status in [`docs/roadmaps/`](docs/roadmaps/), measured numbers in
+> [`docs/benchmarks/`](docs/benchmarks/), and session handoffs in
+> [`docs/handoff/`](docs/handoff/). Read and update those, not a copy under
+> `.claude/` or `.codex/` and not a note outside the repository — every agent
+> reads the same files. The map and conventions are in
+> [`tools/agent-coordination/README.md`](tools/agent-coordination/README.md);
+> resolve any real path with
+> `python tools/agent-coordination/repo-paths.py --json`, which derives the
+> repository root and Git common directory itself, so no worktree name or
+> absolute path has to be remembered.
+>
+> **Joint sessions:** use a separate `claude/<task>` worktree
+> (`tools/agent-coordination/new-worktree.ps1 claude <task>`) and the optional
+> `clua-coordination` MCP mailbox. Read `AGENTS.md`. The mailbox is not needed
+> for ordinary solo sessions.
 >
 > **This is CLua, the standalone AOT-compiled Lua 5.4 language.** There is no
 > JIT anywhere in the tree. Read [`README.md`](README.md) for status and

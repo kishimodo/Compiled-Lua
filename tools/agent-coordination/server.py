@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Dependency-free MCP mailbox for Codex/Claude Code coordination."""
+"""Dependency-free MCP mailbox shared by the repository's coding agents.
+
+Paths are derived from Git at run time (see repo-paths.py), so the mailbox is one
+database per repository rather than one per worktree.
+"""
 from __future__ import annotations
 import argparse, json, sqlite3, subprocess, sys
 from datetime import datetime, timezone
@@ -7,20 +11,37 @@ from pathlib import Path
 from typing import Any
 
 PROTOCOL_VERSION = "2025-06-18"
-ROOT = Path(__file__).resolve().parents[2]
+HERE = Path(__file__).resolve().parent
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
+def repo_root() -> Path:
+    """This worktree's root, derived from Git rather than from a fixed depth."""
+    try:
+        top = subprocess.check_output(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=HERE, text=True, stderr=subprocess.DEVNULL
+        ).strip()
+        if top:
+            return Path(top).resolve()
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    return HERE.parents[1]
+
 def default_db() -> Path:
+    """The mailbox lives in Git's common metadata directory, so every linked
+    worktree shares one database no matter which worktree launched the client."""
     try:
         path = subprocess.check_output(
             ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
-            cwd=ROOT, text=True, stderr=subprocess.DEVNULL
+            cwd=HERE, text=True, stderr=subprocess.DEVNULL
         ).strip()
-        return Path(path) / "agent-coordination.sqlite3"
+        if path:
+            return Path(path) / "agent-coordination.sqlite3"
     except (OSError, subprocess.CalledProcessError):
-        return ROOT / ".coordination" / "agent-coordination.sqlite3"
+        pass
+    return repo_root() / ".coordination" / "agent-coordination.sqlite3"
 
 class Mailbox:
     def __init__(self, path: Path):
