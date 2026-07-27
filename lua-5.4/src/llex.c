@@ -500,10 +500,59 @@ static int llex (LexState *ls, SemInfo *seminfo) {
         else if (check_next1(ls, '>')) return TK_SHR;  /* '>>' */
         else return '>';
       }
+      /* CLua: C-style block comment. '/' and '//' are unchanged -- '//' is floor
+      ** division in 5.4, which is why CLua cannot offer GLua's '//' line comment.
+      ** The slash-star opener is safe to claim because '*' is never a unary
+      ** operator in Lua, so `a / *b` is not valid today (verified: it gives
+      ** "unexpected symbol near '*'").
+      ** Does not nest, matching C rather than Lua's --[==[ levels. */
       case '/': {
         next(ls);
         if (check_next1(ls, '/')) return TK_IDIV;  /* '//' */
+        else if (ls->current == '*') {  /* slash-star block comment */
+          int comment_line = ls->linenumber;
+          next(ls);  /* skip the '*' */
+          for (;;) {
+            if (ls->current == EOZ) {
+              /* Report the line the comment OPENED on, the way Lua does for an
+              ** unterminated long string -- the EOF line is never the useful one. */
+              const char *msg = luaO_pushfstring(ls->L,
+                "unfinished block comment (starting at line %d)", comment_line);
+              luaX_syntaxerror(ls, msg);
+            }
+            if (ls->current == '*') {
+              next(ls);
+              /* a star followed by a slash closes the comment */
+              if (ls->current == '/') { next(ls); break; }
+              /* otherwise this star was not a terminator (a run of stars before
+              ** the closing slash is legal); fall through and re-test current */
+            }
+            else if (currIsNewline(ls)) inclinenumber(ls);
+            else next(ls);
+          }
+          break;  /* resume the token loop */
+        }
         else return '/';
+      }
+      /* CLua: C-style logical operators, pure aliases for the Lua spellings, so
+      ** they produce identical bytecode. The doubled forms are safe to claim
+      ** because a bare '&'/'|' stays bitwise and two adjacent bitwise operators
+      ** are not valid Lua (verified: `1 & & 2` -> "unexpected symbol near '&'").
+      ** '!' is entirely unused by Lua 5.4. */
+      case '&': {
+        next(ls);
+        if (check_next1(ls, '&')) return TK_AND;  /* '&&' -> and */
+        else return '&';                          /* bitwise and, unchanged */
+      }
+      case '|': {
+        next(ls);
+        if (check_next1(ls, '|')) return TK_OR;   /* '||' -> or */
+        else return '|';                          /* bitwise or, unchanged */
+      }
+      case '!': {
+        next(ls);
+        if (check_next1(ls, '=')) return TK_NE;   /* '!=' -> ~= */
+        else return TK_NOT;                       /* '!'  -> not */
       }
       case '~': {
         next(ls);
