@@ -94,6 +94,15 @@ local function lex(source)
         -- Whitespace.
         if b == 32 or b == 9 or b == 13 or b == 10 then
             advance(1)
+        -- C-style block comment (CLua): /* ... */, non-nesting, like C.
+        -- Must be handled BEFORE the punctuation branch, or the comment body is
+        -- tokenised as code -- which produced spurious "undefined global"
+        -- diagnostics for any identifier written inside a comment.
+        elseif c == "/" and source:sub(i, i + 1) == "/*" then
+            advance(2)
+            local stop = source:find("*/", i, true)
+            if stop then advance(stop - i + 2)
+            else advance(len - i + 1) end   -- unterminated: consume to EOF
         -- Long comment / short comment.
         elseif c == "-" and source:sub(i, i + 1) == "--" then
             advance(2)
@@ -163,6 +172,39 @@ local function lex(source)
             while j <= len and source:sub(j, j):match("[%w_]") do j = j + 1 end
             local v = source:sub(i, j - 1)
             if _KEYWORDS[v] then emit("keyword", v, sl, sc)
+            elseif v == "continue" then
+                -- CLua: `continue` is a CONTEXTUAL keyword, so it cannot go in
+                -- _KEYWORDS -- `t.continue`, `function M.continue()` and
+                -- `local continue` all remain valid identifiers, and the linter
+                -- must agree with the parser or it reports what it cannot mean.
+                --
+                -- The parser consults its rule only at STATEMENT position, which
+                -- a lexer cannot see. So test POSITIVELY for what may follow a
+                -- bare `continue` statement, rather than negatively for what may
+                -- follow an identifier: a block terminator, a statement
+                -- separator, or the start of another statement.
+                --
+                -- The negative form was tried first and got `if continue == 1`
+                -- wrong -- it saw `==` was not in the identifier-use set and
+                -- called it a keyword, when `continue` there is a variable in an
+                -- expression. Anything not recognised below stays an identifier,
+                -- so an unfamiliar follow token degrades to the pre-existing
+                -- behaviour instead of inventing a keyword.
+                local k = j
+                while k <= len and source:sub(k, k):match("[ \t\r\n]") do k = k + 1 end
+                local word = source:match("^[%a_][%w_]*", k)
+                local nxt  = source:sub(k, k)
+                local starts_stmt = word ~= nil and (
+                    _KEYWORDS[word] ~= nil or word == "continue"
+                    -- a following NAME begins an assignment or call statement
+                    or word:match("^[%a_]") ~= nil)
+                local is_keyword =
+                       k > len                       -- end of chunk
+                    or nxt == ";"                    -- statement separator
+                    or source:sub(k, k + 1) == "::"  -- a label follows
+                    or starts_stmt
+                if is_keyword then emit("keyword", v, sl, sc)
+                else emit("ident", v, sl, sc) end
             else emit("ident", v, sl, sc) end
             advance(j - i)
         -- Punctuation / operators.
@@ -172,7 +214,11 @@ local function lex(source)
             local three = source:sub(i, i + 2)
             if three == "..." then emit("punct", "...", sl, sc); advance(3)
             elseif two == "==" or two == "~=" or two == "<=" or two == ">="
-                or two == ".." or two == "::" or two == "<<" or two == ">>" or two == "//" then
+                or two == ".." or two == "::" or two == "<<" or two == ">>" or two == "//"
+                -- CLua C-style operators. Without these, `&&` lexed as two
+                -- separate `&` tokens (and `!=` as `!` then `=`), so any rule
+                -- reasoning about operator tokens saw the wrong shape.
+                or two == "&&" or two == "||" or two == "!=" then
                 emit("punct", two, sl, sc); advance(2)
             else
                 emit("punct", c, sl, sc); advance(1)
