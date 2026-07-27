@@ -43,7 +43,10 @@ static const char *const luaX_tokens [] = {
     "in", "local", "nil", "not", "or", "repeat",
     "return", "then", "true", "until", "while",
     "//", "..", "...", "==", ">=", "<=", "~=",
-    "<<", ">>", "::", "<eof>",
+    "<<", ">>", "::",
+    /* CLua: must mirror the TK_ADDEQ..TK_SHREQ run in llex.h exactly. */
+    "+=", "-=", "*=", "/=", "//=", "%=", "^=", "..=", "&=", "|=", "<<=", ">>=",
+    "<eof>",
     "<number>", "<integer>", "<name>", "<string>"
 };
 
@@ -454,9 +457,14 @@ static int llex (LexState *ls, SemInfo *seminfo) {
         next(ls);
         break;
       }
-      case '-': {  /* '-' or '--' (comment) */
+      case '-': {  /* '-', '-=' or '--' (comment) */
         next(ls);
-        if (ls->current != '-') return '-';
+        /* CLua: the comment test must stay FIRST. `--` starts a comment and that
+        ** cannot change; only a '-' NOT followed by '-' can become '-='. */
+        if (ls->current != '-') {
+          if (check_next1(ls, '=')) return TK_SUBEQ;  /* '-=' */
+          return '-';
+        }
         /* else is a comment */
         next(ls);
         if (ls->current == '[') {  /* long comment? */
@@ -491,13 +499,19 @@ static int llex (LexState *ls, SemInfo *seminfo) {
       case '<': {
         next(ls);
         if (check_next1(ls, '=')) return TK_LE;  /* '<=' */
-        else if (check_next1(ls, '<')) return TK_SHL;  /* '<<' */
+        else if (check_next1(ls, '<')) {  /* '<<' or '<<=' */
+          if (check_next1(ls, '=')) return TK_SHLEQ;  /* CLua '<<=' */
+          else return TK_SHL;
+        }
         else return '<';
       }
       case '>': {
         next(ls);
         if (check_next1(ls, '=')) return TK_GE;  /* '>=' */
-        else if (check_next1(ls, '>')) return TK_SHR;  /* '>>' */
+        else if (check_next1(ls, '>')) {  /* '>>' or '>>=' */
+          if (check_next1(ls, '=')) return TK_SHREQ;  /* CLua '>>=' */
+          else return TK_SHR;
+        }
         else return '>';
       }
       /* CLua: C-style block comment. '/' and '//' are unchanged -- '//' is floor
@@ -508,7 +522,10 @@ static int llex (LexState *ls, SemInfo *seminfo) {
       ** Does not nest, matching C rather than Lua's --[==[ levels. */
       case '/': {
         next(ls);
-        if (check_next1(ls, '/')) return TK_IDIV;  /* '//' */
+        if (check_next1(ls, '/')) {  /* '//' or '//=' */
+          if (check_next1(ls, '=')) return TK_IDIVEQ;  /* CLua '//=' */
+          else return TK_IDIV;
+        }
         else if (ls->current == '*') {  /* slash-star block comment */
           int comment_line = ls->linenumber;
           next(ls);  /* skip the '*' */
@@ -532,6 +549,7 @@ static int llex (LexState *ls, SemInfo *seminfo) {
           }
           break;  /* resume the token loop */
         }
+        else if (check_next1(ls, '=')) return TK_DIVEQ;  /* CLua '/=' */
         else return '/';
       }
       /* CLua: C-style logical operators, pure aliases for the Lua spellings, so
@@ -542,11 +560,13 @@ static int llex (LexState *ls, SemInfo *seminfo) {
       case '&': {
         next(ls);
         if (check_next1(ls, '&')) return TK_AND;  /* '&&' -> and */
+        else if (check_next1(ls, '=')) return TK_BANDEQ;  /* '&=' */
         else return '&';                          /* bitwise and, unchanged */
       }
       case '|': {
         next(ls);
         if (check_next1(ls, '|')) return TK_OR;   /* '||' -> or */
+        else if (check_next1(ls, '=')) return TK_BOREQ;   /* '|=' */
         else return '|';                          /* bitwise or, unchanged */
       }
       case '!': {
@@ -568,11 +588,36 @@ static int llex (LexState *ls, SemInfo *seminfo) {
         read_string(ls, ls->current, seminfo);
         return TK_STRING;
       }
+      /* CLua: these four were previously handled by the single-char default
+      ** branch. Each now checks for a trailing '=' to form a compound-assignment
+      ** token, and otherwise returns exactly the character it did before. */
+      case '+': {
+        next(ls);
+        if (check_next1(ls, '=')) return TK_ADDEQ;  /* '+=' */
+        else return '+';
+      }
+      case '*': {
+        next(ls);
+        if (check_next1(ls, '=')) return TK_MULEQ;  /* '*=' */
+        else return '*';
+      }
+      case '%': {
+        next(ls);
+        if (check_next1(ls, '=')) return TK_MODEQ;  /* '%=' */
+        else return '%';
+      }
+      case '^': {
+        next(ls);
+        if (check_next1(ls, '=')) return TK_POWEQ;  /* '^=' */
+        else return '^';
+      }
       case '.': {  /* '.', '..', '...', or number */
         save_and_next(ls);
         if (check_next1(ls, '.')) {
           if (check_next1(ls, '.'))
             return TK_DOTS;   /* '...' */
+          /* CLua: '..=' is tested AFTER '...', so '...' still wins. */
+          else if (check_next1(ls, '=')) return TK_CONCATEQ;  /* '..=' */
           else return TK_CONCAT;   /* '..' */
         }
         else if (!lisdigit(ls->current)) return '.';

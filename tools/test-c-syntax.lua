@@ -232,6 +232,111 @@ do
   end
 end
 
+-- ---- 1c. compound assignment ------------------------------------------------
+--
+-- For a SIMPLE target (local, upvalue, or an index whose table and key are already
+-- in registers) the sugar must be byte-identical to the expanded Lua form. For a
+-- target with a non-trivial prefix it deliberately is NOT: `t[f()] += 1` evaluates
+-- f() ONCE where the expansion evaluates it twice. That divergence is the feature,
+-- and it is asserted separately below.
+local compound_pairs = {
+  { "+=",   "local a=1 a += 2 print(a)",          "local a=1 a = a + 2 print(a)" },
+  { "-=",   "local a=9 a -= 2 print(a)",          "local a=9 a = a - 2 print(a)" },
+  { "*=",   "local a=3 a *= 4 print(a)",          "local a=3 a = a * 4 print(a)" },
+  { "/=",   "local a=9 a /= 2 print(a)",          "local a=9 a = a / 2 print(a)" },
+  { "//=",  "local a=9 a //= 2 print(a)",         "local a=9 a = a // 2 print(a)" },
+  { "%=",   "local a=9 a %= 2 print(a)",          "local a=9 a = a % 2 print(a)" },
+  { "^=",   "local a=2 a ^= 3 print(a)",          "local a=2 a = a ^ 3 print(a)" },
+  { "..=",  'local s="x" s ..= "y" print(s)',     'local s="x" s = s .. "y" print(s)' },
+  { "&=",   "local a=6 a &= 3 print(a)",          "local a=6 a = a & 3 print(a)" },
+  { "|=",   "local a=6 a |= 3 print(a)",          "local a=6 a = a | 3 print(a)" },
+  { "<<=",  "local a=1 a <<= 3 print(a)",         "local a=1 a = a << 3 print(a)" },
+  { ">>=",  "local a=8 a >>= 2 print(a)",         "local a=8 a = a >> 2 print(a)" },
+  { "upvalue target", "local u=1 local function g() u += 1 end g() print(u)",
+                      "local u=1 local function g() u = u + 1 end g() print(u)" },
+  { "t[i] local key", "local t={} local i=1 t[i] += 1 print(t[1])",
+                      "local t={} local i=1 t[i] = t[i] + 1 print(t[1])" },
+  { "t[1] literal",   "local t={[1]=5} t[1] += 1 print(t[1])",
+                      "local t={[1]=5} t[1] = t[1] + 1 print(t[1])" },
+  { "t.f field",      "local t={f=5} t.f += 1 print(t.f)",
+                      "local t={f=5} t.f = t.f + 1 print(t.f)" },
+  { "rhs expression", "local a=1 a += 2 * 3 print(a)", "local a=1 a = a + 2 * 3 print(a)" },
+}
+local comp_identical = 0
+for _, case in ipairs(compound_pairs) do
+  local label, sugar, lua = case[1], case[2], case[3]
+  local a, ea = build_bytes(sugar)
+  local b, eb = build_bytes(lua)
+  if not a or not b then
+    fail("compound %s: a spelling failed to compile (%s)", label, ea or eb)
+  elseif a ~= b then
+    fail("compound %s: emits different bytes from the expanded form (%d vs %d)",
+         label, #a, #b)
+  else
+    comp_identical = comp_identical + 1
+  end
+end
+
+-- The target must be evaluated ONCE. This is the one place the sugar is meant to
+-- differ from the textual expansion, and getting it wrong is a silent miscompile:
+-- without restoring fs->freereg after luaK_dischargevars, `t[f()] += 1` compiles
+-- to `t[newvalue] = newvalue` and no assertion fires.
+do
+  local prog = [==[
+local calls = 0
+local function f() calls = calls + 1 return 1 end
+local t = {[1] = 10}
+t[f()] += 5
+print(calls, t[1])
+]==]
+  local path = TMP .. "\\once.lua"
+  local h = io.open(path, "wb"); h:write(prog); h:close()
+  local code, out = run('"' .. CLUA .. '" "' .. path .. '"')
+  if code ~= 0 then
+    fail("target-once program failed: %s", trim(out):sub(1, 90))
+  elseif trim(out) ~= "1	15" then
+    fail("target-once: got %q, expected \"1\t15\" (one call, correct value)", trim(out))
+  end
+end
+
+-- Metamethods must fire exactly as in the expanded form: for an indexed target
+-- that means a SEPARATE __index read and __newindex write, not a fused access.
+do
+  local prog = [==[
+local log = {}
+local mt = { __index = function(t,k) log[#log+1]="get:"..k return 10 end,
+             __newindex = function(t,k,v) log[#log+1]="set:"..k.."="..v end }
+local p = setmetatable({}, mt)
+p.z += 5
+print(table.concat(log, " "))
+]==]
+  local path = TMP .. "\\mm.lua"
+  local h = io.open(path, "wb"); h:write(prog); h:close()
+  local code, out = run('"' .. CLUA .. '" "' .. path .. '"')
+  if code ~= 0 or trim(out) ~= "get:z set:z=15" then
+    fail("compound metamethod order: got %q, want \"get:z set:z=15\"", trim(out):sub(1,60))
+  end
+end
+
+-- Rejections.
+do
+  local errs = {
+    { "const target",    "local a <const> = 1 a += 1",       "const" },
+    { "multiple target", "local a,b=1,2 a, b += 1, 2",       "'=' expected" },
+    { "call target",     "local function f() end f() += 1",  "compound assignment" },
+  }
+  for _, c in ipairs(errs) do
+    local path = TMP .. "\\cae.lua"
+    local h = io.open(path, "wb"); h:write(c[2], "\n"); h:close()
+    local code, out = run('"' .. CLUA .. '" "' .. path .. '"')
+    if code == 0 then
+      fail("compound error case %q was accepted", c[1])
+    elseif not out:find(c[3], 1, true) then
+      fail("compound error %q should mention %q, got: %s", c[1], c[3], trim(out):sub(1,80))
+    end
+  end
+end
+
 -- ---- 2. backward compatibility: nothing existing changed meaning -----------
 --
 -- Each entry is a program plus the exact output it must produce. The operators
@@ -320,7 +425,8 @@ if #failures > 0 then
   for _, why in ipairs(failures) do print("[-] FAIL " .. NAME .. ": " .. why) end
   os.exit(1)
 end
-print(("[+] PASS %s (%d/%d operator pairs + %d/%d continue pairs emit byte-identical EXEs, %d compatibility "
+print(("[+] PASS %s (%d/%d operator + %d/%d continue + %d/%d compound pairs emit byte-identical EXEs, %d compatibility "
        .. "cases unchanged, continue-as-identifier and error paths verified)")
-      :format(NAME, identical, #pairs_to_check, cont_identical, #continue_pairs, #compat))
+      :format(NAME, identical, #pairs_to_check, cont_identical, #continue_pairs,
+              comp_identical, #compound_pairs, #compat))
 os.exit(0)

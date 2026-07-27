@@ -1509,6 +1509,77 @@ static void restassign (LexState *ls, struct LHS_assign *lh, int nvars) {
 }
 
 
+/*
+** CLua: map a compound-assignment token to the binary operator it applies.
+** Returns OPR_NOBINOPR when the token is not one.
+*/
+static BinOpr getcompoundopr (int token) {
+  switch (token) {
+    case TK_ADDEQ:    return OPR_ADD;
+    case TK_SUBEQ:    return OPR_SUB;
+    case TK_MULEQ:    return OPR_MUL;
+    case TK_DIVEQ:    return OPR_DIV;
+    case TK_IDIVEQ:   return OPR_IDIV;
+    case TK_MODEQ:    return OPR_MOD;
+    case TK_POWEQ:    return OPR_POW;
+    case TK_CONCATEQ: return OPR_CONCAT;
+    case TK_BANDEQ:   return OPR_BAND;
+    case TK_BOREQ:    return OPR_BOR;
+    case TK_SHLEQ:    return OPR_SHL;
+    case TK_SHREQ:    return OPR_SHR;
+    default:          return OPR_NOBINOPR;
+  }
+}
+
+
+/*
+** CLua: compound assignment -- `var OP= expr`, with the TARGET EVALUATED ONCE.
+**
+** `t[f()] += 1` must call f() exactly once, so this cannot be a textual expansion
+** to `t[f()] = t[f()] + 1`, which calls it twice. The target's expdesc already
+** holds its table and key, so the value is read from a COPY of the descriptor
+** while the original is kept intact to store through.
+**
+** The freereg restore below is the load-bearing, non-obvious step.
+** luaK_dischargevars converts an indexed expdesc into a VRELOC GET*, and in doing
+** so FREES the temporary registers holding the target's table and key -- they are
+** dead as far as it is concerned. The new value is then computed on top of them,
+** and storing through the original descriptor writes to registers that now hold
+** something else. Built and measured without the restore: `t[f()] += 1` compiles
+** to `GETTABLE 2 0 2 ... SETTABLE 0 2 2`, i.e. `t[newvalue] = newvalue`, and no
+** assertion fires even under -DLUAI_ASSERT. Restoring freereg to its pre-discharge
+** value keeps the table and key pinned across the right-hand side.
+**
+** The restore must sit BETWEEN luaK_dischargevars and luaK_infix: luaK_infix may
+** itself allocate for the left operand, so restoring after it would undo that.
+**
+** Note this is deliberately NOT a token-level rewrite. `a += b < c` means
+** `a = a + (b < c)`... no: it means `a = (a + b) < c` under a textual expansion,
+** which is wrong. Parsing the right-hand side as a full expression and applying
+** the operator through luaK_infix/luaK_posfix gives `a = a + (b < c)`, matching
+** how every language with compound assignment defines it.
+*/
+static void compoundassign (LexState *ls, expdesc *var, BinOpr opr) {
+  FuncState *fs = ls->fs;
+  expdesc val, rhs;
+  int line = ls->linenumber;
+  int base;
+  /* luaX_syntaxerror appends " near <token>", so this message must not. */
+  check_condition(ls, vkisvar(var->k),
+                  "cannot use compound assignment on this expression");
+  check_readonly(ls, var);
+  luaX_next(ls);  /* skip the compound operator */
+  val = *var;                    /* read side: a copy, so 'var' stays storable */
+  base = fs->freereg;            /* remember what the target pinned */
+  luaK_dischargevars(fs, &val);  /* emits the GET half; frees table/key regs */
+  fs->freereg = base;            /* ... which we need kept: re-pin them */
+  luaK_infix(fs, opr, &val);
+  expr(ls, &rhs);
+  luaK_posfix(fs, opr, &val, &rhs, line);
+  luaK_storevar(fs, var, &val);
+}
+
+
 static int cond (LexState *ls) {
   /* cond -> exp */
   expdesc v;
@@ -1975,10 +2046,18 @@ static void exprstat (LexState *ls) {
   /* stat -> func | assignment */
   FuncState *fs = ls->fs;
   struct LHS_assign v;
+  BinOpr cop;
   suffixedexp(ls, &v.v);
   if (ls->t.token == '=' || ls->t.token == ',') { /* stat -> assignment ? */
     v.prev = NULL;
     restassign(ls, &v, 1);
+  }
+  /* CLua: stat -> compound assignment. Single target only -- C has no multiple
+  ** assignment, and `a, b += 1, 2` has no obvious meaning worth inventing. The
+  ** ',' arm above claims the multiple-target form first, so reaching here means
+  ** exactly one target. */
+  else if ((cop = getcompoundopr(ls->t.token)) != OPR_NOBINOPR) {
+    compoundassign(ls, &v.v, cop);
   }
   else {  /* stat -> func */
     Instruction *inst;
