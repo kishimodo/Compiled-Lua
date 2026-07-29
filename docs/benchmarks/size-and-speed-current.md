@@ -1,6 +1,6 @@
 # Current size and speed, `claude/speed-and-size`
 
-The live numbers. Re-measured 2026-07-29 at `efca0b2`, warm tree, `-O1`, invoked
+The live numbers. Re-measured 2026-07-29 at `1501e5f`, warm tree, `-O1`, invoked
 from the repository root. Supersedes the per-change figures scattered across the
 other documents in this directory — those record how each step was measured, this
 records where the tree actually is.
@@ -9,13 +9,20 @@ records where the tree actually is.
 
 | Target | `.text` | whole file |
 |---|---:|---:|
-| `print("hello")` | 74,806 | **93,696** |
-| `local a,b=2,3 local c=a+b print(c)` | 113,284 | **141,824** |
-| `tools/bench-runtime.lua` | 129,572 | 161,792 |
-| `rover/src/rover.lua` | 462,900 | **594,432** |
+| `print("hello")` | 74,822 | **93,696** |
+| `local a,b=2,3 local c=a+b print(c)` | 113,300 | **141,824** |
+| `tools/bench-runtime.lua` | 129,588 | 161,792 |
+| `rover/src/rover.lua` | 461,348 | **592,896** |
 
 Against the start of this arc: **hello −32%** (137,216 → 93,696), **rover −12%**
-(670,720 → 594,432).
+(670,720 → 592,896).
+
+> The rover row was **462,900 / 594,432** here until `1501e5f`. That was not a
+> regression since fixed — it was a stale-object misread: `x64_emit.c` and
+> `build/bin/obj/codegen/x64_emit.o` carried the *same* mtime, so `make` treated
+> the object as current and kept linking the pre-imm8 encoder. Any figure in this
+> directory dated before `1501e5f` may share the error. Before trusting a size
+> number, confirm the object is newer than its source — equal is not newer.
 
 ### `hello` is not a representative number
 
@@ -48,6 +55,7 @@ used-libs mask sound — after the split,
 | Leaner RDI reload (`91a5452`) | −33,664 B rover `.text` |
 | `aot_entry.o` size flags (`c87e2ce`) | −3,584 B |
 | imm8 `SUB`/`ADD rsp` (`efca0b2`) | −4,134 B rover `.text` |
+| `L->top` hoist out of the table helpers (`1501e5f`) | 1.11× on field access |
 
 ### For scale, same machine
 
@@ -107,3 +115,18 @@ python tools\check-byte-identity.py <label>       # reproducibility, 18 rows
 For speed, build both arms from source — `Makefile.luac` pulls backend objects
 with `$(wildcard)` and will relink a stale one — then alternate the arms **inside**
 each iteration and report min-of-N with the spread.
+
+Staleness has bitten this arc four times and the last one silently corrupted the
+size table above, so check rather than assume:
+
+```bash
+find clua/src -name '*.c' | while read c; do
+  o=build/bin/obj/$(echo "$c" | sed 's|clua/src/||; s|\.c$|.o|')
+  [ -f "$o" ] && [ ! "$o" -nt "$c" ] && echo "STALE $o"
+done
+```
+
+`-nt` is strictly-newer, which is the test `make` itself applies: an A/B that
+`cp`s one arm's source into place can land on the same whole second as the
+object built from the other arm, and then nothing rebuilds. `touch` the source
+before every arm.
