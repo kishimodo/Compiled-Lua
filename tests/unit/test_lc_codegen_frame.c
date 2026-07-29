@@ -50,25 +50,43 @@ int main( void ) {
     CHECK( B.bytes[10] == 0x56 );
     CHECK( B.bytes[11] == 0x55 );
     /* SUB RSP,0x28 -- 8 pushes (64) + return address (8) = 72; +40 = 112,
-       16-aligned. 0x20 here would break every helper call's ABI alignment. */
-    CHECK( B.bytes[12] == 0x48 && B.bytes[13] == 0x81 && B.bytes[14] == 0xEC );
-    CHECK( B.bytes[15] == 0x28 && B.bytes[16] == 0x00 &&
-           B.bytes[17] == 0x00 && B.bytes[18] == 0x00 );
+       16-aligned. 0x20 here would break every helper call's ABI alignment.
+
+       Encoded `48 83 EC 28` (imm8), not `48 81 EC 28 00 00 00` (imm32): `83 /n ib`
+       sign-extends its imm8 under REX.W, so the two forms leave RSP identical for
+       any value in [-128,127], and the short one is 3 bytes cheaper on every
+       prologue and every epilogue. The RESERVE VALUE is what matters here, so it
+       is asserted separately from the encoding below. */
+    CHECK( B.bytes[12] == 0x48 && B.bytes[13] == 0x83 && B.bytes[14] == 0xEC );
+    CHECK( B.bytes[15] == 0x28 );
 
     /* ---- epilogue ---- */
     CHECK( LcCg_EmitEpilogue( &B, &frame ) == 1 );
     CHECK( B.used > after_prologue );
-    /* ADD RSP,0x28 must mirror the prologue's SUB RSP,0x28 exactly. */
+    /* ADD RSP,0x28 -- the imm8 form, mirroring the prologue's SUB. If these two
+       ever disagree on the reserve the return address is wrong and the process
+       dies, so both are asserted against the same literal 0x28. */
     CHECK( B.bytes[after_prologue + 0] == 0x48 &&
-           B.bytes[after_prologue + 1] == 0x81 &&
+           B.bytes[after_prologue + 1] == 0x83 &&
            B.bytes[after_prologue + 2] == 0xC4 &&
            B.bytes[after_prologue + 3] == 0x28 );
     CHECK( B.bytes[B.used - 1] == 0xC3 );  /* RET is the last byte */
     /* byte before RET is POP RDI (reg 7, no REX): 0x5F */
     CHECK( B.bytes[B.used - 2] == 0x5F );
-    /* POP RBP (0x5D) is the FIRST pop (right after the 7-byte ADD RSP,imm32),
-       mirroring the last push. */
-    CHECK( B.bytes[after_prologue + 7] == 0x5D );
+    /* POP RBP (0x5D) is the FIRST pop, immediately after the ADD RSP. Derived
+       from the ADD's length rather than hardcoded: the imm8 encoding is 4 bytes
+       where imm32 was 7, and an offset literal here would silently drift again the
+       next time an encoding shortens. */
+    CHECK( B.bytes[after_prologue + 4] == 0x5D );
+    /* And the pops must mirror the pushes in reverse: RBP, RSI, R15, R14, R13,
+       R12, RBX, RDI. Asserting the whole sequence is what actually guarantees the
+       frame unwinds to the same RSP it was entered with. */
+    CHECK( B.bytes[after_prologue + 5] == 0x5E );                          /* POP RSI  */
+    CHECK( B.bytes[after_prologue + 6] == 0x41 && B.bytes[after_prologue + 7]  == 0x5F ); /* R15 */
+    CHECK( B.bytes[after_prologue + 8] == 0x41 && B.bytes[after_prologue + 9]  == 0x5E ); /* R14 */
+    CHECK( B.bytes[after_prologue + 10] == 0x41 && B.bytes[after_prologue + 11] == 0x5D ); /* R13 */
+    CHECK( B.bytes[after_prologue + 12] == 0x41 && B.bytes[after_prologue + 13] == 0x5C ); /* R12 */
+    CHECK( B.bytes[after_prologue + 14] == 0x5B );                         /* POP RBX  */
 
     /* ---- LEA r64,[base+disp] picks disp8 when it fits (the savedpc-site
             size win) and disp32 otherwise; RBP-based disp==0 must still
