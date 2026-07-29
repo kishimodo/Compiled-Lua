@@ -352,13 +352,13 @@ int Rt_GetTabUp( lua_State *L, int A, int B, int C ) {
     const TValue *Slot = { 0 };
     StkId         Ra   = L->ci->func.p + 1 + A;
 
-    /* sync L->top so luaT_callTMres pushes above the live register window */
-    L->top.p = L->ci->top.p;
     /* key is always a short string constant in OP_GETTABUP */
     TString *KeyStr = tsvalue( Key );
     if ( luaV_fastget( L, Upval, KeyStr, Slot, luaH_getshortstr ) ) {
         setobj2s( L, Ra, Slot );
     } else {
+        /* Only the slow path needs L->top synced -- see Rt_GetI. */
+        L->top.p = L->ci->top.p;
         luaV_finishget( L, Upval, Key, Ra, Slot );
     }
     return 0;
@@ -630,11 +630,25 @@ int Rt_NewTable( lua_State *L, int A, int B, int C ) {
 int Rt_GetI( lua_State *L, int A, int B, int C ) {
     StkId         Base = L->ci->func.p + 1;
     const TValue *Slot = { 0 };
-    /* sync L->top so luaT_callTMres pushes above the live register window */
-    L->top.p = L->ci->top.p;
+    /* L->top is synced on the SLOW path only.
+    **
+    ** luaV_fastget and luaV_fastgeti (lua-5.4/src/lvm.h:85-101) are pure
+    ** raw-access macros -- a tag test and an array probe or one hash lookup. They
+    ** never call a metamethod, so they never need room above the live register
+    ** window. luaV_finishget does: it can reach luaT_callTMres, which pushes.
+    ** Likewise luaV_finishfastset (lvm.h:108-110) is only setobj2t plus
+    ** luaC_barrierback, so the fast side of the setters needs nothing either.
+    **
+    ** Hoisting the store out of the fast path removes one store from every table
+    ** access -- roughly 4,700 sites in rover. The same move is applied to all nine
+    ** table helpers below; each was edited and read individually rather than
+    ** batched, because a regex attempt at this silently relocated one store into
+    ** the WRONG function while keeping the total count unchanged, which no
+    ** count-based check would have caught. */
     if ( luaV_fastgeti( L, s2v( Base + B ), C, Slot ) ) {
         setobj2s( L, Base + A, Slot );
     } else {
+        L->top.p = L->ci->top.p;
         TValue Key;
         setivalue( &Key, ( lua_Integer )C );
         luaV_finishget( L, s2v( Base + B ), &Key, Base + A, Slot );
@@ -646,12 +660,12 @@ int Rt_GetField( lua_State *L, int A, int B, int C ) {
     StkId         Base = L->ci->func.p + 1;
     TValue       *Key  = &clLvalue( s2v( L->ci->func.p ) )->p->k[ C ];
     const TValue *Slot = { 0 };
-    /* sync L->top so luaT_callTMres pushes above the live register window */
-    L->top.p = L->ci->top.p;
     /* key is always a short string constant in OP_GETFIELD */
     if ( luaV_fastget( L, s2v( Base + B ), tsvalue( Key ), Slot, luaH_getshortstr ) ) {
         setobj2s( L, Base + A, Slot );
     } else {
+        /* Only the slow path needs L->top synced -- see Rt_GetI. */
+        L->top.p = L->ci->top.p;
         luaV_finishget( L, s2v( Base + B ), Key, Base + A, Slot );
     }
     return 0;
@@ -662,13 +676,13 @@ int Rt_GetTable( lua_State *L, int A, int B, int C ) {
     TValue       *Key  = s2v( Base + C );
     const TValue *Slot = { 0 };
     lua_Unsigned   N   = { 0 };
-    /* sync L->top so luaT_callTMres pushes above the live register window */
-    L->top.p = L->ci->top.p;
     if ( ttisinteger( Key )
          ? ( cast_void( N = ivalue( Key ) ), luaV_fastgeti( L, s2v( Base + B ), N, Slot ) )
          : luaV_fastget( L, s2v( Base + B ), Key, Slot, luaH_get ) ) {
         setobj2s( L, Base + A, Slot );
     } else {
+        /* Only the slow path needs L->top synced -- see Rt_GetI. */
+        L->top.p = L->ci->top.p;
         luaV_finishget( L, s2v( Base + B ), Key, Base + A, Slot );
     }
     return 0;
@@ -687,11 +701,11 @@ int Rt_SetI( lua_State *L, int A, int B, int Ck ) {
     const TValue *Slot = { 0 };
     DecodeCk( Ck, &C, &K );
     TValue *Val = K ? &clLvalue( s2v( L->ci->func.p ) )->p->k[ C ] : s2v( Base + C );
-    /* sync L->top so luaT_callTM pushes above the live register window */
-    L->top.p = L->ci->top.p;
     if ( luaV_fastgeti( L, s2v( Base + A ), B, Slot ) ) {
         luaV_finishfastset( L, s2v( Base + A ), Slot, Val );
     } else {
+        /* Only the slow path needs L->top synced -- see Rt_GetI. */
+        L->top.p = L->ci->top.p;
         TValue Key;
         setivalue( &Key, ( lua_Integer )B );
         luaV_finishset( L, s2v( Base + A ), &Key, Val, Slot );
@@ -707,12 +721,12 @@ int Rt_SetField( lua_State *L, int A, int B, int Ck ) {
     DecodeCk( Ck, &C, &K );
     TValue *Key = &clLvalue( s2v( L->ci->func.p ) )->p->k[ B ];
     TValue *Val = K ? &clLvalue( s2v( L->ci->func.p ) )->p->k[ C ] : s2v( Base + C );
-    /* sync L->top so luaT_callTM pushes above the live register window */
-    L->top.p = L->ci->top.p;
     /* key is always a short string constant in OP_SETFIELD */
     if ( luaV_fastget( L, s2v( Base + A ), tsvalue( Key ), Slot, luaH_getshortstr ) ) {
         luaV_finishfastset( L, s2v( Base + A ), Slot, Val );
     } else {
+        /* Only the slow path needs L->top synced -- see Rt_GetI. */
+        L->top.p = L->ci->top.p;
         luaV_finishset( L, s2v( Base + A ), Key, Val, Slot );
     }
     return 0;
@@ -727,13 +741,13 @@ int Rt_SetTable( lua_State *L, int A, int B, int Ck ) {
     TValue       *Key = s2v( Base + B );
     TValue       *Val = K ? &clLvalue( s2v( L->ci->func.p ) )->p->k[ C ] : s2v( Base + C );
     lua_Unsigned   N  = { 0 };
-    /* sync L->top so luaT_callTM pushes above the live register window */
-    L->top.p = L->ci->top.p;
     if ( ttisinteger( Key )
          ? ( cast_void( N = ivalue( Key ) ), luaV_fastgeti( L, s2v( Base + A ), N, Slot ) )
          : luaV_fastget( L, s2v( Base + A ), Key, Slot, luaH_get ) ) {
         luaV_finishfastset( L, s2v( Base + A ), Slot, Val );
     } else {
+        /* Only the slow path needs L->top synced -- see Rt_GetI. */
+        L->top.p = L->ci->top.p;
         luaV_finishset( L, s2v( Base + A ), Key, Val, Slot );
     }
     return 0;
@@ -748,12 +762,12 @@ int Rt_SetTabUp( lua_State *L, int A, int B, int Ck ) {
     DecodeCk( Ck, &C, &K );
     TValue *Key = &Cl->p->k[ B ];
     TValue *Val = K ? &Cl->p->k[ C ] : s2v( L->ci->func.p + 1 + C );
-    /* sync L->top so luaT_callTM pushes above the live register window */
-    L->top.p = L->ci->top.p;
     /* key is always a short string constant in OP_SETTABUP */
     if ( luaV_fastget( L, Upval, tsvalue( Key ), Slot, luaH_getshortstr ) ) {
         luaV_finishfastset( L, Upval, Slot, Val );
     } else {
+        /* Only the slow path needs L->top synced -- see Rt_GetI. */
+        L->top.p = L->ci->top.p;
         luaV_finishset( L, Upval, Key, Val, Slot );
     }
     return 0;
@@ -1607,8 +1621,6 @@ int Rt_Self( lua_State *L, int A, int B, int Ck ) {
     /* setobj2s for R[A+1] = R[B] (do this FIRST so a subsequent table-get
        can't observe a stale R[A+1] if the table is the same as R[A]) */
     setobj2s( L, Base + A + 1, s2v( Base + B ) );
-    /* sync L->top so luaT_callTMres pushes above the live register window */
-    L->top.p = L->ci->top.p;
     /* R[A] = R[B][K[C]] -- use luaV_fastget's RETURN value, not just whether
        Slot is NULL. fastget can leave Slot pointing at an "empty" sentinel
        (LUA_VEMPTY, tt=32) when the key is absent from a real table -- we'd
@@ -1624,6 +1636,8 @@ int Rt_Self( lua_State *L, int A, int B, int Ck ) {
                        luaH_getstr ) ) {
         setobj2s( L, Base + A, Slot );
     } else {
+        /* Only the slow path needs L->top synced -- see Rt_GetI. */
+        L->top.p = L->ci->top.p;
         luaV_finishget( L, s2v( Base + B ), Key, Base + A, Slot );
     }
     return 0;
