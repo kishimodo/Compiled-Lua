@@ -15,6 +15,24 @@
 #include <stdlib.h>
 #include <string.h>
 
+static bool lc_module_reflects_globals(LcModule *m);
+
+/* TRUE iff any function in the module carries `s` as a string constant.
+   The three scans below all reduce to this; keeping one copy means a fix to
+   the traversal (a new Proto source, say) cannot land in two of them and be
+   forgotten in the third. */
+static bool module_has_string_const(LcModule *m, const char *s) {
+  for (uint32_t i = 0; i < m->nfuncs; i++) {
+    Proto *p = m->funcs[i] ? m->funcs[i]->source : NULL;
+    if (!p) continue;
+    for (int k = 0; k < p->sizek; k++) {
+      const TValue *kv = &p->k[k];
+      if (ttisstring(kv) && strcmp(getstr(tsvalue(kv)), s) == 0) return true;
+    }
+  }
+  return false;
+}
+
 /* TRUE iff any function in the module carries the string constant "debug".
    debug.setlocal/setupvalue can rewrite ANY local of any live frame at
    runtime, falsifying every static type proof -- so when the module so much
@@ -25,15 +43,7 @@
    evades it -- documented residual, the standard optimizing-compiler
    reflection caveat. */
 bool lc_module_uses_debug(LcModule *m) {
-  for (uint32_t i = 0; i < m->nfuncs; i++) {
-    Proto *p = m->funcs[i] ? m->funcs[i]->source : NULL;
-    if (!p) continue;
-    for (int k = 0; k < p->sizek; k++) {
-      const TValue *kv = &p->k[k];
-      if (ttisstring(kv) && strcmp(getstr(tsvalue(kv)), "debug") == 0) return true;
-    }
-  }
-  return false;
+  return module_has_string_const(m, "debug");
 }
 
 /* TRUE iff any function carries the string constant "ffi" or "bit": the
@@ -41,21 +51,40 @@ bool lc_module_uses_debug(LcModule *m) {
    exist (the v1 idiom is `local ffi = _G.ffi`, which the require scan cannot
    see). Conservative: any string mention links the ~25 KB FFI. */
 bool lc_module_uses_ffi(LcModule *m) {
-  for (uint32_t i = 0; i < m->nfuncs; i++) {
-    Proto *p = m->funcs[i] ? m->funcs[i]->source : NULL;
-    if (!p) continue;
-    for (int k = 0; k < p->sizek; k++) {
-      const TValue *kv = &p->k[k];
-      if (ttisstring(kv) &&
-          (strcmp(getstr(tsvalue(kv)), "ffi") == 0 ||
-           strcmp(getstr(tsvalue(kv)), "bit") == 0)) return true;
-    }
-  }
-  return false;
+  return module_has_string_const(m, "ffi") || module_has_string_const(m, "bit");
 }
 
+/* Which optional standard libraries this module can reach.
+**
+** SOUNDNESS. The per-library bits are set by NAMING a library, so the whole
+** scan rests on one claim: a program cannot reach a library table it never
+** named. That claim holds only because the world is closed -- no load(), no
+** computed require -- and even then exactly three shapes break it:
+**
+**   1. `_G[k]` / `_ENV[k]` / `pairs(_G)`. Once the global table is a value, any
+**      key reaches any library. Detected by lc_module_reflects_globals(), the
+**      same scan the -O1 proof gate uses, for the same reason.
+**   2. `package.loaded[k]`. package is always opened, and its loaded table maps
+**      every name that WAS linked -- so an unlinked os makes
+**      `package.loaded["o".."s"]` nil where the interpreter gives a table.
+**      Any mention of the constant "package" gives up.
+**   3. `debug.getregistry()[LUA_RIDX_LOADED]`, which is that same table by
+**      another road. Any mention of "debug" gives up.
+**
+** For those, return LCLIB_ALL rather than a guess: being wrong here is not a
+** slow program, it is a program that silently sees nil. Everything else --
+** plain global reads, local table indexing, method calls -- compiles to a
+** constant key and cannot manufacture a name, so the bits stand.
+**
+** Conservative in the safe direction throughout: an unused mention costs size,
+** a missed reach costs correctness, and only the first is recoverable. */
 unsigned lc_module_used_libs(LcModule *m) {
   unsigned mask = 0;
+
+  if (lc_module_reflects_globals(m) ||
+      module_has_string_const(m, "package") ||
+      module_has_string_const(m, "debug")) return LCLIB_ALL;
+
   for (uint32_t i = 0; i < m->nfuncs; i++) {
     Proto *p = m->funcs[i] ? m->funcs[i]->source : NULL;
     if (!p) continue;
