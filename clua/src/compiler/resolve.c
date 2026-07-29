@@ -76,7 +76,30 @@ static int IsBuiltinPackage( const char *Name ) {
    same reason -- our compat shim is per-file, not a real module. */
 static int IsRuntimeOnlyName( const char *Name ) {
     if ( Name == NULL ) return 0;
-    return strcmp( Name, "ffi" ) == 0 || strcmp( Name, "bit" ) == 0;
+    if ( strcmp( Name, "ffi" ) == 0 || strcmp( Name, "bit" ) == 0 ) return 1;
+    /* The Lua STANDARD LIBRARIES are registered into package.loaded at startup by
+    ** aot_entry.c and stdlib_anchors.c, not through package.preload, so
+    ** `require "coroutine"` resolves at run time from package.loaded -- but the
+    ** compiler must not go looking for a coroutine.lua on disk. Without this,
+    ** `print(pcall(require, "coroutine"))` failed to COMPILE with
+    ** "cannot open build/tmp/coroutine.lua", where the oracle simply printed
+    ** `true  table: ...`. Exactly the false-positive class the ffi/bit entries
+    ** above exist for.
+    **
+    ** These do not need to be force-marked as used: lc_module_used_libs
+    ** (opt/passes.c) already scans the constant table for these very names, so a
+    ** `require "utf8"` puts "utf8" in the constants, sets LCLIB_UTF8, keeps the
+    ** anchor, and the library is registered by the time require runs. */
+    {
+        static const char *const kStdLibs[] = {
+            "_G", "coroutine", "package", "string", "table",
+            "math", "io", "os", "utf8", "debug", NULL
+        };
+        int i;
+        for ( i = 0; kStdLibs[i] != NULL; i++ )
+            if ( strcmp( Name, kStdLibs[i] ) == 0 ) return 1;
+    }
+    return 0;
 }
 
 /*!

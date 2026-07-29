@@ -406,6 +406,14 @@ static const luaL_Reg g_CoroFuncs[ ] = {
     { NULL,          NULL              }
 };
 
+/* The module body, so this library can be registered the same way every other
+** one is. luaL_requiref needs an open function that leaves the table on the
+** stack; luaL_newlib does exactly that. */
+static int Coro_OpenAsModule( lua_State *L ) {
+    luaL_newlib( L, g_CoroFuncs );
+    return 1;
+}
+
 void Coro_OpenLib( lua_State *L ) {
     Coro_InitProcess( );
 
@@ -415,6 +423,21 @@ void Coro_OpenLib( lua_State *L ) {
     }
     lua_pop( L, 1 );
 
-    luaL_newlib( L, g_CoroFuncs );
-    lua_setglobal( L, "coroutine" );
+    /* luaL_requiref, not luaL_newlib + lua_setglobal.
+    **
+    ** The old form set the GLOBAL but never registered the library in
+    ** package.loaded, so a compiled program disagreed with the reference
+    ** interpreter about whether the coroutine library exists:
+    **
+    **   compiled: package.loaded.coroutine -> nil
+    **   oracle:   package.loaded.coroutine -> table   (real Lua 5.4 agrees)
+    **
+    ** and `for k in pairs(package.loaded)` listed 9 entries against the oracle's
+    ** 10. The functions all worked -- only the bookkeeping was missing -- which is
+    ** why nothing caught it: no test iterates package.loaded or requires a stdlib
+    ** by name. luaL_requiref with glb=1 sets both, and is what lualib does for the
+    ** upstream coroutine library and what stdlib_anchors.c does for the other
+    ** seven. */
+    luaL_requiref( L, LUA_COLIBNAME, Coro_OpenAsModule, 1 );
+    lua_pop( L, 1 );
 }
