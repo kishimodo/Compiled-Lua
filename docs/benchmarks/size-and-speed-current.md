@@ -7,15 +7,17 @@ records where the tree actually is.
 
 ## Size
 
-| Target | `.text` | whole file |
-|---|---:|---:|
-| `print("hello")` | 74,822 | **93,696** |
-| `local a,b=2,3 local c=a+b print(c)` | 113,300 | **141,824** |
-| `tools/bench-runtime.lua` | 129,588 | 161,792 |
-| `rover/src/rover.lua` | 461,348 | **592,896** |
+| Target | `.text` | whole file | libraries linked |
+|---|---:|---:|---|
+| `print("hello")` | 74,822 | **93,696** | none |
+| `local a,b=2,3 local c=a+b print(c)` | 89,144 | **111,104** | string |
+| `tools/bench-runtime.lua` | 116,350 | 145,408 | math os string table |
+| `rover/src/rover.lua` | 461,348 | **592,896** | all (`LCLIB_ALL`) |
 
 Against the start of this arc: **hello −32%** (137,216 → 93,696), **rover −12%**
-(670,720 → 592,896).
+(670,720 → 592,896). The `a+b` row has no arc-start figure to compare against —
+it was added mid-arc, and its own measured drop is **−21.7%** (141,824 →
+111,104) from the anchor split alone.
 
 > The rover row was **462,900 / 594,432** here until `1501e5f`. That was not a
 > regression since fixed — it was a stale-object misread: `x64_emit.c` and
@@ -26,26 +28,46 @@ Against the start of this arc: **hello −32%** (137,216 → 93,696), **rover �
 
 ### `hello` is not a representative number
 
-A single `a + b` costs **48,128 bytes**. The chain is exact and measured:
+A single `a + b` used to cost **48,128 bytes**; it now costs 17,408. The chain is
+exact and measured:
 
 1. `a + b` emits `ADD` followed by `MMBIN ; __add` — Lua's metamethod fallback,
    emitted after every arithmetic op.
 2. `lc_module_used_libs` (`opt/passes.c`) sets `LCLIB_STRING` for any
-   `OP_MMBIN`/`MMBINI`/`MMBINK`/`GETFIELD`/`GETI`/`GETTABLE`/`SELF`.
-3. `runtime/stdlib_anchors.c` is **one translation unit holding all seven
-   anchors**, so force-undefining one pulls all seven libraries.
+   `OP_MMBIN`/`MMBINI`/`MMBINK`/`GETFIELD`/`GETI`/`GETTABLE`/`SELF`, because the
+   metamethod path wants the string metatable.
+3. That force-undefs one anchor — which, until `b374591`, pulled a single
+   translation unit defining all seven, and with it every `luaopen_*`.
 
 Verified by which registration tables appear in the binary:
 
 ```
 print("hello")                       ->  (none)
-local a,b=2,3 local c=a+b print(c)   ->  string table math os io utf8 debug
+local a,b=2,3 local c=a+b print(c)   ->  string          (was: all seven)
+tools/bench-runtime.lua              ->  math os string table
+rover/src/rover.lua                  ->  all seven, correctly — see below
 ```
 
-So **~142 KB is the realistic floor today**, not 93 KB, and splitting the anchors
-is worth ~40 KB on essentially every real program. It is blocked on making the
-used-libs mask sound — after the split,
-`local n = "o".."s"; print(package.loaded[n])` silently returns `nil`.
+**The realistic floor is now ~111 KB**, down from ~142 KB. Note step 3's real
+mechanism: `-ffunction-sections` had already put each anchor in its own section,
+which is why this looked solved and was not. Archive **member** selection happens
+before section GC, so the unit that got pulled was the object, not the section.
+
+#### Why it was blocked, and what unblocked it
+
+The split was measured at roughly −40 KB in July and deliberately not shipped.
+The mask is built by scanning for the *name* of each library, and three shapes
+reach a library that was never named — `package.loaded[k]`, `_G[k]`/`_ENV[k]`,
+and `debug.getregistry()`. Ship the split without handling them and
+`package.loaded["o".."s"]` returns `nil` in the exe where the interpreter returns
+a table: a silent wrong answer, which is worse than a large binary.
+
+`lc_module_used_libs` now returns `LCLIB_ALL` for those three instead of
+guessing. That is why the rover row did not move — rover trips the escape and
+correctly keeps everything. Programs that don't reflect get the win; programs
+that do stay correct. Two tests hold the line:
+`tests/differential/stdlib_reach.lua` (behaviour, diffed against the interpreter)
+and `tools/test-stdlib-anchor-split.lua` (the link itself, per library).
 
 ### What got it here
 
@@ -56,6 +78,7 @@ used-libs mask sound — after the split,
 | `aot_entry.o` size flags (`c87e2ce`) | −3,584 B |
 | imm8 `SUB`/`ADD rsp` (`efca0b2`) | −4,134 B rover `.text` |
 | `L->top` hoist out of the table helpers (`1501e5f`) | 1.11× on field access |
+| One TU per stdlib anchor + sound mask (`b374591`) | −30,720 B on `a+b`, −16,384 B on bench |
 
 ### For scale, same machine
 
