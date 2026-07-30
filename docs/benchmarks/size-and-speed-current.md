@@ -11,11 +11,11 @@ records where the tree actually is.
 |---|---:|---:|---|
 | `print("hello")` | 74,822 | **93,696** | none |
 | `local a,b=2,3 local c=a+b print(c)` | 89,144 | **111,104** | string |
-| `tools/bench-runtime.lua` | 116,350 | 145,408 | math os string table |
-| `rover/src/rover.lua` | 461,348 | **592,896** | all (`LCLIB_ALL`) |
+| `tools/bench-runtime.lua` | 116,142 | 144,896 | math os string table |
+| `rover/src/rover.lua` | 452,180 | **583,680** | all (`LCLIB_ALL`) |
 
-Against the start of this arc: **hello −32%** (137,216 → 93,696), **rover −12%**
-(670,720 → 592,896). The `a+b` row has no arc-start figure to compare against —
+Against the start of this arc: **hello −32%** (137,216 → 93,696), **rover −13%**
+(670,720 → 583,680). The `a+b` row has no arc-start figure to compare against —
 it was added mid-arc, and its own measured drop is **−21.7%** (141,824 →
 111,104) from the anchor split alone.
 
@@ -79,6 +79,7 @@ and `tools/test-stdlib-anchor-split.lua` (the link itself, per library).
 | imm8 `SUB`/`ADD rsp` (`efca0b2`) | −4,134 B rover `.text` |
 | `L->top` hoist out of the table helpers (`1501e5f`) | 1.11× on field access |
 | One TU per stdlib anchor + sound mask (`b374591`) | −30,720 B on `a+b`, −16,384 B on bench |
+| Frame base passed to the table helpers (`c632d5c`) | −9,216 B rover; call site 20 → 12 B |
 
 ### For scale, same machine
 
@@ -102,22 +103,46 @@ Min-of-9, interpreter and compiled interleaved inside each iteration.
 
 | Kernel | Interpreter | Compiled | Ratio |
 |---|---:|---:|---:|
-| Integer arithmetic | 319 ms | 132 ms | **2.41× faster** |
-| Array indexing | 158 ms | 164 ms | 0.96× |
-| Function calls | 294 ms | 303 ms | 0.97× |
-| Table field r/w | 239 ms | 297 ms | **0.80× — slower** |
+| Integer arithmetic | 253 ms | 103 ms | **2.45× faster** |
+| Array indexing | 132 ms | 124 ms | 1.06× |
+| Function calls | 226 ms | 237 ms | 0.95× |
+| Table field r/w | 200 ms | 248 ms | **0.80× — slower** |
 
-Table access losing to the interpreter is the least defensible number in the
-project. The cause is measured: nearly every non-arithmetic op lowers to a call
-into an `Rt_*` helper, and 58% of the instructions emitted for Rover are
-helper-call glue. Two fixes are designed and quantified but unimplemented —
-inlining the `GETI`/`SETI` array fast path (13× ceiling on a 30M-read loop) and the
-`GETFIELD` fast path (2.38× on the op).
+Measured at `b374591`, before the frame-ABI change. Table access losing to the
+interpreter is the least defensible number in the project. The cause is
+measured: nearly every non-arithmetic op lowers to a call into an `Rt_*` helper,
+and 58% of the instructions emitted for Rover are helper-call glue.
 
-**Do not quote these ratios to better than ±15%.** Fifteen consecutive runs of one
-unchanged binary spread 43% on this host. Only comparisons with both arms
-interleaved inside each iteration are trustworthy; a before/after pair taken
-minutes apart is not, and produced a phantom 2× regression earlier in this arc.
+`c632d5c` cut two dependent memory loads out of every table access by passing
+the frame base instead of re-deriving it. Its size effect is exact (−9,216 B on
+rover); **its speed effect was not measurable on this host** and the table above
+is deliberately not updated to claim one. See below.
+
+### This machine cannot resolve a 10% effect
+
+**Do not quote any ratio here to better than ±15%, and do not trust a 2-second
+kernel either.** In a 13-rep order-alternating A/B on ~2 s kernels, a *control*
+kernel — pure integer arithmetic, no table op, physically incapable of being
+affected by the change under test — landed anywhere from **0.79× to 1.05×**
+depending on which statistic was taken. Per-run spread was 22–80%.
+
+That is the measurement floor, and it is above most of the effects worth
+chasing. Consequences for anyone benchmarking here:
+
+- A single before/after pair is worthless. It produced a phantom 2× regression
+  earlier in this arc.
+- Interleaving the arms is necessary but **not sufficient** — fixed A-then-B
+  ordering biased a control by 5%. Alternate the order per iteration.
+- Always run an unaffected control kernel alongside. If the control moves as
+  much as the treatment, there is no result, and reporting one is fabrication.
+- Prefer deterministic proxies where they exist: `.text` bytes, emitted call-site
+  size, memory-operand counts in a disassembled helper. Those are exact, and for
+  this class of change they say most of what matters.
+
+Two further fixes are designed and quantified but unimplemented — inlining the
+`GETI`/`SETI` array fast path (13× ceiling on a 30M-read loop) and the `GETFIELD`
+fast path (2.38× on the op). Both inline the lookup itself rather than trimming
+the glue, so both should clear the noise floor in a way `c632d5c` did not.
 
 ### The silent 1.3–1.5× cliff
 
