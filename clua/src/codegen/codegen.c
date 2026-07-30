@@ -13,6 +13,7 @@
 */
 #include "codegen.h"
 #include "codegen/x64_emit.h"
+#include "common/rt_frame_abi.h"
 
 #include "lstate.h"        /* lua_State, CallInfo, StkIdRel layout */
 #include "lobject.h"       /* LClosure, Proto, TValue layout (for k recovery) */
@@ -282,6 +283,29 @@ int LcCg_EmitHelperCall3( LcCodeBuf *B, const char *Sym,
     return 1;
 }
 
+/*!
+ * @brief
+ *  Call a frame-passing helper: RCX = L, RDX = Base, R8 = packed operands.
+ *
+ *  RDI holds the frame base at every call site -- that is the invariant
+ *  LcCg_EmitReloadRdiAndCache exists to maintain -- so handing it over is a
+ *  register copy. The helper then reaches L->ci->func.p as Base - 1 instead of
+ *  chasing two loads for it and three more for the constant array.
+ *
+ *  Twelve bytes against LcCg_EmitHelperCall3's twenty: one MOV r64,r64 replaces
+ *  a 32-bit immediate move, and the two remaining operands travel folded into
+ *  one word rather than in R8 and R9 separately. See common/rt_frame_abi.h.
+ */
+int LcCg_EmitHelperCallFrame( LcCodeBuf *B, const char *Sym,
+                              int32_t packed, int reload_after ) {
+    if ( !LcCg_EmitRestoreL( B ) ) return 0;                          /* RCX = L */
+    if ( !X64Emit_MovRegToReg( B, X64_RDX, X64_RDI ) ) return 0;      /* RDX = Base */
+    if ( !X64Emit_MovImm32ToReg( B, X64_R8, packed ) ) return 0;
+    if ( !X64Emit_CallSym( B, Sym ) ) return 0;
+    if ( reload_after && !LcCg_EmitReloadRdiAndCache( B ) ) return 0;
+    return 1;
+}
+
 /* ------------------------------------------------------------------ */
 /* Branch infrastructure — port of v1 BranchCtx, keyed by bc_pc.       */
 /*                                                                      */
@@ -529,13 +553,41 @@ static int lower_vararg( LcCodeBuf *B, LcInst *in ) {
 
 /*!
  * @brief
+ *  Route a table access to its frame-passing helper, falling back to the plain
+ *  one when an operand will not fit the packed word.
+ *
+ *  `signed_c` says whether in->c is a setter's Ck -- negative meaning "the
+ *  value operand is K[-c-1]", the encoding DecodeCk undoes at run time. Here it
+ *  is a compile-time constant, so it is undone at compile time and the K bit
+ *  travels in the packed word; the helper does no decoding at all.
+ *
+ *  The fallback is not dead code awaiting a pathological program: it is what
+ *  makes the 10-bit fields safe to assume everywhere else. lift.c pre-encodes
+ *  some operands, so "iABC operands are 8 bits" describes Lua's instruction
+ *  format, not a guarantee about what reaches this function.
+ *
+ *  reload_after is 1 throughout, matching the plain lowerings: any of these can
+ *  run an __index/__newindex metamethod, which is arbitrary Lua and may
+ *  relocate the stack.
+ */
+static int lower_table_frame( LcCodeBuf *B, LcInst *in, const char *FrameSym,
+                              const char *PlainSym, int signed_c ) {
+    int c = in->c, k = 0;
+    if ( signed_c && c < 0 ) { c = -c - 1; k = 1; }
+    if ( !LC_RTF_FITS( in->a, in->b, c ) )
+        return LcCg_EmitHelperCall3( B, PlainSym, in->a, in->b, in->c, /*reload*/1 );
+    return LcCg_EmitHelperCallFrame(
+        B, FrameSym, ( int32_t )LC_RTF_PACK( in->a, in->b, c, k ), /*reload*/1 );
+}
+
+/*!
+ * @brief
  *  LC_OP_GLOBAL_GET (OP_GETTABUP on _ENV): R[A] = UpVal[B][K[C]].
  *  Ported from v1 Lower_GetTabUp (codegen.c ~1328): set RDX=A,R8=B,R9=C, call
  *  Rt_GetTabUp, then EmitReloadRdiAndCache (a metamethod can grow the stack).
  */
 static int lower_global_get( LcCodeBuf *B, LcInst *in ) {
-    return LcCg_EmitHelperCall3( B, "Rt_GetTabUp",
-                                 in->a, in->b, in->c, /*reload*/1 );
+    return lower_table_frame( B, in, "Rt_GetTabUpF", "Rt_GetTabUp", /*signed_c*/0 );
 }
 
 /*!
@@ -1208,6 +1260,7 @@ static int lower_helper3( LcCodeBuf *B, LcInst *in, const char *Sym, int reload 
     return LcCg_EmitHelperCall3( B, Sym, in->a, in->b, in->c, reload );
 }
 
+
 /* rax <op>= [RDI + disp]. ADD via X64Emit_AddMemToReg; the rest by raw bytes
    (REX.W + opcode, reg=RAX=0, rm=RDI=7). Ports v1 EmitArithRax + the bitwise ops.
    SUB 2B, IMUL 0F AF, AND 23, OR 0B, XOR 33. */
@@ -1665,7 +1718,8 @@ static int lower_inst( LcBranchCtx *Br, LcFunc *f, LcInst *in ) {
         case OP_NOT:    return lower_helper3( B, in, "Rt_NotOp",  0 );
         case OP_LEN:    return lower_helper3( B, in, "Rt_Len",    1 );
         case OP_CONCAT: return lower_helper3( B, in, "Rt_Concat", 1 );
-        case OP_SELF:   return lower_helper3( B, in, "Rt_Self",   1 );
+        case OP_SELF:   return lower_table_frame( B, in, "Rt_SelfF",
+                                                  "Rt_Self", /*signed_c*/1 );
 
         /* --- tables (Plan 2): all helper-call lowerings. lift.c pre-encodes
                operands (size hints for NEWTABLE, Ck value operand for the SET
@@ -1679,13 +1733,20 @@ static int lower_inst( LcBranchCtx *Br, LcFunc *f, LcInst *in ) {
                can GC-step but never moves the Lua stack), so v1 Lower_SetList
                skips the reload — match it. --- */
         case OP_NEWTABLE:  return lower_helper3( B, in, "Rt_NewTable", 1 );
-        case OP_GETFIELD:  return lower_helper3( B, in, "Rt_GetField", 1 );
-        case OP_GETI:      return lower_helper3( B, in, "Rt_GetI",     1 );
-        case OP_GETTABLE:  return lower_helper3( B, in, "Rt_GetTable", 1 );
-        case OP_SETFIELD:  return lower_helper3( B, in, "Rt_SetField", 1 );
-        case OP_SETI:      return lower_helper3( B, in, "Rt_SetI",     1 );
-        case OP_SETTABLE:  return lower_helper3( B, in, "Rt_SetTable", 1 );
-        case OP_SETTABUP:  return lower_helper3( B, in, "Rt_SetTabUp", 1 );
+        case OP_GETFIELD:  return lower_table_frame( B, in, "Rt_GetFieldF",
+                                                     "Rt_GetField", /*signed_c*/0 );
+        case OP_GETI:      return lower_table_frame( B, in, "Rt_GetIF",
+                                                     "Rt_GetI",     /*signed_c*/0 );
+        case OP_GETTABLE:  return lower_table_frame( B, in, "Rt_GetTableF",
+                                                     "Rt_GetTable", /*signed_c*/0 );
+        case OP_SETFIELD:  return lower_table_frame( B, in, "Rt_SetFieldF",
+                                                     "Rt_SetField", /*signed_c*/1 );
+        case OP_SETI:      return lower_table_frame( B, in, "Rt_SetIF",
+                                                     "Rt_SetI",     /*signed_c*/1 );
+        case OP_SETTABLE:  return lower_table_frame( B, in, "Rt_SetTableF",
+                                                     "Rt_SetTable", /*signed_c*/1 );
+        case OP_SETTABUP:  return lower_table_frame( B, in, "Rt_SetTabUpF",
+                                                     "Rt_SetTabUp", /*signed_c*/1 );
         case OP_SETLIST:   return lower_helper3( B, in, "Rt_SetList",  0 );
 
         /* --- metamethod-bin markers + extraarg: no-op (zero bytes) --- */

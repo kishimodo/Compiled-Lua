@@ -54,12 +54,22 @@ int main( void ) {
     CHECK( f0->code[0] == 0x57 );              /* PUSH RDI (prologue start)  */
     CHECK( strcmp( f0->name, "luac_fn_0" ) == 0 );
 
-    /* the body must call the expected runtime helpers by name */
+    /* The body must call the expected runtime helpers by name.
+    **
+    ** Either GETTABUP helper counts. codegen picks Rt_GetTabUpF -- which is
+    ** handed the frame base instead of re-deriving it -- whenever the operands
+    ** fit the packed word (common/rt_frame_abi.h), and falls back to
+    ** Rt_GetTabUp when they do not. Both are correct lowerings of the same op,
+    ** so pinning one name would make this test fail on a legitimate change to
+    ** that choice. What it must still catch is the global read not lowering to
+    ** a table-upvalue helper AT ALL. */
     int    saw_gettabup = 0, saw_call = 0;
     size_t r;
     for ( r = 0; r < f0->nrelocs; r++ ) {
-        if ( strcmp( f0->relocs[r].symbol, "Rt_GetTabUp" ) == 0 ) saw_gettabup = 1;
-        if ( strcmp( f0->relocs[r].symbol, "Rt_Call"     ) == 0 ) saw_call     = 1;
+        const char *sym = f0->relocs[r].symbol;
+        if ( strcmp( sym, "Rt_GetTabUp" ) == 0 ||
+             strcmp( sym, "Rt_GetTabUpF" ) == 0 ) saw_gettabup = 1;
+        if ( strcmp( sym, "Rt_Call" ) == 0 )      saw_call     = 1;
     }
     CHECK( saw_gettabup && saw_call );
 

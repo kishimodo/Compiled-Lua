@@ -1,5 +1,6 @@
 #include "jit/runtime.h"
 #include "jit/dispatch.h"
+#include "common/rt_frame_abi.h"
 
 #include "lua.h"
 #include "lauxlib.h"
@@ -728,6 +729,192 @@ int Rt_SetField( lua_State *L, int A, int B, int Ck ) {
         /* Only the slow path needs L->top synced -- see Rt_GetI. */
         L->top.p = L->ci->top.p;
         luaV_finishset( L, s2v( Base + A ), Key, Val, Slot );
+    }
+    return 0;
+}
+
+/* --- frame-passing field helpers -------------------------------------------
+**
+** Same bodies as Rt_GetField / Rt_SetField, with `Base` arriving as an
+** argument instead of being rebuilt out of L. Everything downstream of that
+** follows: L->ci->func.p is Base - 1, so the Proto walk starts from a value
+** already in a register rather than from two loads.
+**
+** Kept as separate functions rather than folded into the originals because the
+** originals are still reachable -- codegen falls back to them when an operand
+** does not fit the packed word. See common/rt_frame_abi.h. */
+
+int Rt_GetFieldF( lua_State *L, StkId Base, int Packed ) {
+    const int     A    = LC_RTF_A( Packed );
+    const int     B    = LC_RTF_B( Packed );
+    StkId         Func = Base - 1;                 /* == L->ci->func.p */
+    TValue       *Key  = &clLvalue( s2v( Func ) )->p->k[ LC_RTF_C( Packed ) ];
+    const TValue *Slot = { 0 };
+    /* key is always a short string constant in OP_GETFIELD */
+    if ( luaV_fastget( L, s2v( Base + B ), tsvalue( Key ), Slot, luaH_getshortstr ) ) {
+        setobj2s( L, Base + A, Slot );
+    } else {
+        /* Only the slow path needs L->top synced -- see Rt_GetI. */
+        L->top.p = L->ci->top.p;
+        luaV_finishget( L, s2v( Base + B ), Key, Base + A, Slot );
+    }
+    return 0;
+}
+
+int Rt_SetFieldF( lua_State *L, StkId Base, int Packed ) {
+    const int     A    = LC_RTF_A( Packed );
+    const int     B    = LC_RTF_B( Packed );
+    const int     C    = LC_RTF_C( Packed );
+    StkId         Func = Base - 1;                 /* == L->ci->func.p */
+    TValue       *K    = clLvalue( s2v( Func ) )->p->k;
+    TValue       *Key  = &K[ B ];
+    TValue       *Val  = LC_RTF_K( Packed ) ? &K[ C ] : s2v( Base + C );
+    const TValue *Slot = { 0 };
+    /* key is always a short string constant in OP_SETFIELD */
+    if ( luaV_fastget( L, s2v( Base + A ), tsvalue( Key ), Slot, luaH_getshortstr ) ) {
+        luaV_finishfastset( L, s2v( Base + A ), Slot, Val );
+    } else {
+        /* Only the slow path needs L->top synced -- see Rt_GetI. */
+        L->top.p = L->ci->top.p;
+        luaV_finishset( L, s2v( Base + A ), Key, Val, Slot );
+    }
+    return 0;
+}
+
+int Rt_GetIF( lua_State *L, StkId Base, int Packed ) {
+    const int     A    = LC_RTF_A( Packed );
+    const int     B    = LC_RTF_B( Packed );
+    const int     C    = LC_RTF_C( Packed );
+    const TValue *Slot = { 0 };
+    if ( luaV_fastgeti( L, s2v( Base + B ), C, Slot ) ) {
+        setobj2s( L, Base + A, Slot );
+    } else {
+        /* Only the slow path needs L->top synced -- see Rt_GetI. */
+        L->top.p = L->ci->top.p;
+        TValue Key;
+        setivalue( &Key, ( lua_Integer )C );
+        luaV_finishget( L, s2v( Base + B ), &Key, Base + A, Slot );
+    }
+    return 0;
+}
+
+int Rt_SetIF( lua_State *L, StkId Base, int Packed ) {
+    const int     A    = LC_RTF_A( Packed );
+    const int     B    = LC_RTF_B( Packed );
+    const int     C    = LC_RTF_C( Packed );
+    StkId         Func = Base - 1;                 /* == L->ci->func.p */
+    TValue       *Val  = LC_RTF_K( Packed )
+                             ? &clLvalue( s2v( Func ) )->p->k[ C ]
+                             : s2v( Base + C );
+    const TValue *Slot = { 0 };
+    if ( luaV_fastgeti( L, s2v( Base + A ), B, Slot ) ) {
+        luaV_finishfastset( L, s2v( Base + A ), Slot, Val );
+    } else {
+        /* Only the slow path needs L->top synced -- see Rt_GetI. */
+        L->top.p = L->ci->top.p;
+        TValue Key;
+        setivalue( &Key, ( lua_Integer )B );
+        luaV_finishset( L, s2v( Base + A ), &Key, Val, Slot );
+    }
+    return 0;
+}
+
+int Rt_GetTableF( lua_State *L, StkId Base, int Packed ) {
+    const int     A    = LC_RTF_A( Packed );
+    const int     B    = LC_RTF_B( Packed );
+    TValue       *Key  = s2v( Base + LC_RTF_C( Packed ) );
+    const TValue *Slot = { 0 };
+    lua_Unsigned  N    = { 0 };
+    if ( ttisinteger( Key )
+         ? ( cast_void( N = ivalue( Key ) ), luaV_fastgeti( L, s2v( Base + B ), N, Slot ) )
+         : luaV_fastget( L, s2v( Base + B ), Key, Slot, luaH_get ) ) {
+        setobj2s( L, Base + A, Slot );
+    } else {
+        /* Only the slow path needs L->top synced -- see Rt_GetI. */
+        L->top.p = L->ci->top.p;
+        luaV_finishget( L, s2v( Base + B ), Key, Base + A, Slot );
+    }
+    return 0;
+}
+
+int Rt_SetTableF( lua_State *L, StkId Base, int Packed ) {
+    const int     A    = LC_RTF_A( Packed );
+    const int     C    = LC_RTF_C( Packed );
+    StkId         Func = Base - 1;                 /* == L->ci->func.p */
+    TValue       *Key  = s2v( Base + LC_RTF_B( Packed ) );
+    TValue       *Val  = LC_RTF_K( Packed )
+                             ? &clLvalue( s2v( Func ) )->p->k[ C ]
+                             : s2v( Base + C );
+    const TValue *Slot = { 0 };
+    lua_Unsigned  N    = { 0 };
+    if ( ttisinteger( Key )
+         ? ( cast_void( N = ivalue( Key ) ), luaV_fastgeti( L, s2v( Base + A ), N, Slot ) )
+         : luaV_fastget( L, s2v( Base + A ), Key, Slot, luaH_get ) ) {
+        luaV_finishfastset( L, s2v( Base + A ), Slot, Val );
+    } else {
+        /* Only the slow path needs L->top synced -- see Rt_GetI. */
+        L->top.p = L->ci->top.p;
+        luaV_finishset( L, s2v( Base + A ), Key, Val, Slot );
+    }
+    return 0;
+}
+
+int Rt_GetTabUpF( lua_State *L, StkId Base, int Packed ) {
+    StkId         Func  = Base - 1;                /* == L->ci->func.p */
+    LClosure     *Cl    = clLvalue( s2v( Func ) );
+    TValue       *Upval = Cl->upvals[ LC_RTF_B( Packed ) ]->v.p;
+    TValue       *Key   = &Cl->p->k[ LC_RTF_C( Packed ) ];
+    const TValue *Slot  = { 0 };
+    StkId         Ra    = Base + LC_RTF_A( Packed );
+    /* key is always a short string constant in OP_GETTABUP */
+    if ( luaV_fastget( L, Upval, tsvalue( Key ), Slot, luaH_getshortstr ) ) {
+        setobj2s( L, Ra, Slot );
+    } else {
+        /* Only the slow path needs L->top synced -- see Rt_GetI. */
+        L->top.p = L->ci->top.p;
+        luaV_finishget( L, Upval, Key, Ra, Slot );
+    }
+    return 0;
+}
+
+int Rt_SetTabUpF( lua_State *L, StkId Base, int Packed ) {
+    const int     C     = LC_RTF_C( Packed );
+    StkId         Func  = Base - 1;                /* == L->ci->func.p */
+    LClosure     *Cl    = clLvalue( s2v( Func ) );
+    TValue       *Upval = Cl->upvals[ LC_RTF_A( Packed ) ]->v.p;
+    TValue       *Key   = &Cl->p->k[ LC_RTF_B( Packed ) ];
+    TValue       *Val   = LC_RTF_K( Packed ) ? &Cl->p->k[ C ] : s2v( Base + C );
+    const TValue *Slot  = { 0 };
+    /* key is always a short string constant in OP_SETTABUP */
+    if ( luaV_fastget( L, Upval, tsvalue( Key ), Slot, luaH_getshortstr ) ) {
+        luaV_finishfastset( L, Upval, Slot, Val );
+    } else {
+        /* Only the slow path needs L->top synced -- see Rt_GetI. */
+        L->top.p = L->ci->top.p;
+        luaV_finishset( L, Upval, Key, Val, Slot );
+    }
+    return 0;
+}
+
+int Rt_SelfF( lua_State *L, StkId Base, int Packed ) {
+    const int     A    = LC_RTF_A( Packed );
+    const int     B    = LC_RTF_B( Packed );
+    const int     C    = LC_RTF_C( Packed );
+    StkId         Func = Base - 1;                 /* == L->ci->func.p */
+    LClosure     *Cl   = clLvalue( s2v( Func ) );
+    TValue       *Key  = LC_RTF_K( Packed ) ? &Cl->p->k[ C ] : s2v( Base + C );
+    const TValue *Slot = { 0 };
+    /* R[A+1] = R[B] FIRST, so a subsequent table-get cannot observe a stale
+       R[A+1] when the table is the same register as R[A] -- see Rt_Self. */
+    setobj2s( L, Base + A + 1, s2v( Base + B ) );
+    /* luaH_getstr, not getshortstr: OP_SELF's method name may be a LONG
+       string. Same reasoning as Rt_Self, which this mirrors exactly. */
+    if ( luaV_fastget( L, s2v( Base + B ), tsvalue( Key ), Slot, luaH_getstr ) ) {
+        setobj2s( L, Base + A, Slot );
+    } else {
+        /* Only the slow path needs L->top synced -- see Rt_GetI. */
+        L->top.p = L->ci->top.p;
+        luaV_finishget( L, s2v( Base + B ), Key, Base + A, Slot );
     }
     return 0;
 }

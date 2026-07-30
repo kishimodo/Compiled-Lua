@@ -125,4 +125,10 @@ int LcCg_EmitReloadRdiAndCache( LcCodeBuf *B ); /* recompute RDI after a stack-r
 int LcCg_EmitHelperCall3( LcCodeBuf *B, const char *Sym,
                           int a, int b, int c, int reload_after );
 
+/* Frame-passing shim: MOV RCX,L ; MOV RDX,RDI (the frame base) ; MOV R8,packed ;
+   CALL <Sym> ; optional RDI reload. Shorter than the above and saves the helper
+   from re-deriving the base. Packing lives in common/rt_frame_abi.h. */
+int LcCg_EmitHelperCallFrame( LcCodeBuf *B, const char *Sym,
+                              int32_t packed, int reload_after );
+
 #endif /* LUAC_CODEGEN_H */
