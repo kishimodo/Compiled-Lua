@@ -111,6 +111,9 @@ static void usage( FILE *to ) {
         "  --emit-only      suppress the binary output even when -o is set\n"
         "                   (only meaningful with --emit=<mode>). With\n"
         "                   --emit-only the -o path is the dump destination.\n"
+        "  -v, --verbose    print per-phase wall-clock timings on stderr\n"
+        "                   after the build (resolve, lift, optimize,\n"
+        "                   codegen, link, total). Off = zero overhead.\n"
         "  --emit-def=<path> / --emit-implib=<path>\n"
         "                   for DLL builds, write a .DEF module-definition\n"
         "                   file at <path> listing the DLL's exports. Both\n"
@@ -263,6 +266,12 @@ static int parse_build_args( CluaArgs *a, int argc, char **argv, int from,
             a->opt.jobs = n;
         } else if ( strcmp( s, "--emit-only" ) == 0 ) {
             a->opt.emit_only = true;
+        } else if ( strcmp( s, "-v" ) == 0 || strcmp( s, "--verbose" ) == 0 ) {
+            /* Per-phase wall-clock on stderr after the build. Off by default;
+            ** the driver only samples QPC when the flag is set. NOTE: `clua
+            ** -v` at the top-level still means "version" -- that path never
+            ** reaches parse_build_args. */
+            a->opt.verbose = true;
         } else if ( ( emit_rc = parse_emit_arg( a, s ) ) != -1 ) {
             if ( emit_rc == 0 ) return 0;
         } else if ( strncmp( s, "--emit-compdb=", 14 ) == 0 ) {

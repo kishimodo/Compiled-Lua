@@ -104,18 +104,15 @@ typedef struct LcDriverOptions {
   LcEmitMode   emit_mode;    /* --emit=bytecode|ir|asm; LC_EMIT_NONE = off  */
   bool         emit_only;    /* --emit-only: suppress binary even if -o set */
   const char  *compdb_path;  /* --emit-compdb=<path> / --emit-compdb-append=<path>:
-                                write (or extend) a compile_commands.json file
-                                with one entry describing this invocation. NULL
-                                means "no compdb". clangd / VS Code / ccls read
-                                this to offer LSP over Lua sources compiled by
-                                CLua. See clua/src/driver/compdb.h.            */
-  bool         compdb_append;/* 0 = --emit-compdb (overwrite single-entry
-                                array), 1 = --emit-compdb-append (extend the
-                                existing array). Ignored when compdb_path
-                                is NULL.                                      */
-  int          drv_argc;     /* argv of the invocation, recorded verbatim into
-                                the compile_commands.json "arguments" list.   */
+                                write (or extend) a compile_commands.json
+                                file. clangd / VS Code / ccls read it. See
+                                clua/src/driver/compdb.h.                     */
+  bool         compdb_append;/* 0 = --emit-compdb (overwrite), 1 = append.   */
+  int          drv_argc;     /* argv verbatim into the compdb arguments      */
   const char *const *drv_argv;
+  bool         verbose;      /* -v / --verbose: per-phase wall-clock timings
+                                on stderr at the end of the build. Off = zero
+                                overhead (QPC only runs when set).            */
 } LcDriverOptions;
 
 /* Returns process exit code. */

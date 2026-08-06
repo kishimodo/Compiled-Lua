@@ -43,6 +43,94 @@
 #include <string.h>
 #include <process.h>   /* _getpid */
 #include <direct.h>    /* _getcwd, _fullpath (compile_commands.json emit) */
+#include <windows.h>   /* QueryPerformanceCounter / QueryPerformanceFrequency */
+
+/* ------------------------------------------------------------------ */
+/* Per-phase wall-clock accumulator for -v / --verbose.               */
+/*                                                                     */
+/* Everything is a stack-local struct; QPC ticks are only sampled when */
+/* opt->verbose is set (the QPC_NOW() helper collapses to a no-op via  */
+/* the (verbose) guard at each call site), so an ordinary build pays   */
+/* nothing beyond one extra branch per phase boundary.                 */
+/*                                                                     */
+/* The five phases match the pipeline stages in lc_drive:              */
+/*   resolve   -- Resolve_Walk + builtin-package append                 */
+/*   lift      -- undump, closed-world scan, Proto collection, lift IR  */
+/*   optimize  -- lc_optimize + lc_module_verify                        */
+/*   codegen   -- lc_codegen                                            */
+/*   link      -- ProtoInit blob + COFF write + LuacLink_LinkProgram    */
+/* ------------------------------------------------------------------ */
+typedef struct {
+    LONGLONG resolve_ticks;
+    LONGLONG lift_ticks;
+    LONGLONG optimize_ticks;
+    LONGLONG codegen_ticks;
+    LONGLONG link_ticks;
+    /* Counts populated as each phase finishes, for the printed summary.
+    ** Zero-initialised: any phase we did not reach stays at 0 and simply
+    ** does not surface in its (parenthetical) count column. */
+    size_t   n_modules;         /* resolve: total after builtin append   */
+    size_t   n_packages;        /* resolve: builtin packages bundled      */
+    int      opt_level;         /* optimize: -O level actually run        */
+    int      opt_passes_ran;    /* optimize: 1 if lc_optimize ran, else 0 */
+    uint32_t n_functions;       /* codegen: reachable Protos              */
+    int      jobs;              /* codegen: -j value from opt             */
+} LcPhaseTimings;
+
+/* Wall-clock reading. Windows QPC is monotonic and system-wide; a single
+** QueryPerformanceFrequency call is enough for the process lifetime. */
+static LONGLONG qpc_now( void ) {
+    LARGE_INTEGER li;
+    QueryPerformanceCounter( &li );
+    return li.QuadPart;
+}
+static LONGLONG qpc_freq( void ) {
+    static LONGLONG f = 0;
+    if ( f == 0 ) {
+        LARGE_INTEGER li;
+        QueryPerformanceFrequency( &li );
+        f = li.QuadPart ? li.QuadPart : 1;
+    }
+    return f;
+}
+static unsigned long qpc_to_ms( LONGLONG ticks ) {
+    /* Round to nearest ms; the difference under 0.5 ms is not meaningful
+    ** on a wall-clock report. */
+    LONGLONG f = qpc_freq( );
+    return ( unsigned long )( ( ticks * 1000 + f / 2 ) / f );
+}
+
+/* One-shot flush at the end of the build so the timing lines are not
+** interleaved with normal progress output. Format matches the fixed
+** column layout the driver documents: `[phase]` left-padded to 12
+** characters, `NNN ms` right-aligned to 6. Counts (when a phase has
+** them) come after the timing, in parentheses. */
+static void lc_print_timings( const LcPhaseTimings *t ) {
+    unsigned long ms_r = qpc_to_ms( t->resolve_ticks );
+    unsigned long ms_l = qpc_to_ms( t->lift_ticks );
+    unsigned long ms_o = qpc_to_ms( t->optimize_ticks );
+    unsigned long ms_c = qpc_to_ms( t->codegen_ticks );
+    unsigned long ms_k = qpc_to_ms( t->link_ticks );
+    unsigned long ms_total = ms_r + ms_l + ms_o + ms_c + ms_k;
+
+    fflush( stdout );
+    fprintf( stderr, "%-12s%3lu ms  (%zu module%s, %zu package%s)\n",
+             "[resolve]", ms_r,
+             t->n_modules,  t->n_modules  == 1 ? "" : "s",
+             t->n_packages, t->n_packages == 1 ? "" : "s" );
+    fprintf( stderr, "%-12s%3lu ms\n", "[lift]", ms_l );
+    fprintf( stderr, "%-12s%3lu ms  (-O%d, %d pass%s)\n",
+             "[optimize]", ms_o,
+             t->opt_level, t->opt_passes_ran,
+             t->opt_passes_ran == 1 ? "" : "es" );
+    fprintf( stderr, "%-12s%3lu ms  (%u function%s, -j %d)\n",
+             "[codegen]", ms_c,
+             t->n_functions, t->n_functions == 1 ? "" : "s",
+             t->jobs );
+    fprintf( stderr, "%-12s%3lu ms\n", "[link]", ms_k );
+    fprintf( stderr, "%-12s%3lu ms\n", "total:", ms_total );
+    fflush( stderr );
+}
 
 /* ------------------------------------------------------------------ */
 /* Reachable-Proto collection.                                         */
@@ -178,9 +266,7 @@ int lc_drive( const LcDriverOptions *opt ) {
 
     /* --output=obj / --output=lib skip linking entirely: the codegen COFF is
     ** the artifact (obj), optionally wrapped in a GNU-form archive (lib). No
-    ** aot_entry, no runtime pull-in, so --shared-rt has nothing to swap.
-    ** Reject the combination rather than silently drop it -- the user asked
-    ** for two mutually exclusive things. */
+    ** aot_entry, no runtime pull-in, so --shared-rt has nothing to swap. */
     if ( opt->shared_rt &&
          ( output_kind == LC_OUTPUT_OBJ || output_kind == LC_OUTPUT_LIB ) ) {
         fprintf( stderr, "clua: error: --shared-rt cannot be combined with "
@@ -189,6 +275,15 @@ int lc_drive( const LcDriverOptions *opt ) {
                  ( output_kind == LC_OUTPUT_OBJ ) ? "obj" : "lib" );
         return 2;
     }
+
+    /* Per-phase timing accumulator. Populated only when opt->verbose is set;
+    ** every QPC read is guarded so a normal build pays no clock cost. Printed
+    ** in one flush at the end of the pipeline (before cleanup). */
+    LcPhaseTimings T;
+    memset( &T, 0, sizeof( T ) );
+    T.opt_level = opt->opt_level;
+    T.jobs      = opt->jobs;
+    LONGLONG t0 = opt->verbose ? qpc_now( ) : 0;
 
     /* ---- 1. closed-world discovery (reused front-end) ---- */
     char            dirbuf[ 512 ] = { 0 };
@@ -245,6 +340,16 @@ int lc_drive( const LcDriverOptions *opt ) {
             Resolve_FreeResult( &res );
             return 1;
         }
+    }
+    if ( opt->verbose ) {
+        LONGLONG t1 = qpc_now( );
+        T.resolve_ticks = t1 - t0;
+        /* n_modules is the post-append total; n_packages is what triggered
+        ** the append. Read them here so the numbers reflect the completed
+        ** resolve phase whether or not any builtin package was requested. */
+        T.n_modules  = res.Count;
+        T.n_packages = res.BuiltinPackageCount;
+        t0 = t1;
     }
 
     /* ---- 2. undump each module + closed-world scan; collect reachable set ----
@@ -356,6 +461,13 @@ int lc_drive( const LcDriverOptions *opt ) {
         }
     }
 
+    if ( opt->verbose ) {
+        LONGLONG t1 = qpc_now( );
+        T.lift_ticks  = t1 - t0;
+        T.n_functions = m->nfuncs;   /* codegen operates on the same set */
+        t0 = t1;
+    }
+
     /* ---- 4. optimize (no-op at -O0) ---- */
     {
         LcPassConfig cfg;
@@ -369,6 +481,7 @@ int lc_drive( const LcDriverOptions *opt ) {
                 fprintf( stderr, "aotc: error: optimizer failed\n" );
                 goto cleanup;
             }
+            T.opt_passes_ran = 1;
         }
     }
 
@@ -398,11 +511,24 @@ int lc_drive( const LcDriverOptions *opt ) {
         if ( skip_binary ) { rc = 0; goto cleanup; }
     }
 
+    if ( opt->verbose ) {
+        LONGLONG t1 = qpc_now( );
+        /* Include lc_module_verify in the optimize bucket: it is IR-verification
+        ** work paired with (and gated by) the optimizer stage, not codegen. */
+        T.optimize_ticks = t1 - t0;
+        t0 = t1;
+    }
+
     /* ---- 5. codegen ---- */
     cm = lc_codegen( m );
     if ( cm == NULL ) {
         fprintf( stderr, "aotc: error: codegen failed\n" );
         goto cleanup;
+    }
+    if ( opt->verbose ) {
+        LONGLONG t1 = qpc_now( );
+        T.codegen_ticks = t1 - t0;
+        t0 = t1;
     }
 
     /* --emit=asm: dump the emitted machine code as an assembly listing.
@@ -609,6 +735,12 @@ int lc_drive( const LcDriverOptions *opt ) {
                 reach.count, reach.count == 1 ? "" : "s", opt->output );
     }
 
+    if ( opt->verbose ) {
+        LONGLONG t1 = qpc_now( );
+        T.link_ticks = t1 - t0;
+        lc_print_timings( &T );
+    }
+
     rc = 0;
 
 cleanup:
@@ -628,7 +760,8 @@ static void usage( const char *argv0 ) {
              "usage: %s <main.lua> [-o output] [-O<n>] [-L <pkg>]... "
              "[--shared-rt] [--output=exe|dll|obj|lib] [-shared] "
              "[--emit-def=<path>] "
-             "[--emit-compdb=<path>|--emit-compdb-append=<path>]\n",
+             "[--emit-compdb=<path>|--emit-compdb-append=<path>] "
+             "[-v|--verbose]\n",
              argv0 );
 }
 
@@ -702,6 +835,11 @@ int main( int argc, char **argv ) {
             opt.jobs = n;
         } else if ( strcmp( a, "--emit-only" ) == 0 ) {
             opt.emit_only = true;
+        } else if ( strcmp( a, "-v" ) == 0 || strcmp( a, "--verbose" ) == 0 ) {
+            /* Print per-phase wall-clock on stderr after the build. Zero
+            ** overhead when unset -- every QPC read in lc_drive is guarded
+            ** by opt->verbose. */
+            opt.verbose = true;
         } else if ( strncmp( a, "--emit=", 7 ) == 0 ) {
             const char *v = a + 7;
             if      ( strcmp( v, "bytecode" ) == 0 ) opt.emit_mode = LC_EMIT_BYTECODE;
