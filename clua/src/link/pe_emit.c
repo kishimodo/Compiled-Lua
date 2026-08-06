@@ -841,6 +841,19 @@ static void ar_report_stats( const Linker *L, int rounds ) {
                          "(no index built)\n", fallback );
 }
 
+/* Classify every archive as import-lib (1) or regular object archive (0) ONCE,
+** before the resolve fixpoint runs. Populates the L->ar_is_implib slot for
+** every archive so the hot loop in resolve_fixpoint reads it as a plain array
+** access instead of going through archive_is_implib()'s -1 check + on-demand
+** head_map build. The head-map cache built as a side effect is what
+** archive_head_map_cached returns later, so no work is duplicated. */
+static void classify_archives( Linker *L ) {
+    int a;
+    for ( a = 0; a < L->narchives; a++ ) {
+        if ( L->ar_is_implib[a] == -1 ) (void)archive_is_implib( L, a );
+    }
+}
+
 static int resolve_fixpoint( Linker *L ) {
     int changed = 1;
     int rounds  = 0;
@@ -869,8 +882,10 @@ static int resolve_fixpoint( Linker *L ) {
                 /* Mixed archives (libucrt.a) host BOTH import stubs (api-ms-*)
                 ** AND regular objects (ucrt_fprintf.o). Classify the DEFINING
                 ** member, not the archive: only import-lib archives are even
-                ** worth the stub probe (cheap guard via the cached flag). */
-                if ( archive_is_implib( L, a ) &&
+                ** worth the stub probe. classify_archives() ran once at link
+                ** entry, so the flag is a plain array read here (no -1 check,
+                ** no head-map build). */
+                if ( L->ar_is_implib[a] == 1 &&
                      member_is_import_stub( mem, namebuf, func, sizeof func, &hint ) ) {
                     int nmap = 0;
                     HeadDllPair *map = archive_head_map_cached( L, a, &nmap );
@@ -2266,6 +2281,11 @@ int LcPe_Link( const LcPeLinkInputs *in, char *err, size_t errlen ) {
     /* define linker-provided symbols (__ImageBase etc.) so the fixpoint treats
     ** them as satisfied rather than chasing them through the archives */
     if ( !define_linker_symbols( &L ) ) { snprintf( err, errlen, "oom" ); goto out; }
+
+    /* Pre-classify every archive as import-lib vs regular object archive so the
+    ** resolve fixpoint's hot loop can read L.ar_is_implib[a] directly instead of
+    ** taking the on-demand branch through archive_is_implib per matching query. */
+    classify_archives( &L );
 
     /* resolve to fixpoint, pulling archive members + synthesizing imports */
     if ( !resolve_fixpoint( &L ) ) { snprintf( err, errlen, "%s", L.err ); goto out; }
