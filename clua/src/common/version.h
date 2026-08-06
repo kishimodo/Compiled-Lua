@@ -19,7 +19,7 @@
 #define CLUA_VERSION_MAJOR      0
 #define CLUA_VERSION_MINOR      3
 #define CLUA_VERSION_PATCH      0
-#define CLUA_VERSION_PRERELEASE "beta.2"          /* "" for a final release */
-#define CLUA_VERSION_STRING     "0.3.0-beta.2"    /* MAJOR.MINOR.PATCH[-PRERELEASE] */
+#define CLUA_VERSION_PRERELEASE "beta.3"          /* "" for a final release */
+#define CLUA_VERSION_STRING     "0.3.0-beta.3"    /* MAJOR.MINOR.PATCH[-PRERELEASE] */
 
 #endif /* CLUA_VERSION_H */

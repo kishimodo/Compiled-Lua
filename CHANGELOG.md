@@ -7,6 +7,46 @@ of truth, `clua/src/common/version.h`, and this file in step.
 
 ## [Unreleased]
 
+## [0.3.0-beta.3] - 2026-08-06
+
+### Added
+
+- **`clua build --output=obj`** and **`--output=lib`** emit the compiled
+  COFF directly (obj) or wrapped in a GNU-form ar archive (lib). No link
+  happens. Consumers still need to link runtime-aot.a + liblua54-embedded.a
+  + aot_entry.o. `--shared-rt` is rejected with these kinds. MSVC users
+  should round-trip via `link /def:foo.def` (see below) or `lib.exe
+  /convert`.
+- **DLL export ABIs beyond `dd_d`.** Now supported: `(int64_t, int64_t) ->
+  int64_t` (`ii_i`) and `(const char *) -> const char *` (`s_s`). Declare
+  with a `_export_types = { name = "shape", ... }` companion table
+  alongside `_exports`. Default is still `dd_d` so existing programs
+  compile unchanged.
+- **`.def` auto-emit under `--output=dll`.** No longer needs
+  `--emit-def=<path>` explicitly. Every DLL build produces `<basename>.def`
+  next to `<basename>.dll` containing the real `_exports` names. Both
+  MSVC `link /def:foo.def` and MinGW `dlltool -d foo.def -D foo.dll -l
+  foo.lib` synthesize the matching import library.
+- **Coroutine anchor pruning.** Programs that never name the constant
+  `"coroutine"` (and don't hit the three reflection escape shapes) drop
+  coro.o from the link. Hello .text falls about 4 KB (93,696 -> 89,600).
+- **`--emit-compdb=<path>`** writes a `compile_commands.json` entry
+  describing the invocation. `--emit-compdb-append=<path>` appends to an
+  existing array. clangd, VS Code C/C++, ccls, and every LSP that reads
+  compilation databases consume the schema.
+- **Colored + structured diagnostics.** Front-end errors now render like
+  clang/rustc: `error: <msg>` with a caret at the column, the source
+  line printed, and file:line:col in the header. Respects `NO_COLOR`,
+  `CLICOLOR_FORCE`, and Windows console VT support. Added `--color=<auto
+  |always|never>`.
+- **`-v` / `--verbose`** prints per-phase wall-clock timings on stderr:
+  resolve, lift, optimize, codegen, link, total. Zero overhead when off.
+
+### Changed
+
+- The linker's `--force-undef` slot budget grew to accommodate coroutine
+  and DLL export dispatcher symbols. Exe output unchanged.
+
 ## [0.3.0-beta.2] - 2026-08-06
 
 ### Added
