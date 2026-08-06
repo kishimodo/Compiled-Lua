@@ -18,10 +18,11 @@
 -- make's parser splits on -- out of them. Switching to -MD would produce
 -- fragments make cannot parse, and make reports that by ignoring them.
 --
--- Why this matters more than it sounds: CLAUDE.md used to document that editing
--- a backend header required manually wiping build/bin/obj first, "because a
--- stale lift.o produces silent empty-output binaries". That is a correctness
--- trap, not an inconvenience -- it makes a broken build look like a passing one.
+-- Why this matters more than it sounds: without the dependency fragments,
+-- editing a backend header leaves its dependent objects stale, so a broken
+-- build (e.g. a lift.o out of sync with ir.h) links successfully into a binary
+-- that silently produces the wrong output. That is a correctness trap, not an
+-- inconvenience -- it makes a broken build look like a passing one.
 
 local NAME = "test-build-header-deps"
 local failures = {}
@@ -195,8 +196,7 @@ end
 -- -MMD writes a fragment only as a side effect of compiling, so every object
 -- that was already up to date when tracking was introduced has none, and stays
 -- untracked until something recompiles it. 342 objects were in exactly that
--- state -- including every Lua core object -- while CLAUDE.md claimed tracking
--- and had deleted the manual-wipe instruction.
+-- state -- including every Lua core object -- after tracking landed.
 --
 -- Remedy when this fails: `make -f build/Makefile clean-objs` then a full build.
 -- Objects that are COPIES or come from outside, so they legitimately have no

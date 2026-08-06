@@ -81,9 +81,7 @@ addsd latency floor), branchy integer kernel **7×+**.
 Soundness is enforced by a standing 13-lens **adversarial attack harness**
 (differential vs the interpreter, with independent re-verification of every
 claimed mismatch). Across 13 rounds it found 10 real bugs — every one fixed
-and regression-pinned. See
-[`docs/superpowers/plans/2026-06-10-luac-optimizer-status.md`](docs/superpowers/plans/2026-06-10-luac-optimizer-status.md)
-for the complete record, including what was deliberately *not* built and why.
+and regression-pinned.
 
 ## Non-negotiables
 
@@ -127,8 +125,8 @@ for `--ld=gcc`, `--shared-rt`, or a cold-tree entry compile (`CLUA_GCC` /
 `CLUA_LD` override the choice).
 
 - Build spec & implementation prompt: [`PROMPT.md`](PROMPT.md)
-- Working notes & testing discipline: [`CLAUDE.md`](CLAUDE.md)
 - Known bugs / bounded divergences: [`docs/known-bugs-2026-06-07.md`](docs/known-bugs-2026-06-07.md)
+- Test system design: [`docs/test-system-design-2026-06-07.md`](docs/test-system-design-2026-06-07.md)
 
 ## Roadmap
 
@@ -146,10 +144,7 @@ What remains is depth, not scaffolding:
   elision is the broad win (17×+ on tight loops); extending its reach is higher
   value than the narrow M3 memory passes. `-O3` scalar replacement of
   non-escaping constant-key tables is shipped (slice 1) but, by measurement, has
-  tiny real-world surface — see the
-  [status doc](docs/superpowers/plans/2026-06-10-luac-optimizer-status.md) and
-  [scalar-replacement spec](docs/superpowers/specs/2026-06-13-scalar-replacement-o3-design.md)
-  for the honest valuations.
+  tiny real-world surface.
 - **Continuous fidelity hardening** — the differential + conformance corpus runs
   every compiled test against the interpreter at O0–O3; the adversarial attack
   harness keeps probing for miscompiles.

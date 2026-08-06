@@ -156,7 +156,7 @@ end
 -- rover/src/rover.lua` emits BYTE-IDENTICAL output at -O2 and -O3 (measured
 -- 2026-07-26, both 670,720 bytes, same SHA-256). So -O3 has no effect on the
 -- largest real program in the tree, and asserting a general -O2 =/= -O3 would be
--- false. See docs/roadmaps/concurrency-size-stability.md.
+-- false.
 if bytes["-O2"] and bytes["-O3"] and bytes["-O2"] == bytes["-O3"] then
   fail("-O3 emits the same bytes as -O2 on a fixture built to exercise scalar "
        .. "replacement: the -O3 pass group is no longer doing anything, so the "

@@ -101,8 +101,7 @@ binaries do run (`hello` prints, `rover --version` works), but that proves
 nothing: unwind data only matters when something actually unwinds, so a passing
 smoke test is not evidence of correctness here.
 
-The audit claim that rooting these sections "resurrects the CRT functions they
-describe" is **withdrawn**; the correction is recorded in
-`docs/audits/2026-07-25-second-reviewer-challenge.md`. The fixed 137 KB floor
-remains unexplained and needs a different lead — the `.rdata`/`.text` split of
-the runtime itself is the next place to look, not the unwind tables.
+The earlier claim that rooting these sections "resurrects the CRT functions
+they describe" is **withdrawn**: the measurement disproves it. The fixed 137 KB
+floor remains unexplained and needs a different lead — the `.rdata`/`.text`
+split of the runtime itself is the next place to look, not the unwind tables.

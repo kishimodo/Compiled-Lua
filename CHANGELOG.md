@@ -29,8 +29,7 @@ of truth -- `clua/src/common/version.h` -- and this file in step.
   are runtime and CRT, so the win scales with user code volume, not with the
   compiler.
 - **Runtime speed of generated code is unchanged**, measured and stated rather
-  than assumed (`docs/benchmarks/session-2026-07-25-ab.md`). Neither change
-  targeted runtime.
+  than assumed. Neither change targeted runtime.
 - **`-O` levels are now honest.** `-Ofast`, `-Os`, `-Oz`, `-O9` and `-O-1` were
   silently accepted and mapped to `-O0` or "everything"; they are now rejected with
   a message and a nonzero exit. `clua help` states per level what actually runs,
@@ -53,9 +52,6 @@ of truth -- `clua/src/common/version.h` -- and this file in step.
 - Archive-resolution accounting under `CLUA_GC_DEBUG`, reported per link.
 - Benchmark harnesses: `tools/bench-runtime.lua`, `check-byte-identity.py`,
   `count-imm-sites.py`, `bench-armap.c`.
-- Shared agent workspace: reviews, roadmaps, benchmarks and handoffs live in
-  `docs/` with paths derived from Git at run time (`tools/agent-coordination/`).
-
 ### Fixed
 
 - **Rover pins `%SystemRoot%\System32\tar.exe`** instead of resolving `tar` from
@@ -86,22 +82,18 @@ of truth -- `clua/src/common/version.h` -- and this file in step.
 
 ### Internal
 
-- `docs/roadmaps/concurrency-size-stability.md` tracks per-deliverable status;
-  `docs/benchmarks/` records every measurement with its method, including one
+- `docs/benchmarks/` records every measurement with its method, including one
   **negative** result (unrooting `.pdata`/`.xdata` frees 128 bytes of `.text`, so
   the resurrection hypothesis is refuted and the idea should not be re-proposed).
-- `docs/roadmaps/no-crt.md` plans CRT-free output (`--crt=none`), with the measured
-  dependency surface in `docs/benchmarks/no-crt-baseline.md`: of 552 external
-  symbols, **100** are a genuine libc dependency (93 UCRT imports plus 7 static
-  mingw). Two findings shape the plan -- `libmingwex.a` provides none of the
-  transcendentals, so an own libm is unavoidable and the oracle must be rebuilt
-  against the same libc; and the Lua core already avoids CRT `setjmp` via
-  `__builtin_setjmp`. Recorded up front: the CRT is **already** outside our
-  binaries (they import `api-ms-win-crt-*`), so `--crt=none` is a
-  self-containment and determinism feature and a net **size increase** -- the size
-  lever is `-ffunction-sections` on the runtime instead.
-- `docs/handoff/2026-07-26-ultracode-prompt.md` holds the kickoff prompt for the
-  platform + no-CRT arc, delegating detail to the roadmaps so it cannot go stale.
+- Measured CRT-dependency surface in `docs/benchmarks/no-crt-baseline.md`: of 552
+  external symbols, **100** are a genuine libc dependency (93 UCRT imports plus 7
+  static mingw). Two findings shape any CRT-free plan -- `libmingwex.a` provides
+  none of the transcendentals, so an own libm is unavoidable and the oracle must
+  be rebuilt against the same libc; and the Lua core already avoids CRT `setjmp`
+  via `__builtin_setjmp`. Note up front: the CRT is **already** outside our
+  binaries (they import `api-ms-win-crt-*`), so `--crt=none` would be a
+  self-containment and determinism feature and a net **size increase** -- the
+  size lever is `-ffunction-sections` on the runtime instead.
 
 ## [0.2.0-beta.6] - 2026-06-13
 

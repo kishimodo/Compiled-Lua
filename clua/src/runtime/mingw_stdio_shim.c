@@ -15,9 +15,9 @@
 ** only (build/Makefile), so it lands in runtime-aot.a and affects compiled output
 ** alone. It must NOT go in RUNTIME_SRCS: that list also feeds runtime.a, which
 ** clua-interp.exe links -- and moving the oracle onto the same implementation
-** would make the differential suite agree by moving both sides, which is exactly
-** the failure mode CLAUDE.md prohibits. The oracle stays on MinGW gdtoa
-** deliberately, so the suite is comparing two different implementations.
+** would make the differential suite agree by moving both sides, which defeats
+** the whole point of the suite. The oracle stays on MinGW gdtoa deliberately,
+** so the differential is comparing two different implementations.
 **
 ** The first line below is load-bearing. Without it, mingw's stdio.h redirects the
 ** sprintf/vfprintf/strtod calls in this file back to __mingw_* and each function

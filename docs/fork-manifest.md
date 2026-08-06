@@ -222,7 +222,7 @@ emit native package objects. Absent external DLL → `SKIP`.
 `build\run-tests.bat`) and **add the AOT differential oracle**: compile a printing
 script with **LuaC (native)**, run the same script under **v1 `clua-interp.exe -i`
 (interpreter)**, **diff stdout**. v1 is the frozen oracle; never edit v1 to make a
-diff pass. Keep the `XFAIL`/`XPASS` discipline (CLAUDE.md). New C-unit tests cover
+diff pass. Keep the `XFAIL`/`XPASS` discipline. New C-unit tests cover
 the IR builder, each opt pass, emitter relocations, PE sections, and unwind-info
 correctness.
 

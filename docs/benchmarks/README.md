@@ -1,14 +1,11 @@
 # Benchmarks: current baselines and how to reproduce them
 
-Shared, repository-relative measurement notes. Any agent may add a file here;
-record the commit measured, the machine conditions, and the run count, so a
-later reader can tell a real delta from desktop noise.
+Repository-relative measurement notes. Record the commit measured, the machine
+conditions, and the run count on every new entry, so a later reader can tell a
+real delta from desktop noise.
 
-Reproduce every path in this directory from the worktree you are standing in:
-
-```powershell
-python tools/agent-coordination/repo-paths.py --get benchmarks_dir
-```
+**The live table is [`size-and-speed-current.md`](size-and-speed-current.md).**
+The rest of this file is standing methodology and historical baselines.
 
 ## A caveat on every SHA-256 recorded here
 
@@ -71,16 +68,12 @@ check a delta rather than trust one.
 
 `-O1` and `-O2` still byte-identical, SHA-256
 `c7b3601d84008040f867810e2ae35d65c3e47e66b2e14dcd237ff7c1afb02fa5`, and a repeat
-build reproduces it exactly. Every figure here agrees with the after-arm column of
-[`session-2026-07-25-ab.md`](session-2026-07-25-ab.md), measured independently.
+build reproduces it exactly.
 
-**Same-invocation delta, which answers the caveat below:** Rover `-O1`
-739,328 → 670,720 = **−68,608 = −9.28%**; `-O0` 724,480 → 655,872 = **−68,608 =
-−9.47%**. The A/B document reports −9.22% because its before-arm used 738,816,
-one 512-byte alignment block below the repo-root figure. The two agree to within
-0.06 percentage points, so nothing turns on the difference — but the number to
-quote for a repo-root build is −9.28%, because both of its ends were measured the
-same way.
+**Same-invocation delta:** Rover `-O1` 739,328 → 670,720 = **−68,608 = −9.28%**;
+`-O0` 724,480 → 655,872 = **−68,608 = −9.47%**. These have since moved further —
+see [`size-and-speed-current.md`](size-and-speed-current.md) for the live rover
+number.
 
 One confound applies to the upper table and not the lower: 739,328 predates the
 `clean-objs` rebuild described above, which changed every emitted binary. It is
@@ -185,12 +178,6 @@ Measured and rejected:
 - [`link-gc-unwind-roots.md`](link-gc-unwind-roots.md) — unrooting
   `.pdata`/`.xdata` frees 128 bytes of `.text`; the resurrection hypothesis is
   refuted and the idea is not worth pursuing.
-
-Whole-session before/after:
-
-- [`session-2026-07-25-ab.md`](session-2026-07-25-ab.md) — `7fec28f` vs the
-  delivered slice, both arms freshly built: **-9.2% Rover size**, **-54% compile
-  time**, **runtime speed unchanged**.
 
 Harnesses live in `tools/`: `bench-link.sh`, `bench-optimizer.lua`,
 `bench-armap.c`, `count-imm-sites.py`, `check-byte-identity.py`,

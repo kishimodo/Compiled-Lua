@@ -90,8 +90,7 @@ the honest valuation from the optimizer status doc), and **stale markers**
   table fastpaths already live in the `Rt_*` helpers; `CollectReachable`
   leaves no tree-unreachable functions.
 - `lc_pass_escape`/`scalar_replace` (M3): **slice 1 SHIPPED 2026-06-13**
-  (v0.2.0-beta.6, `clua/src/opt/passes.c`, spec
-  `docs/superpowers/specs/2026-06-13-scalar-replacement-o3-design.md`).
+  (v0.2.0-beta.6, `clua/src/opt/passes.c`).
   Intra-procedural: a `NEWTABLE` whose home register never escapes and is
   touched only by constant-key field ops, with NO GC safepoint in its live
   range (the reserved above-`L->top` slots can't survive a call/GC), is

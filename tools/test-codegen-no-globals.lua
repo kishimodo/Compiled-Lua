@@ -1,11 +1,10 @@
 -- tools/test-codegen-no-globals.lua : the code generator keeps no mutable
 -- file-scope state.
 --
--- Auto-discovered by tools/run-tests.lua (phase 6). This gates invariant 4 of
--- docs/roadmaps/concurrency-size-stability.md -- "no new file-scope mutable state
--- in clua/src/codegen/" -- which exists because per-function code generation is
--- meant to become parallel, and a single `static int` in this directory silently
--- makes two workers share a value.
+-- Auto-discovered by tools/run-tests.lua (phase 6). Invariant: no new
+-- file-scope mutable state in clua/src/codegen/, which exists because
+-- per-function code generation is meant to become parallel -- and a single
+-- `static int` in this directory silently makes two workers share a value.
 --
 -- Why a symbol-table check rather than a behavioural one: the failure mode is
 -- invisible to every other kind of test. A global that is faithfully reset at the

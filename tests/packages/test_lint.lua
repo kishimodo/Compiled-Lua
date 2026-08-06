@@ -5,8 +5,8 @@ if not ok_req then print("[~] SKIP test_lint (" .. tostring(lint) .. ")") os.exi
 
 local fails = 0
 local function ok(c, m) if not c then fails = fails + 1; print("[-] FAIL test_lint: " .. tostring(m)) end end
--- XFAIL helper (CLAUDE.md convention): assert CORRECT behavior for a known,
--- unfixed bug without failing the run; flips to XPASS when the bug is fixed.
+-- XFAIL helper: assert the CORRECT behavior for a known, unfixed bug without
+-- failing the run; flips to XPASS when the bug is fixed.
 local function xfail(cond, desc, bug)
     if cond then print(("[!] XPASS test_lint: %s -- bug %s appears FIXED, remove this xfail"):format(desc, bug))
     else        print(("[x] XFAIL test_lint: %s (known bug %s)"):format(desc, bug)) end
