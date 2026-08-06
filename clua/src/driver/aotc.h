@@ -31,6 +31,25 @@ static inline bool lc_parse_opt_level( const char *arg, int *out ) {
   return true;
 }
 
+/* --emit=<mode> selector. Diagnostic dumps that the driver writes to a
+** file or stdout. LC_EMIT_NONE (0) means the driver behaves exactly as
+** before -- no dump, ordinary binary output.
+**
+** The mode is orthogonal to the binary output. Concrete semantics:
+**   `clua build foo.lua --emit=X`                 dump to stdout, no binary
+**   `clua build foo.lua --emit=X -o foo.exe`      dump to stdout AND foo.exe
+**   `clua build foo.lua --emit=X --emit-only -o foo.txt`
+**                                                  dump to foo.txt, no binary
+**   `clua build foo.lua --emit=X --emit-only -o -` dump to stdout, no binary
+** With --emit-only the -o path is repurposed as the dump destination.
+*/
+typedef enum {
+  LC_EMIT_NONE = 0,
+  LC_EMIT_BYTECODE,   /* raw Lua 5.4 bytecode per Proto (like luac -l)     */
+  LC_EMIT_IR,         /* the LcModule after the optimizer, before codegen  */
+  LC_EMIT_ASM         /* emitted x64 machine code as an assembly listing   */
+} LcEmitMode;
+
 typedef struct LcDriverOptions {
   const char  *input;        /* root .lua file                              */
   const char  *output;       /* .exe / .dll path                            */
@@ -55,6 +74,8 @@ typedef struct LcDriverOptions {
                                 gate (tools/test-parallel-codegen.lua).       */
   const char **force_pkgs;   /* -L forced packages                          */
   int          nforce_pkgs;
+  LcEmitMode   emit_mode;    /* --emit=bytecode|ir|asm; LC_EMIT_NONE = off  */
+  bool         emit_only;    /* --emit-only: suppress binary even if -o set */
 } LcDriverOptions;
 
 /* Returns process exit code. */

@@ -169,12 +169,12 @@ COMPILER_OBJS := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/obj/%.o,$(COMPILER_SRCS)
 # link against backend code. Built as a side effect of `make test`.
 LUAC_SRCS := $(wildcard $(SRC_DIR)/ir/*.c) $(wildcard $(SRC_DIR)/opt/*.c) \
              $(wildcard $(SRC_DIR)/codegen/*.c) $(wildcard $(SRC_DIR)/link/*.c) \
-             $(wildcard $(SRC_DIR)/driver/*.c)
+             $(wildcard $(SRC_DIR)/driver/*.c) $(wildcard $(SRC_DIR)/dump/*.c)
 LUAC_OBJS := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/obj/%.o,$(LUAC_SRCS))
 .PHONY: luac-objs
 luac-objs: $(LUAC_OBJS)
 
-$(BUILD_DIR)/obj/%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)/obj/compiler $(BUILD_DIR)/obj/runtime $(BUILD_DIR)/obj/tools $(BUILD_DIR)/obj/jit $(BUILD_DIR)/obj/ffi $(BUILD_DIR)/obj/ir $(BUILD_DIR)/obj/opt $(BUILD_DIR)/obj/codegen $(BUILD_DIR)/obj/link $(BUILD_DIR)/obj/driver
+$(BUILD_DIR)/obj/%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)/obj/compiler $(BUILD_DIR)/obj/runtime $(BUILD_DIR)/obj/tools $(BUILD_DIR)/obj/jit $(BUILD_DIR)/obj/ffi $(BUILD_DIR)/obj/ir $(BUILD_DIR)/obj/opt $(BUILD_DIR)/obj/codegen $(BUILD_DIR)/obj/link $(BUILD_DIR)/obj/driver $(BUILD_DIR)/obj/dump
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/obj/compiler:
@@ -204,6 +204,9 @@ $(BUILD_DIR)/obj/link:
 
 $(BUILD_DIR)/obj/driver:
 	if not exist "$(BUILD_DIR)\obj\driver" mkdir "$(BUILD_DIR)\obj\driver"
+
+$(BUILD_DIR)/obj/dump:
+	if not exist "$(BUILD_DIR)\obj\dump" mkdir "$(BUILD_DIR)\obj\dump"
 
 $(BUILD_DIR)/compiler.exe: $(COMPILER_OBJS) $(BUILD_DIR)/liblua54.a
 	$(CC) $(CFLAGS) -o $@ $(COMPILER_OBJS) $(BUILD_DIR)/liblua54.a -lm

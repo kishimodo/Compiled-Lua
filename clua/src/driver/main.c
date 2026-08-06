@@ -27,6 +27,7 @@
 #include "../driver/lc_undump.h"
 #include "../driver/closed_world.h"
 #include "../driver/supported_ops.h"
+#include "../dump/emit.h"
 
 /* Reused front-end produces a Proto*; we read its nested-proto array (p[]) to
 ** collect the reachable set for lifting. */
@@ -83,6 +84,36 @@ static int CollectReachable( ProtoVec *v, Proto *p ) {
     return 1;
 }
 
+/* Open the file the diagnostic dump should be written to.
+**
+** The rule the task specifies is: "output goes to -o if set, else to
+** stdout; -o - means stdout". We honour that only when the caller has
+** made it clear the -o path is FOR the diagnostic -- specifically, when
+** --emit-only is set (so the binary is suppressed and the -o path is
+** free) or when --emit is set with no other consumer of -o (skip_binary
+** true). In the common case where --emit runs alongside a binary build,
+** -o still names the binary and the dump lands on stdout so redirection
+** stays predictable.
+**
+** Callers close the returned FILE* only if `close_me` is set on return
+** (never true for stdout). */
+static FILE *OpenEmitOut( const LcDriverOptions *opt, int diagnostic_owns_o,
+                          int *close_me ) {
+    *close_me = 0;
+    if ( diagnostic_owns_o && opt->output != NULL &&
+         strcmp( opt->output, "-" ) != 0 ) {
+        FILE *f = fopen( opt->output, "wb" );
+        if ( f == NULL ) {
+            fprintf( stderr, "aotc: error: cannot open --emit output '%s'\n",
+                     opt->output );
+            return NULL;
+        }
+        *close_me = 1;
+        return f;
+    }
+    return stdout;
+}
+
 static const char *DirOf( const char *Path, char *Buf, size_t BufSize ) {
     size_t L = strlen( Path );
     size_t I;
@@ -99,7 +130,12 @@ static const char *DirOf( const char *Path, char *Buf, size_t BufSize ) {
 
 int lc_drive( const LcDriverOptions *opt ) {
     if ( opt == NULL || opt->input == NULL ) return 2;
-    if ( opt->output == NULL && !opt->check_only ) return 2;
+    /* --emit=<mode> and --emit-only both let the driver run with no output
+    ** path: the diagnostic dump goes to stdout, the binary is skipped. */
+    bool skip_binary = opt->emit_only ||
+                       ( opt->emit_mode != LC_EMIT_NONE && opt->output == NULL );
+    if ( opt->output == NULL && !opt->check_only &&
+         opt->emit_mode == LC_EMIT_NONE ) return 2;
 
     /* Backstop for programmatic callers that fill LcDriverOptions directly.
     ** REJECT rather than clamp: clamping would compile at a level the caller did
@@ -241,6 +277,20 @@ int lc_drive( const LcDriverOptions *opt ) {
         goto cleanup;
     }
 
+    /* --emit=bytecode: dump the raw Lua 5.4 bytecode for every reachable
+    ** Proto. If skip_binary is true (--emit=X alone, or --emit-only) the -o
+    ** path becomes the dump destination; otherwise the dump lands on stdout
+    ** and the binary build continues to whatever -o names. */
+    if ( opt->emit_mode == LC_EMIT_BYTECODE ) {
+        int close_me = 0;
+        FILE *of = OpenEmitOut( opt, skip_binary, &close_me );
+        if ( of == NULL ) goto cleanup;
+        Lc_DumpBytecode( of, entryProto );
+        fflush( of );
+        if ( close_me ) fclose( of );
+        if ( skip_binary ) { rc = 0; goto cleanup; }
+    }
+
     /* ---- 3. lift to IR ---- */
     m = lc_lift_program( entryProto, reach.items, reach.count );
     if ( m == NULL ) {
@@ -298,12 +348,43 @@ int lc_drive( const LcDriverOptions *opt ) {
         }
     }
 
+    /* --emit=ir: dump the module as the optimizer left it. Comes AFTER
+    ** verify so a dump reflects the exact IR codegen will consume. */
+    if ( opt->emit_mode == LC_EMIT_IR ) {
+        int close_me = 0;
+        FILE *of = OpenEmitOut( opt, skip_binary, &close_me );
+        if ( of == NULL ) goto cleanup;
+        Lc_DumpIr( of, m );
+        fflush( of );
+        if ( close_me ) fclose( of );
+        if ( skip_binary ) { rc = 0; goto cleanup; }
+    }
+
     /* ---- 5. codegen ---- */
     cm = lc_codegen( m );
     if ( cm == NULL ) {
         fprintf( stderr, "aotc: error: codegen failed\n" );
         goto cleanup;
     }
+
+    /* --emit=asm: dump the emitted machine code as an assembly listing.
+    ** Skip when the caller only asked for the diagnostic. */
+    if ( opt->emit_mode == LC_EMIT_ASM ) {
+        int close_me = 0;
+        FILE *of = OpenEmitOut( opt, skip_binary, &close_me );
+        if ( of == NULL ) goto cleanup;
+        Lc_DumpAsm( of, cm );
+        fflush( of );
+        if ( close_me ) fclose( of );
+        if ( skip_binary ) { rc = 0; goto cleanup; }
+    }
+
+    /* Any --emit=<other> that already dumped its stage and had no binary
+    ** requested: the corresponding branch above returned early. If skip_binary
+    ** is set without a matched mode (i.e. --emit-only with an unknown mode --
+    ** currently unreachable, but keep the check explicit for future modes)
+    ** we still stop here rather than link. */
+    if ( skip_binary ) { rc = 0; goto cleanup; }
 
     /* ---- 6/7. serialize the ProtoInit blob, emit ONE COFF .o, link ----
     ** The blob (constants/upvalues/debug-info/code per Proto) rides in the
@@ -424,6 +505,18 @@ int main( int argc, char **argv ) {
             int n = atoi( argv[ ++i ] );
             if ( n < 0 ) n = 1;
             opt.jobs = n;
+        } else if ( strcmp( a, "--emit-only" ) == 0 ) {
+            opt.emit_only = true;
+        } else if ( strncmp( a, "--emit=", 7 ) == 0 ) {
+            const char *v = a + 7;
+            if      ( strcmp( v, "bytecode" ) == 0 ) opt.emit_mode = LC_EMIT_BYTECODE;
+            else if ( strcmp( v, "ir"       ) == 0 ) opt.emit_mode = LC_EMIT_IR;
+            else if ( strcmp( v, "asm"      ) == 0 ) opt.emit_mode = LC_EMIT_ASM;
+            else {
+                fprintf( stderr, "aotc: unknown --emit mode '%s' "
+                                 "(supported: bytecode, ir, asm)\n", v );
+                return 2;
+            }
         } else if ( ( strcmp( a, "-L" ) == 0 || strcmp( a, "--link" ) == 0 )
                     && i + 1 < argc ) {
             if ( nforce < 63 ) {
@@ -443,7 +536,12 @@ int main( int argc, char **argv ) {
         usage( argv[ 0 ] );
         return 2;
     }
-    if ( opt.output == NULL ) {
+    /* Same rule as clua_main.c cmd_build: only synthesise an output path
+    ** when a binary is actually going to be written. --emit=<mode> alone or
+    ** --emit-only produces a diagnostic and no binary. */
+    if ( opt.output == NULL &&
+         opt.emit_mode == LC_EMIT_NONE &&
+         !opt.emit_only ) {
         opt.output = "out.exe";
     }
     if ( nforce > 0 ) {

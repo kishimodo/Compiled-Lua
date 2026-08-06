@@ -78,6 +78,18 @@ static void usage( FILE *to ) {
         "  -j <N>           parallel per-function codegen workers. -j 1 is\n"
         "                   the sequential path (no threads). Omit -j to let\n"
         "                   CLUA_JOBS decide, falling back to the CPU count.\n"
+        "  --emit=<mode>    diagnostic dump. <mode> is one of:\n"
+        "                     bytecode  Lua 5.4 bytecode per Proto (luac -l)\n"
+        "                     ir        optimized LcModule before codegen\n"
+        "                     asm       emitted x64 as an assembly listing\n"
+        "                   With no -o the dump lands on stdout and NO\n"
+        "                   binary is produced. With -o the binary is still\n"
+        "                   written and the dump lands on stdout; add\n"
+        "                   --emit-only to repurpose -o as the dump path.\n"
+        "                   `-o -` writes the dump to stdout explicitly.\n"
+        "  --emit-only      suppress the binary output even when -o is set\n"
+        "                   (only meaningful with --emit=<mode>). With\n"
+        "                   --emit-only the -o path is the dump destination.\n"
         "\n"
         "environment:\n"
         "  CLUA_HOME        CLua installation root (lib\\runtime-aot.a ...)\n"
@@ -116,6 +128,21 @@ typedef struct {
     int             run_arg0;      /* argv index of "--" + 1 (run only), or 0 */
 } CluaArgs;
 
+/* --emit=<mode> ; error message includes the accepted values so a typo lands
+** somewhere useful. Returns 1 on match/success, 0 on match/failure, -1 on
+** no-match (caller keeps scanning). */
+static int parse_emit_arg( CluaArgs *a, const char *s ) {
+    const char *val;
+    if ( strncmp( s, "--emit=", 7 ) != 0 ) return -1;
+    val = s + 7;
+    if ( strcmp( val, "bytecode" ) == 0 ) { a->opt.emit_mode = LC_EMIT_BYTECODE; return 1; }
+    if ( strcmp( val, "ir"       ) == 0 ) { a->opt.emit_mode = LC_EMIT_IR;       return 1; }
+    if ( strcmp( val, "asm"      ) == 0 ) { a->opt.emit_mode = LC_EMIT_ASM;      return 1; }
+    fprintf( stderr, "clua: unknown --emit mode '%s' "
+                     "(supported: bytecode, ir, asm)\n", val );
+    return 0;
+}
+
 /* Parse build/run/check flags from argv[from..argc). Returns 0 on error. */
 static int parse_build_args( CluaArgs *a, int argc, char **argv, int from,
                              int allow_dashdash ) {
@@ -130,6 +157,7 @@ static int parse_build_args( CluaArgs *a, int argc, char **argv, int from,
 
     for ( i = from; i < argc; i++ ) {
         const char *s = argv[ i ];
+        int emit_rc;
         if ( strcmp( s, "--" ) == 0 && allow_dashdash ) {
             a->run_arg0 = i + 1;
             break;
@@ -157,6 +185,10 @@ static int parse_build_args( CluaArgs *a, int argc, char **argv, int from,
             int n = atoi( argv[ ++i ] );
             if ( n < 0 ) n = 1;
             a->opt.jobs = n;
+        } else if ( strcmp( s, "--emit-only" ) == 0 ) {
+            a->opt.emit_only = true;
+        } else if ( ( emit_rc = parse_emit_arg( a, s ) ) != -1 ) {
+            if ( emit_rc == 0 ) return 0;
         } else if ( ( strcmp( s, "-L" ) == 0 || strcmp( s, "--link" ) == 0 )
                     && i + 1 < argc ) {
             if ( nforce < 63 ) {
@@ -189,7 +221,12 @@ static int cmd_build( int argc, char **argv, int from ) {
     int      rc;
 
     if ( !parse_build_args( &a, argc, argv, from, 0 ) ) return 2;
-    if ( a.opt.output == NULL ) {
+    /* Only synthesise an output path when a binary is actually going to be
+    ** written. In pure-diagnostic mode (--emit=X with no -o, or --emit-only
+    ** without -o) the driver leaves opt.output NULL and skips linking. */
+    if ( a.opt.output == NULL &&
+         a.opt.emit_mode == LC_EMIT_NONE &&
+         !a.opt.emit_only ) {
         derived = derive_output( a.opt.input );
         if ( derived == NULL ) { fprintf( stderr, "clua: oom\n" ); return 1; }
         a.opt.output = derived;
