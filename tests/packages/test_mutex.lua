@@ -1,25 +1,10 @@
--- tests/packages/test_mutex.lua : SRWLOCK reader-writer lock + with_lock.
---
--- NOTE: the CRITICAL_SECTION-backed mutex.mutex() and the kernel_mutex()
--- paths are currently BROKEN in this FFI (see the XFAILs at the bottom):
---   * ffi.sizeof("CRITICAL_SECTION") and ffi.sizeof("SRWLOCK") both return 0,
---     so mutex.mutex() does malloc(0) then InitializeCriticalSection() writes
---     ~40 bytes past the allocation, corrupting the heap. The process then
---     ABORTS (exit 127) when the cs is free()'d during GC -- a deferred,
---     uncatchable crash, so this test must NEVER create a mutex.mutex().
---   * mutex.kernel_mutex() throws at ffi.new("HANDLE[1]", h):
---     "ffi: cdata kind 4 does not match target kind 5".
--- The SRWLOCK path's 8-byte write into the 0-byte alloc happens not to be
--- fatal and its lock semantics are correct, so we exercise that fully.
+-- tests/packages/test_mutex.lua : SRWLOCK reader-writer lock + with_lock,
+-- plus regression tests for the CRITICAL_SECTION and kernel HANDLE paths.
 local ok_req, mutex = pcall(require, "mutex")
 if not ok_req then print("[~] SKIP test_mutex (" .. tostring(mutex) .. ")") os.exit(0) end
 
 local fails = 0
 local function ok(c, m) if not c then fails = fails + 1; print("[-] FAIL test_mutex: " .. tostring(m)) end end
-local function xfail(cond, desc, bug)
-  if cond then print(("[!] XPASS test_mutex: %s -- bug %s appears FIXED, remove this xfail"):format(desc, bug))
-  else        print(("[x] XFAIL test_mutex: %s (known bug %s)"):format(desc, bug)) end
-end
 
 -- ===== rwlock (SRWLOCK) -- the working path =====
 local rw = mutex.rwlock()

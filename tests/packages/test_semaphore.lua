@@ -1,21 +1,9 @@
 -- tests/packages/test_semaphore.lua : counting semaphore via CreateSemaphoreW.
---
--- KNOWN BUG (FFI-HANDLE-ARRAY-INIT-001): every semaphore constructor goes
--- through wrap(), which does ffi.new("HANDLE[1]", handle). In this CLua FFI,
--- initializing a pointer-array from a pointer cdata raises
--- "ffi.new init: ffi: cdata kind 4 does not match target kind 5", so even
--- semaphore.new(2,5) fails. (Workaround in the FFI: ffi.new("HANDLE[1]") then
--- holder[0]=h.) We assert the API surface and XFAIL the constructor; it flips
--- to XPASS when ffi.new("HANDLE[1]", h) is fixed.
 local ok_req, semaphore = pcall(require, "semaphore")
 if not ok_req then print("[~] SKIP test_semaphore (" .. tostring(semaphore) .. ")") os.exit(0) end
 
 local fails = 0
 local function ok(c, m) if not c then fails = fails + 1; print("[-] FAIL test_semaphore: " .. tostring(m)) end end
-local function xfail(cond, desc, bug)
-  if cond then print(("[!] XPASS test_semaphore: %s -- bug %s appears FIXED, remove this xfail"):format(desc, bug))
-  else        print(("[x] XFAIL test_semaphore: %s (known bug %s)"):format(desc, bug)) end
-end
 
 -- ===== API surface present =====
 ok(type(semaphore.new) == "function",   "semaphore.new present")
@@ -23,12 +11,12 @@ ok(type(semaphore.named) == "function", "semaphore.named present")
 ok(type(semaphore.open) == "function",  "semaphore.open present")
 ok(type(semaphore.with) == "function",  "semaphore.with present")
 
--- ===== argument validation runs BEFORE the broken ffi.new, so it works =====
+-- ===== argument validation =====
 ok(pcall(semaphore.new, -1, 5) == false, "new rejects negative initial")
 ok(pcall(semaphore.new, 6, 5) == false, "new rejects initial > max (6 > 5)")
 ok(pcall(semaphore.new, 0, 0) == false, "new rejects max < 1")
 
--- ===== core constructor (regression: FFI-HANDLE-ARRAY-INIT-001 fixed) =====
+-- ===== core constructor =====
 local new_ok, sem = pcall(function() return semaphore.new(2, 5) end)
 ok(new_ok and type(sem) == "table",
    "semaphore.new(2,5) constructs a usable object")

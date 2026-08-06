@@ -1,20 +1,9 @@
 -- tests/packages/test_event.lua : Win32 kernel events (CreateEventW).
---
--- KNOWN BUG (FFI-HANDLE-ARRAY-INIT-001): every event constructor goes through
--- wrap(), which does ffi.new("HANDLE[1]", handle). In this CLua FFI,
--- initializing a pointer-array from a pointer cdata raises
--- "ffi.new init: ffi: cdata kind 4 does not match target kind 5", so even
--- event.manual()/event.auto() fail. We assert the API surface and XFAIL the
--- constructor; it flips to XPASS when ffi.new("HANDLE[1]", h) is fixed.
 local ok_req, event = pcall(require, "event")
 if not ok_req then print("[~] SKIP test_event (" .. tostring(event) .. ")") os.exit(0) end
 
 local fails = 0
 local function ok(c, m) if not c then fails = fails + 1; print("[-] FAIL test_event: " .. tostring(m)) end end
-local function xfail(cond, desc, bug)
-  if cond then print(("[!] XPASS test_event: %s -- bug %s appears FIXED, remove this xfail"):format(desc, bug))
-  else        print(("[x] XFAIL test_event: %s (known bug %s)"):format(desc, bug)) end
-end
 
 -- ===== API surface present =====
 ok(type(event.manual) == "function",   "event.manual present")
@@ -28,12 +17,11 @@ ok(type(event.wait_all) == "function", "event.wait_all present")
 ok(pcall(event.wait_any, {}, 0) == false, "wait_any rejects empty list")
 ok(pcall(event.wait_all, {}, 0) == false, "wait_all rejects empty list")
 
--- ===== core constructor (regression: FFI-HANDLE-ARRAY-INIT-001 fixed) =====
+-- ===== core constructor =====
 local man_ok, m = pcall(function() return event.manual() end)
 ok(man_ok and type(m) == "table",
    "event.manual() constructs a usable object")
 
--- Full behavioral check, guarded so it only runs once the constructor is fixed.
 if man_ok and m then
     -- manual-reset
     ok(m:wait(0) == false, "manual event starts non-signalled")
