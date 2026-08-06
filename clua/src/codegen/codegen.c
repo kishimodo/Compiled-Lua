@@ -1995,22 +1995,76 @@ static int lower_inst( LcBranchCtx *Br, LcFunc *f, LcInst *in ) {
          *       tag byte), and a live-range analysis to keep RDI valid
          *       across the fallback CALL. Sound to write; not a small arc.
          *
-         * A future arc that picks up (C) needs three things this arc does
-         * not add:
+         * A future arc that picks up (C) needs the following. Prerequisites
+         * 1-3 were the original list; 4-6 are what a fresh read added --
+         * the biggest of them (item 4) shortens the "load key pointer"
+         * critical path from five dependent loads to two, which is more
+         * than half of the fast-path cost that (C) is trying to shave.
          *
-         *   1. Node struct offset constants in codegen. lobject.h defines
-         *      Node as a union { NodeKey, TValue }; the value half is at
-         *      offset 0 and the key TValue-ish header (key_tvk.gc for the
-         *      TString pointer, key_tt for the tag) is at offset 16. Bake
-         *      those into codegen.c the way LC_OFF_PROTO_K is.
-         *   2. A way to reach Table.node and Table.lsizenode from the
-         *      table pointer. Both are direct fields; the same trick
-         *      lower_const uses for Proto.k applies.
-         *   3. A pre-computed key-pointer + hash pair in the operand
-         *      stream, or a runtime reload from Proto.k[C]. The reload is
-         *      the honest choice for a first slice: it costs the same five
-         *      dependent loads that lower_const already emits and factors
-         *      cleanly.
+         *   1. Node struct offset constants in codegen. Verified against
+         *      lobject.h: `Node u.value_` at +0, `u.tt_` at +8, `u.key_tt`
+         *      at +9, `u.next` at +12, `u.key_val` at +16. sizeof(Node) = 24
+         *      on Win64. On a HIT we need key_tt (byte at +9) and key_val
+         *      (qword at +16) for the pointer-equality compare, and value_
+         *      (qword at +0) + tt_ (byte at +8) for the 16-byte MOVUPS copy
+         *      of i_val. Do NOT hardcode -- use offsetof at compile time
+         *      the way LC_OFF_PROTO_K does; the union layout is not fixed
+         *      by the C ABI, only by this particular struct.
+         *   2. Table field offsets. Verified: `alimit` (uint) at +12,
+         *      `array` (ptr) at +16, `node` (ptr) at +24, `lsizenode`
+         *      (lu_byte) at +11. lsizenode reads as a byte so a MOVZX
+         *      r64, byte[t+11] is the right encoding for the mask compute.
+         *   3. sizeof(Node) multiply. imul r, r, 24 is 4 bytes (48 6B /r ib);
+         *      an LEA+SHL sequence would be 5 (`lea r,[r+r*2]; shl r,3`)
+         *      but shorter latency. Either works. New encoder either way.
+         *   4. Fast key-pointer load via RBP. The prologue already
+         *      caches P->code + savedpc_bias in RBP (see the INVARIANT
+         *      block above), so the closure walk lower_const does five
+         *      loads for is redundant here: P = RBP - bias - offsetof(Proto,
+         *      code), and P->k is one load from that base. One MOV with a
+         *      folded disp32:
+         *          mov r10, [rbp + (- bias - LC_OFF_PROTO_CODE + LC_OFF_PROTO_K)]
+         *      yields P->k directly; then the TString* for K[C] is
+         *      [r10 + C*16] (Value.gc is at offset 0 of TValue). Two loads
+         *      total for the interned key pointer. Compare to Rt_GetFieldF
+         *      which itself walks ci -> func -> gc -> LClosure.p -> Proto.k
+         *      inside the helper. The RBP shortcut is a fresh finding; the
+         *      earlier prerequisite (3) proposed reloading through ci and
+         *      dismissed the site cost as "five loads like lower_const" --
+         *      that was the honest wrong answer.
+         *   5. rel8 window math. The fast body ends up around ~80 bytes
+         *      (tag check + key load + mask + slot compute + node key check
+         *      + MOVUPS + JMP over slow). The very first JNE (table-tag)
+         *      needs to skip the whole fast body to reach `slow`; at 80
+         *      bytes that fits int8_t but the margin is small. Either bound
+         *      the fast body carefully (~120 bytes max) or use a Jcc rel32
+         *      for the first JNE (X64Emit_JccRel32_Placeholder already
+         *      exists; 6 bytes vs 2, so +4 bytes per site). rel8 is fine
+         *      today but this is fragile once anyone adds a step.
+         *   6. New encoders with unit tests. At minimum:
+         *      X64Emit_MovzxRegByteMem (48 0F B6 /r) for lsizenode,
+         *      X64Emit_ShlRegByCl (48 D3 /4) or a fully-general SHL,
+         *      X64Emit_ImulRegRegImm8 (48 6B /r ib) for the Node stride,
+         *      X64Emit_AndReg32Reg32 (33 /r) for the mask,
+         *      X64Emit_AddRegReg64 (48 03 /r) if we don't reuse ArithRaxReg.
+         *      Each takes a `tools/test-x64-*` fixture; the pattern is set
+         *      by the encoders lower_gettable_inline added at ~700.
+         *
+         * The revised alternative floated in the task ("tag check + call
+         * plus a per-function K constant array cached in the frame") does
+         * not survive contact: the tag-check-only prefix IS option (A)
+         * above (strict loss for the reason given), and "cached in the
+         * frame" requires reserving a new stack slot per K entry, which
+         * changes savedpc_bias and the RSP alignment reservation (0x28
+         * today) for a payoff that only accrues if the SAME K entry is
+         * hit more than once per activation -- rare and unmeasurable
+         * without a proper cache-behaviour benchmark. The RBP shortcut in
+         * item 4 subsumes the intended win at zero frame-ABI cost.
+         *
+         * Estimated size cost of (C) with the RBP shortcut: ~80 bytes per
+         * site (fast prefix) + 24 bytes (helper call) = ~104 per site vs
+         * ~24 today; a ~+80-byte delta. Rover has on the order of a few
+         * hundred GETFIELD sites, so ~30 KB on a ~500 KB .text: ~+6%.
          *
          * Trigger for that arc: a quieter host that can resolve a 10%
          * wall-clock effect, or a fixture-driven proxy (dependent-load
