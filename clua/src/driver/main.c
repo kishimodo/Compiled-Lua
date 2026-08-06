@@ -147,10 +147,10 @@ int lc_drive( const LcDriverOptions *opt ) {
         return 2;
     }
 
-    if ( opt->emit_dll ) {
-        fprintf( stderr, "aotc: --dll is not supported in M0 (exe only)\n" );
-        return 2;
-    }
+    /* --dll / --output=dll / -shared: emit a DLL. The exe path stays the
+    ** default so byte-identity of every existing exe test is preserved. */
+    int output_kind = opt->output_kind;
+    if ( opt->emit_dll ) output_kind = LC_OUTPUT_DLL;
 
     /* ---- 1. closed-world discovery (reused front-end) ---- */
     char            dirbuf[ 512 ] = { 0 };
@@ -430,6 +430,8 @@ int lc_drive( const LcDriverOptions *opt ) {
                                     opt->shared_rt,
                                     opt->ld_internal,
                                     opt->no_gc_sections,
+                                    output_kind,
+                                    res.Exports, res.ExportCount,
                                     err, sizeof( err ) ) ) {
             fprintf( stderr, "aotc: error: link failed: %s\n",
                      err[0] ? err : "(unknown)" );
@@ -459,8 +461,8 @@ cleanup:
 static void usage( const char *argv0 ) {
     fprintf( stderr,
              "aotc (LuaC) — Lua 5.4 -> native Windows x64 PE\n"
-             "usage: %s <main.lua> [-o output.exe] [-O<n>] [-L <pkg>]... "
-             "[--shared-rt]\n",
+             "usage: %s <main.lua> [-o output] [-O<n>] [-L <pkg>]... "
+             "[--shared-rt] [--output=exe|dll] [-shared]\n",
              argv0 );
 }
 
@@ -489,6 +491,21 @@ int main( int argc, char **argv ) {
             }
         } else if ( strcmp( a, "--dll" ) == 0 ) {
             opt.emit_dll = true;
+            opt.output_kind = LC_OUTPUT_DLL;
+        } else if ( strcmp( a, "-shared" ) == 0 ) {
+            /* GCC-style shorthand: link a shared library (DLL on Windows). */
+            opt.output_kind = LC_OUTPUT_DLL;
+        } else if ( strncmp( a, "--output=", 9 ) == 0 ) {
+            const char *kind = a + 9;
+            if ( strcmp( kind, "exe" ) == 0 ) {
+                opt.output_kind = LC_OUTPUT_EXE;
+            } else if ( strcmp( kind, "dll" ) == 0 ) {
+                opt.output_kind = LC_OUTPUT_DLL;
+            } else {
+                fprintf( stderr, "aotc: unknown --output kind '%s' "
+                                 "(supported: exe, dll)\n", kind );
+                return 2;
+            }
         } else if ( strcmp( a, "--shared-rt" ) == 0 ) {
             opt.shared_rt = true;
         } else if ( strcmp( a, "--ld=internal" ) == 0 ) {
@@ -538,11 +555,12 @@ int main( int argc, char **argv ) {
     }
     /* Same rule as clua_main.c cmd_build: only synthesise an output path
     ** when a binary is actually going to be written. --emit=<mode> alone or
-    ** --emit-only produces a diagnostic and no binary. */
+    ** --emit-only produces a diagnostic and no binary. When a binary IS
+    ** written, the output kind (exe vs dll) picks the suffix. */
     if ( opt.output == NULL &&
          opt.emit_mode == LC_EMIT_NONE &&
          !opt.emit_only ) {
-        opt.output = "out.exe";
+        opt.output = ( opt.output_kind == LC_OUTPUT_DLL ) ? "out.dll" : "out.exe";
     }
     if ( nforce > 0 ) {
         opt.force_pkgs  = force;

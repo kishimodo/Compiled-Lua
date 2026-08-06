@@ -50,11 +50,23 @@ typedef enum {
   LC_EMIT_ASM         /* emitted x64 machine code as an assembly listing   */
 } LcEmitMode;
 
+/* --output=<kind> selector. exe (default) matches every existing test; dll
+** flips IMAGE_FILE_DLL, emits an export directory, and pulls aot_entry_dll.o
+** instead of aot_entry.o. Add more kinds (e.g. sys, driver) by extending the
+** enum plus the two switches in pe_link_v2.c / pe_emit.c that consume it. */
+typedef enum LcOutputKind {
+  LC_OUTPUT_EXE = 0,
+  LC_OUTPUT_DLL = 1
+} LcOutputKind;
+
 typedef struct LcDriverOptions {
   const char  *input;        /* root .lua file                              */
   const char  *output;       /* .exe / .dll path                            */
   int          opt_level;    /* -O0..-O3                                     */
-  bool         emit_dll;
+  bool         emit_dll;     /* legacy shim: set by --dll / --output=dll /
+                                -shared for callers that still branch on it.
+                                New code reads output_kind.                   */
+  int          output_kind;  /* LC_OUTPUT_EXE (default) or LC_OUTPUT_DLL     */
   bool         keep_ir;      /* dump IR for inspection (-S style)           */
   bool         check_only;   /* stop after resolve + closed-world + op scan */
   bool         keep_temps;   /* keep the intermediate .o (default: delete)  */

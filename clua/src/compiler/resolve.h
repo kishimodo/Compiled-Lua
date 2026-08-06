@@ -19,6 +19,14 @@ typedef struct _RESOLVED_MODULE {
     size_t         BytesLen;
 } RESOLVED_MODULE_T, *PRESOLVED_MODULE_T;
 
+/* One DLL export discovered by the module-scope scan. `Name` is the export
+   name (the key in `_exports = { name = fn, ... }`); the compiler pipeline
+   resolves it to a function body downstream. Malloc'd, freed by
+   Resolve_FreeResult. */
+typedef struct _RESOLVED_EXPORT {
+    char *Name;
+} RESOLVED_EXPORT_T, *PRESOLVED_EXPORT_T;
+
 typedef struct _RESOLVE_RESULT {
     PRESOLVED_MODULE_T Modules; /* malloc'd array, Modules[0] = entry */
     size_t             Count;
@@ -38,6 +46,12 @@ typedef struct _RESOLVE_RESULT {
        Populated by Resolve_Walk in the order they were first seen. */
     char             **BuiltinPackages;
     size_t             BuiltinPackageCount;
+    /* DLL exports discovered by the module-scope `_exports = {...}` scan on
+       the entry module. Populated whether or not the driver requested a DLL:
+       an exe build simply ignores them, and a `_exports` table in an exe is
+       inert (nothing walks it at run time). */
+    PRESOLVED_EXPORT_T Exports;
+    size_t             ExportCount;
 } RESOLVE_RESULT_T, *PRESOLVE_RESULT_T;
 
 typedef struct _RESOLVE_OPTS {

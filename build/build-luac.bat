@@ -34,8 +34,8 @@ if errorlevel 1 (
     goto :done
 )
 
-echo [*] linking aotc.exe + clua.exe (+ aot_entry.o)...
-make -f build/Makefile.luac aotc aot-entry clua
+echo [*] linking aotc.exe + clua.exe (+ aot_entry.o + aot_entry_dll.o)...
+make -f build/Makefile.luac aotc aot-entry aot-entry-dll clua
 if errorlevel 1 (
     echo [-] aotc/clua build failed
     set RC=1

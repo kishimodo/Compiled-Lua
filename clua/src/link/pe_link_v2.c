@@ -23,7 +23,14 @@
 */
 #include "link/pe_link_v2.h"
 #include "link/pe_emit.h"
+#include "compiler/resolve.h"     /* RESOLVED_EXPORT_T */
 #include "common/stdlib_libs.h"   /* LCLIB_* bits of the used-libs mask */
+
+/* Kept in lock-step with LC_OUTPUT_EXE / LC_OUTPUT_DLL in driver/aotc.h.
+   Not pulled through the include tree to avoid dragging the whole driver
+   header down into the linker translation unit. */
+#define LC_LINK_OUTPUT_EXE 0
+#define LC_LINK_OUTPUT_DLL 1
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -178,13 +185,15 @@ static int PublishStagedOutput( const char *staged, const char *out_path,
 typedef struct {
     char runtime_a[ LC_PATH_MAX ];    /* runtime-aot.a                        */
     char lualib_a[ LC_PATH_MAX ];     /* liblua54-embedded.a                  */
-    char aot_entry_o[ LC_PATH_MAX ];  /* precompiled entry ("" if not found)  */
+    char aot_entry_o[ LC_PATH_MAX ];  /* precompiled exe entry ("" if absent) */
+    char aot_entry_dll_o[ LC_PATH_MAX ]; /* precompiled DLL entry ("" absent) */
     char lvm_nointerp_o[ LC_PATH_MAX ]; /* interpreter-free lvm ("" if absent)*/
     char rt_implib[ LC_PATH_MAX ];    /* libclua-rt.dll.a ("" if absent)      */
     char protoinit_o[ LC_PATH_MAX ];  /* loose protoinit_rt.o ("" if absent)  */
     char inc_src[ LC_PATH_MAX ];      /* -I dir containing jit/, runtime/     */
     char inc_lua[ LC_PATH_MAX ];      /* -I dir containing lua.h              */
     char aot_entry_c[ LC_PATH_MAX ];  /* fallback source ("" if not found)    */
+    char aot_entry_dll_c[ LC_PATH_MAX ]; /* fallback source for DLL entry     */
     char sysroot[ LC_PATH_MAX ];      /* CRT sysroot dir ("" if not found)    */
 } LcToolchain;
 
@@ -216,6 +225,9 @@ static int TryRoot( LcToolchain *tc, const char *root, const char *lib,
     snprintf( tc->aot_entry_o, sizeof( tc->aot_entry_o ),
               "%s\\%s%saot_entry.o", root, lib, sep );
     if ( !FileExists( tc->aot_entry_o ) ) tc->aot_entry_o[0] = '\0';
+    snprintf( tc->aot_entry_dll_o, sizeof( tc->aot_entry_dll_o ),
+              "%s\\%s%saot_entry_dll.o", root, lib, sep );
+    if ( !FileExists( tc->aot_entry_dll_o ) ) tc->aot_entry_dll_o[0] = '\0';
     snprintf( tc->lvm_nointerp_o, sizeof( tc->lvm_nointerp_o ),
               "%s\\%s%slvm_nointerp.o", root, lib, sep );
     if ( !FileExists( tc->lvm_nointerp_o ) ) tc->lvm_nointerp_o[0] = '\0';
@@ -239,12 +251,24 @@ static int TryRoot( LcToolchain *tc, const char *root, const char *lib,
 
     /* cold-tree fallback inputs (optional — only needed when aot_entry.o is
     ** absent): include dirs + the entry source, given relative to root. */
-    tc->inc_src[0] = tc->inc_lua[0] = tc->aot_entry_c[0] = '\0';
+    tc->inc_src[0] = tc->inc_lua[0] = tc->aot_entry_c[0] = tc->aot_entry_dll_c[0] = '\0';
     if ( inc_src ) snprintf( tc->inc_src, sizeof( tc->inc_src ), "%s\\%s", root, inc_src );
     if ( inc_lua ) snprintf( tc->inc_lua, sizeof( tc->inc_lua ), "%s\\%s", root, inc_lua );
     if ( entry_c ) {
+        char *slash;
         snprintf( tc->aot_entry_c, sizeof( tc->aot_entry_c ), "%s\\%s", root, entry_c );
         if ( !FileExists( tc->aot_entry_c ) ) tc->aot_entry_c[0] = '\0';
+        /* Derive the DLL entry source path by swapping the basename. */
+        snprintf( tc->aot_entry_dll_c, sizeof( tc->aot_entry_dll_c ),
+                  "%s\\%s", root, entry_c );
+        slash = strrchr( tc->aot_entry_dll_c, '\\' );
+        if ( slash == NULL ) slash = strrchr( tc->aot_entry_dll_c, '/' );
+        if ( slash != NULL ) {
+            *slash = '\0';
+            strncat( tc->aot_entry_dll_c, "\\aot_entry_dll.c",
+                     sizeof( tc->aot_entry_dll_c ) - strlen( tc->aot_entry_dll_c ) - 1 );
+        }
+        if ( !FileExists( tc->aot_entry_dll_c ) ) tc->aot_entry_dll_c[0] = '\0';
     }
     return 1;
 }
@@ -344,12 +368,14 @@ static const char *kCrtArchives[] = {
 static int LinkInternal( const LcToolchain *tc, const char *userObj,
                          const char *outExe, const char *entry_obj,
                          int no_interp, int require_ffi, unsigned used_libs,
-                         int no_gc_sections, char *err, size_t errlen ) {
+                         int no_gc_sections, int output_kind,
+                         const char *const *export_names, int nexport_names,
+                         char *err, size_t errlen ) {
     char  objbuf[ 6 ][ LC_PATH_MAX ];
     char  arcbuf[ N_CRT_ARCHIVES + 2 ][ LC_PATH_MAX ];
     const char *objs[ 6 ];
     const char *arcs[ N_CRT_ARCHIVES + 2 ];
-    const char *undef[ 1 + CLUA_STDLIB_ANCHOR_MAX ];   /* Clua_OpenFfi + stdlib anchors */
+    const char *undef[ 2 + CLUA_STDLIB_ANCHOR_MAX ];   /* +1 for Rt_DllExportDefault */
     int   nobj = 0, narc = 0, nundef = 0, i;
     LcPeLinkInputs in;
 
@@ -383,15 +409,26 @@ static int LinkInternal( const LcToolchain *tc, const char *userObj,
     }
 
     if ( require_ffi ) undef[nundef++] = "Clua_OpenFfi";
+    /* DLL: force-undef the export stub so gc-sections cannot sweep it. Same
+    ** pattern as the stdlib anchors. */
+    if ( output_kind == LC_LINK_OUTPUT_DLL ) undef[nundef++] = "Rt_DllExportDefault";
     nundef += StdlibAnchorUndefs( used_libs, &undef[ nundef ] );
 
     memset( &in, 0, sizeof in );
     in.objects        = objs;  in.nobjects     = nobj;
     in.archives       = arcs;  in.narchives    = narc;
     in.force_undef    = undef; in.nforce_undef = nundef;
-    in.entry          = "mainCRTStartup";
+    /* DLL uses Rt_DllMain instead of the exe's mainCRTStartup. Both are
+    ** defined in the entry object shipped for that output kind. */
+    in.entry          = ( output_kind == LC_LINK_OUTPUT_DLL )
+                         ? "Rt_DllMain" : "mainCRTStartup";
     in.out_path       = outExe;
     in.no_gc_sections = no_gc_sections;
+    in.output_kind    = ( output_kind == LC_LINK_OUTPUT_DLL )
+                         ? LC_PE_OUTPUT_DLL : LC_PE_OUTPUT_EXE;
+    in.export_names   = export_names;
+    in.nexport_names  = nexport_names;
+    in.dll_module_name = NULL;   /* default: basename of out_path            */
 
     return LcPe_Link( &in, err, errlen );
 }
@@ -399,6 +436,8 @@ static int LinkInternal( const LcToolchain *tc, const char *userObj,
 int LuacLink_LinkProgram( const char *userObj, const char *outExe,
                           int no_interp, int require_ffi, unsigned used_libs,
                           int shared_rt, int ld_internal, int no_gc_sections,
+                          int output_kind,
+                          struct _RESOLVED_EXPORT *exports, size_t nexports,
                           char *err, size_t errlen ) {
     char        cmd[ 4096 ];
     char        staged_out[ MAX_PATH ];
@@ -452,51 +491,100 @@ int LuacLink_LinkProgram( const char *userObj, const char *outExe,
         }
     }
 
-    /* Precompiled aot_entry.o, or the cold-tree fallback: compile it next to
-    ** the user object (one extra gcc step, dev-tree only). */
-    if ( tc.aot_entry_o[0] ) {
-        snprintf( entry_obj, sizeof( entry_obj ), "%s", tc.aot_entry_o );
-    } else {
-        const char *dot = strrchr( userObj, '.' );
-        size_t baselen = dot ? ( size_t )( dot - userObj ) : strlen( userObj );
-        if ( !tc.aot_entry_c[0] || !tc.inc_src[0] || !tc.inc_lua[0] ) {
-            set_errv( err, errlen,
-                      "no precompiled aot_entry.o and no aot_entry.c fallback "
-                      "in the resolved toolchain ('%s') — rebuild with "
-                      "build\\build-luac.bat", tc.runtime_a );
-            return 0;
-        }
-        if ( baselen + 16 >= sizeof( entry_obj ) ) baselen = sizeof( entry_obj ) - 16;
-        memcpy( entry_obj, userObj, baselen );
-        entry_obj[ baselen ] = '\0';
-        strncat( entry_obj, "_entry.o", sizeof( entry_obj ) - strlen( entry_obj ) - 1 );
-        snprintf( cmd, sizeof( cmd ),
-                  "%s -std=c99 -I\"%s\" -I\"%s\" " LUAC_DEFINES
-                  " -c \"%s\" -o \"%s\"",
-                  GccCommand( ), tc.inc_src, tc.inc_lua, tc.aot_entry_c,
-                  entry_obj );
-        rc = run_cmd( cmd );
-        if ( rc != 0 ) {
-            set_errv( err, errlen,
-                      "compiling aot_entry.c failed (gcc rc=%d): %s", rc, cmd );
-            return 0;
+    /* Precompiled entry object (exe: aot_entry.o, dll: aot_entry_dll.o), or
+    ** compile the C source next to the user object (dev-tree only). */
+    {
+        int wantDll = ( output_kind == LC_LINK_OUTPUT_DLL );
+        const char *pre = wantDll ? tc.aot_entry_dll_o : tc.aot_entry_o;
+        const char *src = wantDll ? tc.aot_entry_dll_c : tc.aot_entry_c;
+        const char *what = wantDll ? "aot_entry_dll" : "aot_entry";
+        if ( pre != NULL && pre[0] ) {
+            snprintf( entry_obj, sizeof( entry_obj ), "%s", pre );
+        } else {
+            const char *dot = strrchr( userObj, '.' );
+            size_t baselen = dot ? ( size_t )( dot - userObj ) : strlen( userObj );
+            if ( src == NULL || src[0] == '\0' || !tc.inc_src[0] || !tc.inc_lua[0] ) {
+                set_errv( err, errlen,
+                          "no precompiled %s.o and no %s.c fallback in the "
+                          "resolved toolchain ('%s') — rebuild with "
+                          "build\\build-luac.bat", what, what, tc.runtime_a );
+                return 0;
+            }
+            if ( baselen + 24 >= sizeof( entry_obj ) ) baselen = sizeof( entry_obj ) - 24;
+            memcpy( entry_obj, userObj, baselen );
+            entry_obj[ baselen ] = '\0';
+            strncat( entry_obj, wantDll ? "_entry_dll.o" : "_entry.o",
+                     sizeof( entry_obj ) - strlen( entry_obj ) - 1 );
+            snprintf( cmd, sizeof( cmd ),
+                      "%s -std=c99 -I\"%s\" -I\"%s\" " LUAC_DEFINES
+                      " -c \"%s\" -o \"%s\"",
+                      GccCommand( ), tc.inc_src, tc.inc_lua, src, entry_obj );
+            rc = run_cmd( cmd );
+            if ( rc != 0 ) {
+                set_errv( err, errlen,
+                          "compiling %s.c failed (gcc rc=%d): %s",
+                          what, rc, cmd );
+                return 0;
+            }
         }
     }
 
-    /* ---- internal linker (--ld=internal / CLUA_LD=internal) ----
-    ** The built-in COFF->PE64 linker against the CRT sysroot — no gcc/ld.
-    ** Static link only (shared_rt stays on the gcc path; the DLL build needs
-    ** the import-lib + auto-import pseudo-reloc machinery gcc provides). */
-    if ( use_internal && !shared_rt ) {
-        if ( !MakeStagedOutput( outExe, staged_out, err, errlen ) ) return 0;
-        if ( !LinkInternal( &tc, userObj, staged_out, entry_obj,
-                            no_interp, require_ffi, used_libs, no_gc_sections,
-                            err, errlen ) ) {
-            DeleteFileA( staged_out );
+    /* DLL output currently rides on the internal linker only. The gcc/ld
+    ** path emits a proper .dll on paper but it needs auto-import pseudo-reloc
+    ** wiring and an import lib to be genuinely useful, and getting the export
+    ** directory to look identical across both linkers is more work than
+    ** value. Force-select the internal linker for the DLL kind so the byte
+    ** shape of the output is defined by one code path. */
+    if ( output_kind == LC_LINK_OUTPUT_DLL ) {
+        if ( shared_rt ) {
+            set_errv( err, errlen,
+                      "--output=dll cannot be combined with --shared-rt "
+                      "(the runtime DLL is not usable from another DLL of "
+                      "the same lua_State)" );
             return 0;
         }
+        use_internal = 1;
+    }
+
+    /* Copy the export names into a plain (const char **) array before calling
+    ** into the internal linker. Not needed on the exe path. */
+    const char **export_name_ptrs = NULL;
+    int          nexport_name_ptrs = 0;
+    if ( output_kind == LC_LINK_OUTPUT_DLL && nexports > 0 && exports != NULL ) {
+        export_name_ptrs = ( const char ** )calloc( nexports, sizeof( char * ) );
+        if ( export_name_ptrs == NULL ) {
+            set_errv( err, errlen, "oom" );
+            return 0;
+        }
+        /* exports is RESOLVED_EXPORT_T[] (compiler/resolve.h). Each entry is
+        ** simply { char *Name; }. */
+        PRESOLVED_EXPORT_T ev = ( PRESOLVED_EXPORT_T )exports;
+        for ( size_t e = 0; e < nexports; e++ ) {
+            export_name_ptrs[e] = ev[e].Name;
+        }
+        nexport_name_ptrs = ( int )nexports;
+    }
+
+    /* ---- internal linker (--ld=internal / CLUA_LD=internal, or --output=dll) ----
+    ** The built-in COFF->PE64 linker against the CRT sysroot — no gcc/ld.
+    ** Static link only (shared_rt stays on the gcc path). */
+    if ( use_internal && !shared_rt ) {
+        if ( !MakeStagedOutput( outExe, staged_out, err, errlen ) ) {
+            free( export_name_ptrs );
+            return 0;
+        }
+        if ( !LinkInternal( &tc, userObj, staged_out, entry_obj,
+                            no_interp, require_ffi, used_libs, no_gc_sections,
+                            output_kind, export_name_ptrs, nexport_name_ptrs,
+                            err, errlen ) ) {
+            DeleteFileA( staged_out );
+            free( export_name_ptrs );
+            return 0;
+        }
+        free( export_name_ptrs );
         return PublishStagedOutput( staged_out, outExe, err, errlen );
     }
+    free( export_name_ptrs );
 
     /* ---- the shared-runtime link (--shared-rt) ----
     ** userObj + aot_entry.o + protoinit_rt.o (the LCPB deserializer reads

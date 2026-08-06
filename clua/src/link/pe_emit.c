@@ -37,6 +37,10 @@
 #define DIR_IAT        12
 #define NUM_DIRS       16
 
+/* IMAGE_FILE_HEADER Characteristics bit for a DLL. Kept beside the other PE
+** constants; only consulted on the DLL path. */
+#define IMAGE_FILE_DLL 0x2000
+
 /* ------------- a growable byte buffer ------------- */
 typedef struct { uint8_t *p; size_t len, cap; } Buf;
 static int b_need( Buf *b, size_t n ) {
@@ -208,6 +212,15 @@ typedef struct {
     const char  *entry;
     uint64_t     image_base;
     int          gc_sections;   /* run dead-section elimination (default 1)  */
+
+    /* DLL export directory. Populated only when output_kind == DLL. Names
+    ** and per-export target symbols are copied here from the caller's inputs
+    ** so the linker owns the string lifetime for the whole link. */
+    int          output_kind;             /* LC_PE_OUTPUT_EXE / _DLL          */
+    char       **export_names;            /* alphabetized                     */
+    int          nexport_names;
+    char        *dll_module_name;         /* value written into the export
+                                             directory Name field             */
 
     char        err[512];
 } Linker;
@@ -1567,6 +1580,150 @@ static int build_imports( Linker *L, ImportLayout *il ) {
 }
 
 /* ===================================================================
+** DLL export directory. Structurally similar to the import directory but
+** simpler: one IMAGE_EXPORT_DIRECTORY (40 bytes) + three parallel arrays
+** (functions RVAs / name RVAs / ordinals) + the DLLName string + each
+** export's name string, all placed contiguously into .rdata.
+**
+** All export functions point at the runtime helper Rt_DllExportDefault,
+** which must be defined by the DLL's entry object (aot_entry_dll.o). This
+** is the "stubs return a fixed value" arc; real per-export trampolines are
+** the immediate follow-up. Names are sorted alphabetically because the PE
+** spec requires it (the loader binary-searches the name array on
+** GetProcAddress).
+=================================================================== */
+typedef struct {
+    uint32_t dir_off;         /* offset of the export directory in OS_RDATA  */
+    uint32_t funcs_off;       /* offset of the address table                 */
+    uint32_t names_off;       /* offset of the name pointers table           */
+    uint32_t ords_off;        /* offset of the ordinal table                 */
+    uint32_t dllname_off;     /* offset of the DLL name string               */
+    uint32_t *name_off;       /* per-export name-string offset               */
+    uint32_t nexports;
+} ExportLayout;
+
+static void export_layout_free( ExportLayout *el ) {
+    if ( !el ) return;
+    free( el->name_off );
+    memset( el, 0, sizeof( *el ) );
+}
+
+static int cmp_str_ptr( const void *a, const void *b ) {
+    const char *sa = *( const char *const * )a;
+    const char *sb = *( const char *const * )b;
+    return strcmp( sa, sb );
+}
+
+/* Reserve zeroed space for the export directory in OS_RDATA and record every
+** structural offset. The RVAs are patched in finalize_exports once .rdata's
+** final RVA is known. */
+static int build_exports( Linker *L, ExportLayout *el ) {
+    OutSec *rdata = &L->out[OS_RDATA];
+    uint32_t off, name_bytes = 0;
+    int i;
+
+    memset( el, 0, sizeof( *el ) );
+    if ( L->output_kind != LC_PE_OUTPUT_DLL || L->nexport_names <= 0 ) return 1;
+
+    /* sort names alphabetically per the PE loader's binary-search assumption */
+    qsort( L->export_names, ( size_t )L->nexport_names, sizeof( char * ),
+           cmp_str_ptr );
+
+    el->nexports = ( uint32_t )L->nexport_names;
+    el->name_off = ( uint32_t * )calloc( el->nexports, sizeof( uint32_t ) );
+    if ( !el->name_off ) return lerr( L, "oom exports", NULL );
+
+    /* Reserve space starting at the current .rdata end so we do not perturb
+    ** any layout downstream. Align to 4 for the directory header. */
+    while ( rdata->raw.len & 3 ) {
+        if ( !b_zero( &rdata->raw, 1 ) ) return lerr( L, "oom", NULL );
+    }
+    off = ( uint32_t )rdata->raw.len;
+    el->dir_off = off;
+    off += 40;                       /* IMAGE_EXPORT_DIRECTORY                 */
+    el->funcs_off = off; off += el->nexports * 4;
+    el->names_off = off; off += el->nexports * 4;
+    el->ords_off  = off; off += el->nexports * 2;
+    while ( off & 3 ) off++;
+    el->dllname_off = off;
+    off += ( uint32_t )( strlen( L->dll_module_name ? L->dll_module_name
+                                                    : "out.dll" ) + 1 );
+    while ( off & 1 ) off++;
+    for ( i = 0; i < ( int )el->nexports; i++ ) {
+        el->name_off[i] = off;
+        name_bytes = ( uint32_t )( strlen( L->export_names[i] ) + 1 );
+        off += name_bytes;
+        if ( off & 1 ) off++;
+    }
+    if ( !b_zero( &rdata->raw, off - el->dir_off ) ) return lerr( L, "oom", NULL );
+    rdata->present = 1;
+    if ( rdata->virt_size < ( uint32_t )rdata->raw.len )
+        rdata->virt_size = ( uint32_t )rdata->raw.len;
+    return 1;
+}
+
+/* Write the export directory content once .rdata's final RVA and every
+** exported symbol's RVA are known. Every export points at the same runtime
+** stub Rt_DllExportDefault; if it is not defined the link errors. */
+static int finalize_exports( Linker *L, ExportLayout *el ) {
+    OutSec  *rdata = &L->out[OS_RDATA];
+    uint8_t *base;
+    uint32_t rva;
+    uint32_t stub_rva = 0;
+    GSym    *stub;
+    int      i;
+
+    if ( L->output_kind != LC_PE_OUTPUT_DLL || el->nexports == 0 ) return 1;
+    stub = gsym_find( L, "Rt_DllExportDefault" );
+    if ( !stub || !stub->defined ) {
+        return lerr( L,
+            "DLL export target 'Rt_DllExportDefault' undefined "
+            "(link aot_entry_dll.o or a compatible entry object)",
+            NULL );
+    }
+    stub_rva = stub->rva;
+    base = rdata->raw.p;
+    rva  = rdata->rva;
+
+    /* IMAGE_EXPORT_DIRECTORY */
+    {
+        uint8_t *d = base + el->dir_off;
+        w32( d + 0,  0 );                              /* Characteristics       */
+        w32( d + 4,  0 );                              /* TimeDateStamp         */
+        w16( d + 8,  0 ); w16( d + 10, 0 );            /* Version               */
+        w32( d + 12, rva + el->dllname_off );          /* Name                  */
+        w32( d + 16, 1 );                              /* Base (ordinal)        */
+        w32( d + 20, el->nexports );                   /* NumberOfFunctions     */
+        w32( d + 24, el->nexports );                   /* NumberOfNames         */
+        w32( d + 28, rva + el->funcs_off );            /* AddressOfFunctions    */
+        w32( d + 32, rva + el->names_off );            /* AddressOfNames        */
+        w32( d + 36, rva + el->ords_off );             /* AddressOfNameOrdinals */
+    }
+    /* address table: every entry -> stub RVA */
+    for ( i = 0; i < ( int )el->nexports; i++ ) {
+        w32( base + el->funcs_off + ( uint32_t )i * 4, stub_rva );
+    }
+    /* name pointer table + ordinal table */
+    for ( i = 0; i < ( int )el->nexports; i++ ) {
+        w32( base + el->names_off + ( uint32_t )i * 4,
+             rva + el->name_off[i] );
+        w16( base + el->ords_off  + ( uint32_t )i * 2,
+             ( uint16_t )i );                          /* biased by Base above */
+    }
+    /* DLLName */
+    {
+        const char *nm = L->dll_module_name ? L->dll_module_name : "out.dll";
+        memcpy( base + el->dllname_off, nm, strlen( nm ) + 1 );
+    }
+    /* per-export name strings */
+    for ( i = 0; i < ( int )el->nexports; i++ ) {
+        const char *nm = L->export_names[i];
+        memcpy( base + el->name_off[i], nm, strlen( nm ) + 1 );
+    }
+    return 1;
+}
+
+/* ===================================================================
 ** RVA + file-offset assignment. Output sections are laid in a fixed order;
 ** each gets a page-aligned RVA and a FILE_ALIGN-aligned file offset. .bss
 ** occupies no file space; .reloc is built last (after we know all sites).
@@ -2100,7 +2257,8 @@ static uint32_t total_image_size( Linker *L ) {
     return end;
 }
 
-static int emit_pe( Linker *L, const char *out_path, ImportLayout *il ) {
+static int emit_pe( Linker *L, const char *out_path, ImportLayout *il,
+                    ExportLayout *el ) {
     Buf file;
     uint32_t nsec = ( uint32_t )count_sections( L );
     uint32_t opt_hdr_size = 0xF0;          /* PE32+ optional header size      */
@@ -2147,8 +2305,12 @@ static int emit_pe( Linker *L, const char *out_path, ImportLayout *il ) {
         w32( fh + 12, 0 );                  /* NumberOfSymbols                 */
         w16( fh + 16, ( uint16_t )opt_hdr_size );
         /* EXECUTABLE | LARGE_ADDRESS_AWARE | LINE_NUMS_STRIPPED |
-        ** LOCAL_SYMS_STRIPPED | DEBUG_STRIPPED */
-        w16( fh + 18, 0x0002 | 0x0020 | 0x0004 | 0x0008 | 0x0200 );
+        ** LOCAL_SYMS_STRIPPED | DEBUG_STRIPPED, plus DLL bit when applicable. */
+        {
+            uint16_t chars = 0x0002 | 0x0020 | 0x0004 | 0x0008 | 0x0200;
+            if ( L->output_kind == LC_PE_OUTPUT_DLL ) chars |= IMAGE_FILE_DLL;
+            w16( fh + 18, chars );
+        }
         if ( !b_putn( &file, fh, 20 ) ) return lerr( L, "oom", NULL );
     }
 
@@ -2207,6 +2369,17 @@ static int emit_pe( Linker *L, const char *out_path, ImportLayout *il ) {
             w32( oh + 112 + DIR_IMPORT*8 + 4, ( il->ndlls + 1 ) * 20 );
             w32( oh + 112 + DIR_IAT*8 + 0, iat_rva );
             w32( oh + 112 + DIR_IAT*8 + 4, iat_size );
+        }
+        /* DLL export directory. Emitted only when the DLL path built one;
+        ** size runs from the directory header through the last name string. */
+        if ( L->output_kind == LC_PE_OUTPUT_DLL && el->nexports > 0 ) {
+            uint32_t rd_rva = L->out[OS_RDATA].rva;
+            uint32_t last_name = el->name_off[ el->nexports - 1 ];
+            uint32_t last_len  = ( uint32_t )strlen(
+                L->export_names[ el->nexports - 1 ] ) + 1;
+            uint32_t end = last_name + last_len;
+            w32( oh + 112 + DIR_EXPORT*8 + 0, rd_rva + el->dir_off );
+            w32( oh + 112 + DIR_EXPORT*8 + 4, end - el->dir_off );
         }
         if ( L->out[OS_RELOC].present ) {
             w32( oh + 112 + DIR_BASERELOC*8 + 0, L->out[OS_RELOC].rva );
@@ -2304,19 +2477,55 @@ static void linker_free( Linker *L ) {
     for ( i = 0; i < L->nimports; i++ ) { free( L->imports[i].dll ); free( L->imports[i].func ); }
     free( L->imports );
     free( L->relocs );
+    if ( L->export_names ) {
+        for ( i = 0; i < L->nexport_names; i++ ) free( L->export_names[i] );
+        free( L->export_names );
+    }
+    free( L->dll_module_name );
 }
 
 int LcPe_Link( const LcPeLinkInputs *in, char *err, size_t errlen ) {
     Linker L;
     ImportLayout il;
+    ExportLayout el;
     int i, rc = 0;
     uint32_t sizeof_headers, nsec;
+
+    memset( &el, 0, sizeof el );
 
     memset( &L, 0, sizeof L );
     memset( &il, 0, sizeof il );
     L.entry = ( in->entry && in->entry[0] ) ? in->entry : PE_DEF_ENTRY;
     L.image_base = PE_IMAGE_BASE;
     L.gc_sections = !in->no_gc_sections;   /* default ON; escape via input flag */
+    L.output_kind = in->output_kind;
+
+    /* DLL: copy the export-name list into linker-owned storage now so the
+    ** later emit passes can rely on it (and sort it) without touching the
+    ** caller's buffer. */
+    if ( in->output_kind == LC_PE_OUTPUT_DLL && in->nexport_names > 0 ) {
+        int e;
+        L.export_names = ( char ** )calloc( in->nexport_names, sizeof( char * ) );
+        if ( !L.export_names ) { snprintf( err, errlen, "oom" ); goto out; }
+        for ( e = 0; e < in->nexport_names; e++ ) {
+            L.export_names[e] = _strdup( in->export_names[e] );
+            if ( !L.export_names[e] ) { snprintf( err, errlen, "oom" ); goto out; }
+        }
+        L.nexport_names = in->nexport_names;
+    }
+    if ( in->output_kind == LC_PE_OUTPUT_DLL ) {
+        const char *nm = in->dll_module_name;
+        if ( nm == NULL || nm[0] == '\0' ) {
+            /* default the DLLName field to the basename of the output path */
+            const char *p, *base = in->out_path ? in->out_path : "out.dll";
+            for ( p = base; *p; p++ ) {
+                if ( *p == '/' || *p == '\\' ) base = p + 1;
+            }
+            nm = base;
+        }
+        L.dll_module_name = _strdup( nm );
+        if ( !L.dll_module_name ) { snprintf( err, errlen, "oom" ); goto out; }
+    }
 
     /* open archives first (kept open for the fixpoint) */
     if ( in->narchives > 0 ) {
@@ -2394,6 +2603,10 @@ int LcPe_Link( const LcPeLinkInputs *in, char *err, size_t errlen ) {
     /* synthesize imports into idata + thunks into text (offsets only) */
     if ( !build_imports( &L, &il ) ) { snprintf( err, errlen, "%s", L.err ); goto out; }
 
+    /* DLL: reserve zeroed .rdata space for the export directory. Filled in
+    ** finalize_exports once .rdata's RVA and the stub symbol RVA are known. */
+    if ( !build_exports( &L, &el ) ) { snprintf( err, errlen, "%s", L.err ); goto out; }
+
     /* headers size depends on the final section count. .reloc is built later
     ** (it needs RVAs), so predict whether it will exist: any ADDR64 site
     ** produces a base relocation. Reserve its header slot up front so the
@@ -2426,6 +2639,8 @@ int LcPe_Link( const LcPeLinkInputs *in, char *err, size_t errlen ) {
 
     /* fill the import directory + thunks now that RVAs are final */
     if ( !finalize_imports( &L, &il ) ) { snprintf( err, errlen, "%s", L.err ); goto out; }
+    /* fill the export directory (RVAs known now) */
+    if ( !finalize_exports( &L, &el ) ) { snprintf( err, errlen, "%s", L.err ); goto out; }
 
     /* build + place .reloc */
     if ( !build_reloc_section( &L ) ) { snprintf( err, errlen, "%s", L.err ); goto out; }
@@ -2436,11 +2651,12 @@ int LcPe_Link( const LcPeLinkInputs *in, char *err, size_t errlen ) {
     ** never referenced by a reloc don't matter. */
 
     /* emit */
-    if ( !emit_pe( &L, in->out_path, &il ) ) { snprintf( err, errlen, "%s", L.err ); goto out; }
+    if ( !emit_pe( &L, in->out_path, &il, &el ) ) { snprintf( err, errlen, "%s", L.err ); goto out; }
 
     rc = 1;
 out:
     import_layout_free( &il );
+    export_layout_free( &el );
     linker_free( &L );
     return rc;
 }

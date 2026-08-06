@@ -102,6 +102,123 @@ static int IsRuntimeOnlyName( const char *Name ) {
     return 0;
 }
 
+/* Scan the entry module's main chunk for a top-level `_exports = { name = fn, ...}`
+   assignment and collect the export names.
+
+   The scan is intentionally narrow: it walks ONLY the main chunk's own code
+   (not nested protos), which is where a module-scope table literal that is
+   later assigned to `_exports` lives. The pattern the Lua 5.4 compiler emits
+   for `_exports = { a = fn1, b = fn2 }` is:
+
+     NEWTABLE     RT, 0, N
+     EXTRAARG     ...
+     CLOSURE      RT+1, PIDX
+     SETFIELD     RT, K"a", RT+1
+     CLOSURE      RT+1, PIDX2
+     SETFIELD     RT, K"b", RT+1
+     ...
+     SETTABUP     UP"_ENV", K"_exports", RT
+
+   The scan tracks the register `RT` that is the current NEWTABLE target and
+   collects every SETFIELD/SETI whose A argument equals RT. When it sees a
+   SETTABUP that stores that register into `_exports`, it emits the collected
+   names into `Out`. If the pattern doesn't match cleanly (e.g. the user
+   assigns _exports = otherTable or builds the table dynamically), the scan
+   silently returns no exports — the user just gets an empty DLL and can be
+   told by the driver. */
+static int StrEq( const char *a, const char *b ) {
+    return a != NULL && b != NULL && strcmp( a, b ) == 0;
+}
+
+static const char *ConstStr( Proto *P, int idx ) {
+    if ( idx < 0 || idx >= P->sizek ) return NULL;
+    TValue *k = &P->k[ idx ];
+    if ( !ttisstring( k ) ) return NULL;
+    return getstr( tsvalue( k ) );
+}
+
+static void ExportPush( PRESOLVE_RESULT_T R, const char *Name ) {
+    size_t i;
+    if ( R == NULL || Name == NULL ) return;
+    for ( i = 0; i < R->ExportCount; i++ ) {
+        if ( StrEq( R->Exports[ i ].Name, Name ) ) return;
+    }
+    PRESOLVED_EXPORT_T grown = ( PRESOLVED_EXPORT_T )realloc(
+        R->Exports, ( R->ExportCount + 1 ) * sizeof( RESOLVED_EXPORT_T ) );
+    if ( grown == NULL ) return;
+    R->Exports = grown;
+    R->Exports[ R->ExportCount ].Name = strdup( Name );
+    R->ExportCount++;
+}
+
+static void ScanExports( Proto *P, PRESOLVE_RESULT_T Res ) {
+    int I;
+    int TableReg  = -1;   /* register currently holding a NEWTABLE literal   */
+    /* pending field names collected against TableReg, in source order        */
+    char **Pending = NULL;
+    size_t NPending = 0, CPending = 0;
+
+    if ( P == NULL || Res == NULL ) return;
+
+    for ( I = 0; I < P->sizecode; I++ ) {
+        Instruction Op = P->code[ I ];
+        OpCode      C  = GET_OPCODE( Op );
+
+        if ( C == OP_NEWTABLE ) {
+            /* start (or restart) tracking against this table's register */
+            TableReg = GETARG_A( Op );
+            /* NEWTABLE is followed by an EXTRAARG carrying the total slot
+               count (Lua 5.4). Skip it in the loop by letting the outer
+               increment step past it — no action needed here. */
+            for ( size_t j = 0; j < NPending; j++ ) free( Pending[ j ] );
+            NPending = 0;
+            continue;
+        }
+        if ( TableReg < 0 ) continue;
+
+        if ( ( C == OP_SETFIELD || C == OP_SETI ) &&
+             GETARG_A( Op ) == TableReg ) {
+            /* SETFIELD's B is a K-index into constants; SETI's B is the
+               integer key (uninteresting for named exports). Only named
+               entries make it into the export directory. */
+            if ( C == OP_SETFIELD ) {
+                const char *Name = ConstStr( P, GETARG_B( Op ) );
+                if ( Name != NULL ) {
+                    if ( NPending == CPending ) {
+                        size_t nc = CPending ? CPending * 2 : 8;
+                        char **grown = ( char ** )realloc( Pending, nc * sizeof( char * ) );
+                        if ( grown == NULL ) break;
+                        Pending = grown; CPending = nc;
+                    }
+                    Pending[ NPending++ ] = strdup( Name );
+                }
+            }
+            continue;
+        }
+
+        if ( C == OP_SETTABUP ) {
+            /* SETTABUP UP[A][K[B]] := RK(C). Lua 5.4 uses the k-bit of the
+               instruction (GETARG_k) to distinguish register from constant
+               for the C operand -- unlike 5.3, where bit-8 of C encoded it. */
+            int cIsK = GETARG_k( Op );
+            int cReg = GETARG_C( Op );
+            const char *Key = ConstStr( P, GETARG_B( Op ) );
+            if ( !cIsK && cReg == TableReg && StrEq( Key, "_exports" ) ) {
+                size_t j;
+                for ( j = 0; j < NPending; j++ ) {
+                    ExportPush( Res, Pending[ j ] );
+                    free( Pending[ j ] );
+                }
+                NPending = 0;
+                TableReg = -1;
+            }
+        }
+    }
+
+    for ( size_t j = 0; j < NPending; j++ ) free( Pending[ j ] );
+    free( Pending );
+}
+
 /*!
  * @brief
  *  Walk one Proto's instructions, looking for require("literal") calls.
@@ -226,6 +343,21 @@ static int RequiresOfSource( const char        *Path,
     return 1;
 }
 
+/* Public entry: scan the entry module's compiled bytecode for a top-level
+   `_exports = {...}` table literal and populate Res->Exports. Called by
+   Resolve_Walk after the entry is compiled + pushed. Kept separate from
+   ScanProto so an exe build pays nothing (it never invokes this). */
+static void ScanEntryExports( const char *Path, PRESOLVE_RESULT_T Res ) {
+    lua_State *L  = luaL_newstate( );
+    int        Rc;
+    if ( L == NULL ) return;
+    Rc = luaL_loadfile( L, Path );
+    if ( Rc != LUA_OK ) { lua_close( L ); return; }
+    const LClosure *LC = clLvalue( s2v( L->top.p - 1 ) );
+    ScanExports( ( Proto * )LC->p, Res );
+    lua_close( L );
+}
+
 static void PushResolved( PRESOLVE_RESULT_T R,
                           const char        *Name,
                           const char        *Path,
@@ -345,6 +477,11 @@ int Resolve_Walk( const char *EntryPath, PRESOLVE_OPTS_T Opts, PRESOLVE_RESULT_T
         Resolve_FreeResult( Out );
         return 0;
     }
+    /* Independent scan for the DLL export table on the ENTRY module only.
+       The compiler pipeline plumbs the results down to the linker, which
+       ignores them for exe output. Nested `require`'d modules never
+       contribute exports: only the entry module's `_exports` matters. */
+    ScanEntryExports( EntryPath, Out );
     StrList_Push( &Visited, "main" );
 
     /* -L/--link: inject forced names as if the entry had require()'d them,
@@ -514,4 +651,10 @@ void Resolve_FreeResult( PRESOLVE_RESULT_T R ) {
     free( R->BuiltinPackages );
     R->BuiltinPackages      = NULL;
     R->BuiltinPackageCount  = 0;
+    for ( size_t I = 0; I < R->ExportCount; I++ ) {
+        free( R->Exports[ I ].Name );
+    }
+    free( R->Exports );
+    R->Exports      = NULL;
+    R->ExportCount  = 0;
 }

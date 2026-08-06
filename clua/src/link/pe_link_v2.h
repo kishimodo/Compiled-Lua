@@ -20,6 +20,11 @@
 
 #include <stddef.h>
 
+/* Forward: names of DLL exports discovered by Resolve_Walk. The link stage
+   copies each into an output-owned buffer while emitting the PE, so the
+   caller may free its RESOLVED_EXPORT_T array immediately after the call. */
+struct _RESOLVED_EXPORT;   /* full type in compiler/resolve.h                */
+
 /* Link the program. Returns 1 on success, 0 + message in `err`.
 **   userObj   — the codegen COFF .o (luac_fn_<i> bodies + .rdata$L blob)
 **   outExe    — output PE path
@@ -48,9 +53,20 @@
 **               sweeps unreachable function/data sections. No effect on the
 **               gcc path (it always passes -Wl,--gc-sections).
 */
+/*   output_kind — LC_OUTPUT_EXE (0, default) or LC_OUTPUT_DLL (1). DLL sets
+**               IMAGE_FILE_DLL in the PE FileHeader, points the entry symbol
+**               at Rt_DllMain (aot_entry_dll.o), and synthesizes an
+**               IMAGE_EXPORT_DIRECTORY entry per name in exports[].
+**   exports    — pointer to the caller's RESOLVED_EXPORT_T array (opaque here;
+**               concrete type in compiler/resolve.h). NULL when there are no
+**               exports or output_kind != LC_OUTPUT_DLL.
+**   nexports   — number of entries in exports[].
+*/
 int LuacLink_LinkProgram( const char *userObj, const char *outExe,
                           int no_interp, int require_ffi, unsigned used_libs,
                           int shared_rt, int ld_internal, int no_gc_sections,
+                          int output_kind,
+                          struct _RESOLVED_EXPORT *exports, size_t nexports,
                           char *err, size_t errlen );
 
 #endif /* LUAC_LINK_PE_LINK_V2_H */

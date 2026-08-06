@@ -97,6 +97,21 @@ $(BUILD_DIR)/aot_entry.o: $(SRC_DIR)/runtime/aot_entry.c
 .PHONY: aot-entry
 aot-entry: $(BUILD_DIR)/aot_entry.o
 
+# --- aot_entry_dll.o — entry object for --output=dll ------------------------
+# Same compile knobs as aot_entry.o above (size + no async unwind), just a
+# different source file. Provides Rt_DllMain / Rt_DllExportDefault and the
+# closed-world stubs. See clua/src/runtime/aot_entry_dll.c for the shape.
+$(BUILD_DIR)/aot_entry_dll.o: $(SRC_DIR)/runtime/aot_entry_dll.c
+	$(CC) -std=c99 -I$(SRC_DIR) -I$(LUA_DIR) \
+	    -DCLUA_TARGET_WINDOWS_X64=1 -DLUA_COMPAT_5_3 \
+	    -Os -g0 -ffunction-sections -fno-asynchronous-unwind-tables \
+	    -fno-unwind-tables -fmerge-all-constants -fmerge-constants \
+	    -fstack-protector-strong -fcf-protection=none \
+	    $(DEPFLAGS) -c $< -o $@
+
+.PHONY: aot-entry-dll
+aot-entry-dll: $(BUILD_DIR)/aot_entry_dll.o
+
 # --- clua.exe — the user-facing toolchain front-end --------------------------
 # Same pipeline as aotc.exe (shared lc_drive in the plain obj/driver/main.o,
 # which has no main()), plus the subcommand CLI compiled standalone.
@@ -148,7 +163,7 @@ sysroot:
 # No headers ship: the ProtoInit blob killed the generated-C compile step, so
 # a user build is front-end + in-process codegen + ONE native link.
 .PHONY: dist
-dist: $(BUILD_DIR)/clua.exe $(BUILD_DIR)/rover.exe $(BUILD_DIR)/aot_entry.o
+dist: $(BUILD_DIR)/clua.exe $(BUILD_DIR)/rover.exe $(BUILD_DIR)/aot_entry.o $(BUILD_DIR)/aot_entry_dll.o
 	if not exist "$(ROOT)\dist\lib" mkdir "$(ROOT)\dist\lib"
 	powershell -NoProfile -ExecutionPolicy Bypass -File build/make-sysroot.ps1 -DestDir "$(ROOT)/dist/lib/sysroot"
 	copy /Y "$(BUILD_DIR)\clua.exe"            "$(ROOT)\dist\clua.exe" >nul
@@ -156,6 +171,7 @@ dist: $(BUILD_DIR)/clua.exe $(BUILD_DIR)/rover.exe $(BUILD_DIR)/aot_entry.o
 	copy /Y "$(BUILD_DIR)\runtime-aot.a"       "$(ROOT)\dist\lib\runtime-aot.a" >nul
 	copy /Y "$(BUILD_DIR)\liblua54-embedded.a" "$(ROOT)\dist\lib\liblua54-embedded.a" >nul
 	copy /Y "$(BUILD_DIR)\aot_entry.o"         "$(ROOT)\dist\lib\aot_entry.o" >nul
+	copy /Y "$(BUILD_DIR)\aot_entry_dll.o"     "$(ROOT)\dist\lib\aot_entry_dll.o" >nul
 	copy /Y "$(BUILD_DIR)\lvm_nointerp.o"      "$(ROOT)\dist\lib\lvm_nointerp.o" >nul
 	copy /Y "$(BUILD_DIR)\clua-rt.dll"         "$(ROOT)\dist\lib\clua-rt.dll" >nul
 	copy /Y "$(BUILD_DIR)\libclua-rt.dll.a"    "$(ROOT)\dist\lib\libclua-rt.dll.a" >nul

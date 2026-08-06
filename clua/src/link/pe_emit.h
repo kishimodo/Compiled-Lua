@@ -36,6 +36,12 @@
 
 #include <stddef.h>
 
+/* PE output subsystem. exe (default) shipped every build before this arc;
+   dll flips IMAGE_FILE_DLL, builds an export directory from `exports[]`, and
+   picks Rt_DllMain as the entry. Kept behind an enum in case a further kind
+   (sys, driver, etc.) is added later. */
+enum { LC_PE_OUTPUT_EXE = 0, LC_PE_OUTPUT_DLL = 1 };
+
 typedef struct LcPeLinkInputs {
     const char *const *objects;     /* explicit .o paths, loaded in order    */
     int                nobjects;
@@ -51,6 +57,14 @@ typedef struct LcPeLinkInputs {
                                        ** 0 (default) drops unreachable
                                        ** function/data sections like ld's
                                        ** --gc-sections.                      */
+    /* DLL output. Ignored when output_kind == LC_PE_OUTPUT_EXE. */
+    int                output_kind;     /* LC_PE_OUTPUT_EXE (default) or _DLL */
+    const char *const *export_names;    /* alphabetical is nice but not required;
+                                           the linker sorts before emit         */
+    int                nexport_names;
+    const char        *dll_module_name; /* the DLLName field in the export dir;
+                                           NULL falls back to the basename of
+                                           out_path                             */
 } LcPeLinkInputs;
 
 /* Link. Returns 1 on success, 0 + a message in err. */

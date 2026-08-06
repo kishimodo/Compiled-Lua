@@ -61,6 +61,11 @@ static void usage( FILE *to ) {
         "                          constant-key tables (real, but narrow).\n"
         "                   -Os and -Oz do not exist: they are rejected, not ignored.\n"
         "  -L <pkg>         force-bundle a package\n"
+        "  --output=<kind>  exe (default) or dll. dll produces a Windows DLL\n"
+        "                   exporting each function assigned into the module's\n"
+        "                   `_exports` table; default output name switches to\n"
+        "                   <input>.dll. See tests/differential/dll_output.lua.\n"
+        "  -shared          shorthand for --output=dll (matches gcc/link.exe).\n"
         "  --keep-temps     keep the intermediate object file\n"
         "  --shared-rt      link against the shared runtime (clua-rt.dll)\n"
         "                   instead of the static archives: ~30 KB exes for\n"
@@ -104,9 +109,11 @@ static void usage( FILE *to ) {
         "                   OPTIONAL -- the default internal linker needs none.\n" );
 }
 
-/* dir/app.lua -> "app.exe" (in the CWD), heap-allocated. */
-static char *derive_output( const char *input ) {
+/* dir/app.lua -> "app.exe" (or "app.dll" when kind == LC_OUTPUT_DLL), in the
+** CWD, heap-allocated. */
+static char *derive_output( const char *input, int kind ) {
     const char *base = input, *p, *dot;
+    const char *suffix = ( kind == LC_OUTPUT_DLL ) ? ".dll" : ".exe";
     size_t      n;
     char       *out;
 
@@ -118,7 +125,7 @@ static char *derive_output( const char *input ) {
     out = ( char * )malloc( n + 5 );
     if ( out == NULL ) return NULL;
     memcpy( out, base, n );
-    memcpy( out + n, ".exe", 5 );
+    memcpy( out + n, suffix, 5 );
     return out;
 }
 
@@ -171,6 +178,20 @@ static int parse_build_args( CluaArgs *a, int argc, char **argv, int from,
             }
         } else if ( strcmp( s, "--keep-temps" ) == 0 ) {
             a->opt.keep_temps = true;
+        } else if ( strcmp( s, "-shared" ) == 0 ) {
+            /* GCC-style shorthand for --output=dll. */
+            a->opt.output_kind = LC_OUTPUT_DLL;
+        } else if ( strncmp( s, "--output=", 9 ) == 0 ) {
+            const char *kind = s + 9;
+            if ( strcmp( kind, "exe" ) == 0 ) {
+                a->opt.output_kind = LC_OUTPUT_EXE;
+            } else if ( strcmp( kind, "dll" ) == 0 ) {
+                a->opt.output_kind = LC_OUTPUT_DLL;
+            } else {
+                fprintf( stderr, "clua: unknown --output kind '%s' "
+                                 "(supported: exe, dll; see `clua help`)\n", kind );
+                return 0;
+            }
         } else if ( strcmp( s, "--shared-rt" ) == 0 ) {
             a->opt.shared_rt = true;
         } else if ( strcmp( s, "--ld=internal" ) == 0 ) {
@@ -223,11 +244,13 @@ static int cmd_build( int argc, char **argv, int from ) {
     if ( !parse_build_args( &a, argc, argv, from, 0 ) ) return 2;
     /* Only synthesise an output path when a binary is actually going to be
     ** written. In pure-diagnostic mode (--emit=X with no -o, or --emit-only
-    ** without -o) the driver leaves opt.output NULL and skips linking. */
+    ** without -o) the driver leaves opt.output NULL and skips linking. When
+    ** the binary IS going to be written, the output kind (exe vs dll)
+    ** decides the suffix on the derived name. */
     if ( a.opt.output == NULL &&
          a.opt.emit_mode == LC_EMIT_NONE &&
          !a.opt.emit_only ) {
-        derived = derive_output( a.opt.input );
+        derived = derive_output( a.opt.input, a.opt.output_kind );
         if ( derived == NULL ) { fprintf( stderr, "clua: oom\n" ); return 1; }
         a.opt.output = derived;
     }
