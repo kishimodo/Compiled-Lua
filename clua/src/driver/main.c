@@ -293,6 +293,8 @@ int lc_drive( const LcDriverOptions *opt ) {
     RESOLVE_OPTS_T  ropts   = { 0 };
     RESOLVE_RESULT_T res    = { 0 };
     DIAG_OPTS_T     diag    = { 0 };
+    LC_DIAG_COLLECTOR_T collector;
+    LcDiagCollector_Init( &collector );
 
     paths.BasePath  = DirOf( opt->input, dirbuf, sizeof( dirbuf ) );
     paths.IncludeDirs = NULL;
@@ -303,12 +305,24 @@ int lc_drive( const LcDriverOptions *opt ) {
     diag.Warnings   = 0;  /* M0: skip the advisory lint pass */
     diag.Color      = 0;
     ropts.Diag      = &diag;
+    /* Multi-error collector: rather than stopping at the first failing
+       module, resolve keeps parsing every module and records each error.
+       We drain and print all of them before failing the build. */
+    ropts.DiagCollector = &collector;
 
     if ( !Resolve_Walk( opt->input, &ropts, &res ) ) {
-        fprintf( stderr, "aotc: error: resolve failed for '%s'\n", opt->input );
+        size_t n = LcDiagCollector_Drain( &collector, &diag );
+        if ( n > 0 ) {
+            fprintf( stderr,
+                     "aotc: error: %zu compile error(s); build aborted\n", n );
+        } else {
+            fprintf( stderr, "aotc: error: resolve failed for '%s'\n", opt->input );
+        }
+        LcDiagCollector_Free( &collector );
         Resolve_FreeResult( &res );
         return 1;
     }
+    LcDiagCollector_Free( &collector );
     if ( res.WarnCount > 0 ) {
         /* A dynamic require(var) can't be resolved in a closed world. */
         fprintf( stderr,

@@ -3,6 +3,7 @@
 #include "compiler/diag.h"
 #include "compiler/diag_pretty.h"
 #include "compiler/diag_suggest.h"
+#include "compiler/diag_collector.h"
 
 #include "lua.h"
 #include "lauxlib.h"
@@ -473,17 +474,24 @@ static void ScanProto( Proto *P, PSTR_LIST_T Out, size_t *Warned, PRESOLVE_RESUL
 static int RequiresOfSource( const char        *Path,
                              PSTR_LIST_T        Out,
                              size_t            *Warned,
-                             PRESOLVE_RESULT_T  Res ) {
+                             PRESOLVE_RESULT_T  Res,
+                             PRESOLVE_OPTS_T    Opts ) {
     lua_State *L  = luaL_newstate( );
     int        Rc = { 0 };
 
     if ( L == NULL ) { return 0; }
     Rc = luaL_loadfile( L, Path );
     if ( Rc != LUA_OK ) {
-        /* Route the located error through the rustc/clang-style printer so the
-           scan-phase failures render the same way as the up-front compile
-           failure (file:line:col + snippet + caret). */
-        Diag_PrintCompileError( Path, lua_tostring( L, -1 ), 0, NULL );
+        /* Route the located error through the collector when we have one so
+           the driver can drain every failing module's diagnostic at once;
+           otherwise print inline in the rustc/clang-style. */
+        const char *Err = lua_tostring( L, -1 );
+        if ( Opts != NULL && Opts->DiagCollector != NULL ) {
+            LcDiagCollector_Push( Opts->DiagCollector, Path,
+                                  Err ? Err : "(unknown error)" );
+        } else {
+            Diag_PrintCompileError( Path, Err, 0, NULL );
+        }
         lua_close( L );
         return 0;
     }
@@ -601,7 +609,24 @@ static void ForceLinkName( PRESOLVE_RESULT_T Out, STR_LIST_T *Queue, const char 
 }
 
 static void EmitCompileError( PRESOLVE_OPTS_T Opts, const char *Path, const char *ErrMsg ) {
+    /* Multi-error mode: record into the collector so the driver can drain
+       and print every module's failure at once. Legacy first-error mode
+       prints inline. */
+    if ( Opts != NULL && Opts->DiagCollector != NULL ) {
+        LcDiagCollector_Push( Opts->DiagCollector, Path,
+                              ErrMsg ? ErrMsg : "(unknown error)" );
+        return;
+    }
     Diag_PrintCompileError( Path, ErrMsg ? ErrMsg : "(unknown error)", 0, Opts->Diag );
+}
+
+/* Small helper: in collector mode we want the entry-module or a user-module
+   compile failure to be RECORDED but the walk to KEEP GOING so the user
+   sees every syntactically bad module in one report. Returns 1 when the
+   caller should keep going after a record, 0 when it should abort (legacy
+   mode: no collector attached). */
+static int Resolve_ShouldContinue( PRESOLVE_OPTS_T Opts ) {
+    return ( Opts != NULL && Opts->DiagCollector != NULL );
 }
 
 int Resolve_Walk( const char *EntryPath, PRESOLVE_OPTS_T Opts, PRESOLVE_RESULT_T Out ) {
@@ -616,20 +641,34 @@ int Resolve_Walk( const char *EntryPath, PRESOLVE_OPTS_T Opts, PRESOLVE_RESULT_T
     }
     memset( Out, 0, sizeof( *Out ) );
 
-    /* entry module compiled first; named "main" */
+    /* entry module compiled first; named "main". In collector mode a failure
+       here is recorded and we CONTINUE with a stubbed empty "main" so the
+       scan can walk what it can (there is none from a failed parse -- but
+       the queue processing below still runs, so any queued -L modules are
+       exercised for their own diagnostics). */
     if ( !LuaCompile_File( EntryPath, Opts->Strip, &C ) ) {
         EmitCompileError( Opts, EntryPath, C.ErrMsg );
         LuaCompile_FreeResult( &C );
-        return 0;
-    }
-    PushResolved( Out, "main", EntryPath, C.Bytes, C.BytesLen );
-    C.Bytes = NULL; /* ownership transferred */
-    LuaCompile_FreeResult( &C );
+        if ( !Resolve_ShouldContinue( Opts ) ) {
+            return 0;
+        }
+        /* Push a placeholder so downstream code that indexes Modules[0]
+           doesn't crash. The caller's non-zero DiagCollector count will
+           fail the build. */
+        PushResolved( Out, "main", EntryPath, NULL, 0 );
+    } else {
+        PushResolved( Out, "main", EntryPath, C.Bytes, C.BytesLen );
+        C.Bytes = NULL; /* ownership transferred */
+        LuaCompile_FreeResult( &C );
 
-    /* scan entry for require() targets */
-    if ( !RequiresOfSource( EntryPath, &Queue, &Warned, Out ) ) {
-        Resolve_FreeResult( Out );
-        return 0;
+        /* scan entry for require() targets (only when the parse succeeded --
+           a failed parse has no bytecode to scan) */
+        if ( !RequiresOfSource( EntryPath, &Queue, &Warned, Out, Opts ) ) {
+            if ( !Resolve_ShouldContinue( Opts ) ) {
+                Resolve_FreeResult( Out );
+                return 0;
+            }
+        }
     }
     /* Independent scan for the DLL export table on the ENTRY module only.
        The compiler pipeline plumbs the results down to the linker, which
@@ -667,7 +706,11 @@ int Resolve_Walk( const char *EntryPath, PRESOLVE_OPTS_T Opts, PRESOLVE_RESULT_T
                        just skip the transitive scan. */
                     continue;
                 }
-                if ( !RequiresOfSource( SrcPath, &Queue, &Warned, Out ) ) {
+                if ( !RequiresOfSource( SrcPath, &Queue, &Warned, Out, Opts ) ) {
+                    if ( Resolve_ShouldContinue( Opts ) ) {
+                        /* collector mode: record and keep going */
+                        continue;
+                    }
                     StrList_Free( &Queue );
                     StrList_Free( &Visited );
                     StrList_Free( &BuiltinDone );
@@ -688,6 +731,15 @@ int Resolve_Walk( const char *EntryPath, PRESOLVE_OPTS_T Opts, PRESOLVE_RESULT_T
             snprintf( Buf, sizeof( Buf ),
                       "cannot map module '%s' to a source path (searched include dirs, base path, package store)",
                       Name );
+            if ( Resolve_ShouldContinue( Opts ) ) {
+                /* Record as an entry-context error (no per-module source),
+                   then keep going so the user sees every unresolved module. */
+                LcDiagCollector_Push( Opts->DiagCollector,
+                                      EntryPath ? EntryPath : "<source>", Buf );
+                StrList_Push( &Visited, Name );
+                free( Name );
+                continue;
+            }
             LcDiag_PrintError( stderr, EntryPath ? EntryPath : "<source>",
                                0, 0, "error", Buf, NULL );
             free( Name );
@@ -701,8 +753,15 @@ int Resolve_Walk( const char *EntryPath, PRESOLVE_OPTS_T Opts, PRESOLVE_RESULT_T
         LUA_COMPILE_RESULT_T Ci = { 0 };
         if ( !LuaCompile_File( Path, Opts->Strip, &Ci ) ) {
             EmitCompileError( Opts, Path, Ci.ErrMsg );
-            free( Name );
             LuaCompile_FreeResult( &Ci );
+            if ( Resolve_ShouldContinue( Opts ) ) {
+                /* Mark the module visited so we don't re-attempt it if a
+                   later require in some sibling module re-queues it. */
+                StrList_Push( &Visited, Name );
+                free( Name );
+                continue;
+            }
+            free( Name );
             StrList_Free( &Queue );
             StrList_Free( &Visited );
             StrList_Free( &BuiltinDone );
@@ -715,13 +774,15 @@ int Resolve_Walk( const char *EntryPath, PRESOLVE_OPTS_T Opts, PRESOLVE_RESULT_T
         StrList_Push( &Visited, Name );
 
         /* scan the just-compiled module for further requires */
-        if ( !RequiresOfSource( Path, &Queue, &Warned, Out ) ) {
-            free( Name );
-            StrList_Free( &Queue );
-            StrList_Free( &Visited );
-            StrList_Free( &BuiltinDone );
-            Resolve_FreeResult( Out );
-            return 0;
+        if ( !RequiresOfSource( Path, &Queue, &Warned, Out, Opts ) ) {
+            if ( !Resolve_ShouldContinue( Opts ) ) {
+                free( Name );
+                StrList_Free( &Queue );
+                StrList_Free( &Visited );
+                StrList_Free( &BuiltinDone );
+                Resolve_FreeResult( Out );
+                return 0;
+            }
         }
         free( Name );
 
@@ -738,7 +799,8 @@ int Resolve_Walk( const char *EntryPath, PRESOLVE_OPTS_T Opts, PRESOLVE_RESULT_T
                 Progress = 1;
                 char SrcPath[ 512 ] = { 0 };
                 if ( !BuiltinNameToSourcePath( Pkg, SrcPath, sizeof( SrcPath ) ) ) continue;
-                if ( !RequiresOfSource( SrcPath, &Queue, &Warned, Out ) ) {
+                if ( !RequiresOfSource( SrcPath, &Queue, &Warned, Out, Opts ) ) {
+                    if ( Resolve_ShouldContinue( Opts ) ) { continue; }
                     StrList_Free( &Queue );
                     StrList_Free( &Visited );
                     StrList_Free( &BuiltinDone );
@@ -760,6 +822,13 @@ int Resolve_Walk( const char *EntryPath, PRESOLVE_OPTS_T Opts, PRESOLVE_RESULT_T
      * require worklist so the module set fed to the pool is complete. */
     Resolve_DiagUndefinedGlobals( EntryPath, Out );
 
+    /* Collector mode: the walk finished structurally but per-module compile
+       errors may have been recorded. Report failure so the driver can fail
+       the build after draining the collector. */
+    if ( Opts != NULL && Opts->DiagCollector != NULL &&
+         Opts->DiagCollector->Count > 0 ) {
+        return 0;
+    }
     return 1;
 }
 

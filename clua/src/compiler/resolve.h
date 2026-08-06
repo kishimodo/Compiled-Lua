@@ -11,6 +11,7 @@
 #include <stddef.h>
 #include "compiler/paths.h"
 #include "compiler/diag.h"
+#include "compiler/diag_collector.h"
 
 typedef struct _RESOLVED_MODULE {
     char          *Name;       /* malloc'd dotted module name */
@@ -72,6 +73,13 @@ typedef struct _RESOLVE_OPTS {
     /* Diagnostics options for rich compile-error formatting (color, etc.).
        NULL falls back to a plain located error. */
     const DIAG_OPTS_T *Diag;
+    /* Optional multi-error collector. When non-NULL, Resolve_Walk records
+       per-module compile failures into it and CONTINUES past the failing
+       module instead of returning after the first one. The caller drains
+       the list (LcDiagCollector_Drain) and decides how to fail. When NULL
+       the legacy first-error-wins behaviour is used: the failing error is
+       printed immediately via Diag_PrintCompileError and the walk aborts. */
+    PLC_DIAG_COLLECTOR_T DiagCollector;
 } RESOLVE_OPTS_T, *PRESOLVE_OPTS_T;
 
 int Resolve_Walk( const char *EntryPath, PRESOLVE_OPTS_T Opts, PRESOLVE_RESULT_T Out );

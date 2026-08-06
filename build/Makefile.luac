@@ -61,6 +61,7 @@ FRONTEND_OBJS := \
     $(BUILD_DIR)/obj/compiler/diag_suggest.o \
     $(BUILD_DIR)/obj/compiler/diag_hints.o \
     $(BUILD_DIR)/obj/compiler/diag_json.o \
+    $(BUILD_DIR)/obj/compiler/diag_collector.o \
     $(BUILD_DIR)/obj/compiler/warn_unused.o
 
 # Standalone driver main (with main()).

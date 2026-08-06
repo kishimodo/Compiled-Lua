@@ -23,12 +23,16 @@
 
 #include "aotc.h"
 #include "common/version.h"   /* CLUA_VERSION_STRING -- the single source of truth */
+#include "compiler/diag_pretty.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <process.h>   /* _getpid, _spawnv */
 #include <direct.h>    /* _getcwd (clua init project name) */
+#ifdef _WIN32
+#include <windows.h>   /* GetModuleFileNameA: exe-relative docs discovery */
+#endif
 
 #define CLUA_VERSION CLUA_VERSION_STRING
 
@@ -43,6 +47,8 @@ static void usage( FILE *to ) {
         "  clua check <main.lua>             front-end + closed-world check only\n"
         "  clua init [name]                  scaffold a project here (main.lua,\n"
         "                                    rover.toml, .gitignore)\n"
+        "  clua explain <code>               show the reference page for a\n"
+        "                                    diagnostic code (E001, W004, ...)\n"
         "  clua version                      print version\n"
         "  clua help                         this help\n"
         "\n"
@@ -123,7 +129,7 @@ static void usage( FILE *to ) {
         "                   Equivalent to setting CLUA_NO_CACHE=1.\n"
         "  --cache-dir=<path>\n"
         "                   override the default cache directory. Default is\n"
-        "                   %LOCALAPPDATA%\\clua\\cache (or\n"
+        "                   %%LOCALAPPDATA%%\\clua\\cache (or\n"
         "                   $XDG_CACHE_HOME/clua when set).\n"
         "  --emit-def=<path> / --emit-implib=<path>\n"
         "                   for DLL builds, write a .DEF module-definition\n"
@@ -288,6 +294,22 @@ static int parse_build_args( CluaArgs *a, int argc, char **argv, int from,
         } else if ( strncmp( s, "--cache-dir=", 12 ) == 0 ) {
             /* Override the default cache directory. */
             a->opt.cache_dir = s + 12;
+        } else if ( strncmp( s, "--color=", 8 ) == 0 ) {
+            LC_DIAG_COLOR_MODE_T mode;
+            if ( !LcDiag_ParseColorMode( s + 8, &mode ) ) {
+                fprintf( stderr, "clua: unknown --color '%s' "
+                                 "(expected: auto|always|never)\n", s + 8 );
+                return 0;
+            }
+            LcDiag_SetColorMode( mode );
+        } else if ( strncmp( s, "--diagnostics-format=", 21 ) == 0 ) {
+            LC_DIAG_FORMAT_T fmt;
+            if ( !LcDiag_ParseFormat( s + 21, &fmt ) ) {
+                fprintf( stderr, "clua: unknown --diagnostics-format '%s' "
+                                 "(expected: text|json)\n", s + 21 );
+                return 0;
+            }
+            LcDiag_SetFormat( fmt );
         } else if ( strcmp( s, "-v" ) == 0 || strcmp( s, "--verbose" ) == 0 ) {
             /* Per-phase wall-clock on stderr after the build. Off by default;
             ** the driver only samples QPC when the flag is set. NOTE: `clua
@@ -512,6 +534,132 @@ static int cmd_run( int argc, char **argv, int from ) {
     return rc;
 }
 
+/* Locate docs/errors/<code>.md in the toolchain layout. Discovery mirrors
+** Paths_BuiltinPackagesRoot so a dist install works from any CWD:
+**   1. CWD repo checkout      docs/errors
+**   2. exe-relative repo      <exedir>/../../docs/errors
+**   3. exe-relative dist      <exedir>/docs/errors, <exedir>/../docs/errors
+**   4. %CLUA_HOME%            <home>/docs/errors
+** Returns 1 with OutPath populated on success, 0 on miss. */
+static int probe_errors_file( const char *root, const char *sep,
+                              const char *code, char *out, size_t out_sz ) {
+    FILE *f;
+    int n = snprintf( out, out_sz, "%s%s%s.md", root, sep, code );
+    if ( n <= 0 || ( size_t )n >= out_sz ) return 0;
+    f = fopen( out, "rb" );
+    if ( f == NULL ) return 0;
+    fclose( f );
+    return 1;
+}
+
+static int find_error_doc( const char *code, char *out, size_t out_sz ) {
+    /* 1. CWD repo checkout */
+    if ( probe_errors_file( "docs/errors", "/", code, out, out_sz ) ) return 1;
+
+#ifdef _WIN32
+    /* 2 + 3. exe-relative */
+    {
+        char exe[ 512 ] = { 0 };
+        if ( GetModuleFileNameA( NULL, exe, sizeof( exe ) ) > 0 ) {
+            char *slash = strrchr( exe, '\\' );
+            if ( slash != NULL ) {
+                *slash = '\0';
+                static const char *rel[ 4 ] = {
+                    "\\..\\..\\docs\\errors",
+                    "\\docs\\errors",
+                    "\\..\\docs\\errors",
+                    "\\..\\share\\clua\\docs\\errors",
+                };
+                for ( int i = 0; i < 4; i++ ) {
+                    char root[ 700 ];
+                    int n = snprintf( root, sizeof( root ), "%s%s", exe, rel[ i ] );
+                    if ( n <= 0 || ( size_t )n >= sizeof( root ) ) continue;
+                    if ( probe_errors_file( root, "\\", code, out, out_sz ) )
+                        return 1;
+                }
+            }
+        }
+    }
+#endif
+
+    /* 4. CLUA_HOME */
+    {
+        const char *home = getenv( "CLUA_HOME" );
+        if ( home != NULL && home[ 0 ] != '\0' ) {
+            char root[ 700 ];
+            int n = snprintf( root, sizeof( root ), "%s\\docs\\errors", home );
+            if ( n > 0 && ( size_t )n < sizeof( root ) &&
+                 probe_errors_file( root, "\\", code, out, out_sz ) )
+                return 1;
+            n = snprintf( root, sizeof( root ), "%s/docs/errors", home );
+            if ( n > 0 && ( size_t )n < sizeof( root ) &&
+                 probe_errors_file( root, "/", code, out, out_sz ) )
+                return 1;
+        }
+    }
+    return 0;
+}
+
+/* `clua explain <code>` — print the reference page for a diagnostic code.
+** Accepts any case (E001, e001), rejects anything that doesn't look like a
+** code (letter + digits). Exits non-zero on missing/unknown code. */
+static int cmd_explain( int argc, char **argv, int from ) {
+    const char *raw;
+    char        code[ 32 ] = { 0 };
+    char        path[ 800 ] = { 0 };
+    size_t      i, len;
+    FILE       *f;
+    char        buf[ 4096 ];
+    size_t      n;
+
+    if ( from >= argc ) {
+        fprintf( stderr, "clua explain: missing code (e.g. `clua explain E001`; "
+                         "codes appear in the [E###] or [W###] bracket on\n"
+                         "diagnostic messages)\n" );
+        return 2;
+    }
+    raw = argv[ from ];
+    len = strlen( raw );
+    if ( len == 0 || len >= sizeof( code ) ) {
+        fprintf( stderr, "clua explain: invalid code '%s'\n", raw );
+        return 2;
+    }
+    /* Uppercase the letter; keep the digits. Reject anything that isn't a
+    ** single leading letter followed by digits. */
+    if ( !( ( raw[ 0 ] >= 'A' && raw[ 0 ] <= 'Z' ) ||
+            ( raw[ 0 ] >= 'a' && raw[ 0 ] <= 'z' ) ) ) {
+        fprintf( stderr, "clua explain: code must start with a letter "
+                         "(e.g. E001, W004); got '%s'\n", raw );
+        return 2;
+    }
+    code[ 0 ] = ( char )( ( raw[ 0 ] >= 'a' && raw[ 0 ] <= 'z' )
+                          ? raw[ 0 ] - ( 'a' - 'A' ) : raw[ 0 ] );
+    for ( i = 1; i < len; i++ ) {
+        if ( raw[ i ] < '0' || raw[ i ] > '9' ) {
+            fprintf( stderr, "clua explain: code must be a letter followed by "
+                             "digits (e.g. E001, W004); got '%s'\n", raw );
+            return 2;
+        }
+        code[ i ] = raw[ i ];
+    }
+    code[ len ] = '\0';
+
+    if ( !find_error_doc( code, path, sizeof( path ) ) ) {
+        fprintf( stderr, "clua explain: no explanation for code %s\n", code );
+        return 1;
+    }
+    f = fopen( path, "rb" );
+    if ( f == NULL ) {
+        fprintf( stderr, "clua explain: cannot open %s\n", path );
+        return 1;
+    }
+    while ( ( n = fread( buf, 1, sizeof( buf ), f ) ) > 0 ) {
+        fwrite( buf, 1, n, stdout );
+    }
+    fclose( f );
+    return 0;
+}
+
 int main( int argc, char **argv ) {
     const char *cmd;
 
@@ -522,6 +670,7 @@ int main( int argc, char **argv ) {
     if ( strcmp( cmd, "run" ) == 0 )     return cmd_run( argc, argv, 2 );
     if ( strcmp( cmd, "check" ) == 0 )   return cmd_check( argc, argv, 2 );
     if ( strcmp( cmd, "init" ) == 0 )    return cmd_init( argc, argv, 2 );
+    if ( strcmp( cmd, "explain" ) == 0 ) return cmd_explain( argc, argv, 2 );
     if ( strcmp( cmd, "version" ) == 0 || strcmp( cmd, "--version" ) == 0 ||
          strcmp( cmd, "-v" ) == 0 ) {
         printf( "clua " CLUA_VERSION " (Lua 5.4, x86-64 Windows)\n" );
