@@ -52,11 +52,17 @@ typedef enum {
 
 /* --output=<kind> selector. exe (default) matches every existing test; dll
 ** flips IMAGE_FILE_DLL, emits an export directory, and pulls aot_entry_dll.o
-** instead of aot_entry.o. Add more kinds (e.g. sys, driver) by extending the
-** enum plus the two switches in pe_link_v2.c / pe_emit.c that consume it. */
+** instead of aot_entry.o. `obj` and `lib` short-circuit the pipeline BEFORE
+** linking: `obj` publishes the codegen COFF as the final artifact, and `lib`
+** wraps that same COFF in a single-member GNU-form ar archive. Neither pulls
+** aot_entry / the runtime, and neither is affected by --shared-rt (there is no
+** link step to affect). Add more kinds (e.g. sys, driver) by extending the enum
+** plus the two switches in pe_link_v2.c / pe_emit.c that consume it. */
 typedef enum LcOutputKind {
   LC_OUTPUT_EXE = 0,
-  LC_OUTPUT_DLL = 1
+  LC_OUTPUT_DLL = 1,
+  LC_OUTPUT_OBJ = 2,
+  LC_OUTPUT_LIB = 3
 } LcOutputKind;
 
 typedef struct LcDriverOptions {

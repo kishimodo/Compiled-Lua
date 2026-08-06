@@ -61,10 +61,26 @@ static void usage( FILE *to ) {
         "                          constant-key tables (real, but narrow).\n"
         "                   -Os and -Oz do not exist: they are rejected, not ignored.\n"
         "  -L <pkg>         force-bundle a package\n"
-        "  --output=<kind>  exe (default) or dll. dll produces a Windows DLL\n"
-        "                   exporting each function assigned into the module's\n"
-        "                   `_exports` table; default output name switches to\n"
-        "                   <input>.dll. See tests/differential/dll_output.lua.\n"
+        "  --output=<kind>  one of exe (default), dll, obj, or lib:\n"
+        "                     exe  standard console PE (default)\n"
+        "                     dll  Windows DLL exporting each function assigned\n"
+        "                          into the module's `_exports` table; default\n"
+        "                          output name switches to <input>.dll. See\n"
+        "                          tests/differential/dll_output.lua.\n"
+        "                     obj  publishes the codegen COFF as the final\n"
+        "                          artifact and skips linking. Default name:\n"
+        "                          <input>.obj. Suitable for feeding into a\n"
+        "                          downstream linker (gcc/ld, MinGW, or MSVC).\n"
+        "                     lib  wraps that same COFF in a single-member\n"
+        "                          GNU-form ar archive (`.lib`, deterministic\n"
+        "                          headers). MinGW `ar`/`ld` consume it as-is;\n"
+        "                          MSVC `link.exe` wants a `.lib` with a second\n"
+        "                          linker member (round-trip through `lib.exe\n"
+        "                          /convert`, or use `--output=dll` with\n"
+        "                          `--emit-def=<path>`).\n"
+        "                   obj and lib skip aot_entry and the runtime archives,\n"
+        "                   so they are incompatible with --shared-rt (no link\n"
+        "                   step happens) and with `clua run` (nothing to run).\n"
         "  -shared          shorthand for --output=dll (matches gcc/link.exe).\n"
         "  --keep-temps     keep the intermediate object file\n"
         "  --shared-rt      link against the shared runtime (clua-rt.dll)\n"
@@ -117,13 +133,27 @@ static void usage( FILE *to ) {
         "                   OPTIONAL -- the default internal linker needs none.\n" );
 }
 
-/* dir/app.lua -> "app.exe" (or "app.dll" when kind == LC_OUTPUT_DLL), in the
-** CWD, heap-allocated. */
+/* dir/app.lua -> "app.<ext>" in the CWD, heap-allocated. Extension picked by
+** the output kind:
+**   LC_OUTPUT_EXE -> ".exe"
+**   LC_OUTPUT_DLL -> ".dll"
+**   LC_OUTPUT_OBJ -> ".obj"
+**   LC_OUTPUT_LIB -> ".lib"
+**
+** The .obj/.lib extensions match the Windows convention downstream toolchains
+** (link.exe, lib.exe, MinGW ld) reach for when consuming the artifact. */
 static char *derive_output( const char *input, int kind ) {
     const char *base = input, *p, *dot;
-    const char *suffix = ( kind == LC_OUTPUT_DLL ) ? ".dll" : ".exe";
+    const char *suffix;
     size_t      n;
     char       *out;
+
+    switch ( kind ) {
+        case LC_OUTPUT_DLL: suffix = ".dll"; break;
+        case LC_OUTPUT_OBJ: suffix = ".obj"; break;
+        case LC_OUTPUT_LIB: suffix = ".lib"; break;
+        default:            suffix = ".exe"; break;
+    }
 
     for ( p = input; *p; p++ ) {
         if ( *p == '/' || *p == '\\' ) base = p + 1;
@@ -195,9 +225,14 @@ static int parse_build_args( CluaArgs *a, int argc, char **argv, int from,
                 a->opt.output_kind = LC_OUTPUT_EXE;
             } else if ( strcmp( kind, "dll" ) == 0 ) {
                 a->opt.output_kind = LC_OUTPUT_DLL;
+            } else if ( strcmp( kind, "obj" ) == 0 ) {
+                a->opt.output_kind = LC_OUTPUT_OBJ;
+            } else if ( strcmp( kind, "lib" ) == 0 ) {
+                a->opt.output_kind = LC_OUTPUT_LIB;
             } else {
                 fprintf( stderr, "clua: unknown --output kind '%s' "
-                                 "(supported: exe, dll; see `clua help`)\n", kind );
+                                 "(supported: exe, dll, obj, lib; "
+                                 "see `clua help`)\n", kind );
                 return 0;
             }
         } else if ( strcmp( s, "--shared-rt" ) == 0 ) {
@@ -352,6 +387,19 @@ static int cmd_run( int argc, char **argv, int from ) {
     const char **child_argv;
 
     if ( !parse_build_args( &a, argc, argv, from, 1 ) ) return 2;
+
+    /* `clua run` compiles then executes the produced artifact. --output=obj /
+    ** --output=lib yield a COFF object / static archive respectively -- neither
+    ** is runnable on its own -- so reject the combination up front rather than
+    ** stage a temp file the child _spawnv could not launch. */
+    if ( a.opt.output_kind == LC_OUTPUT_OBJ ||
+         a.opt.output_kind == LC_OUTPUT_LIB ) {
+        fprintf( stderr, "clua: error: `clua run` is incompatible with "
+                         "--output=%s (nothing to run; use `clua build` to "
+                         "produce the artifact)\n",
+                 ( a.opt.output_kind == LC_OUTPUT_OBJ ) ? "obj" : "lib" );
+        return 2;
+    }
 
     tmpdir = getenv( "TEMP" );
     if ( tmpdir == NULL || tmpdir[0] == '\0' ) tmpdir = getenv( "TMP" );

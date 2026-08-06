@@ -21,6 +21,7 @@
 #include "../link/coff_write.h"
 #include "../link/pe_link_v2.h"
 #include "../link/import_lib.h"
+#include "../link/ar_write.h"
 
 #include "../compiler/resolve.h"
 #include "../compiler/paths.h"
@@ -152,6 +153,20 @@ int lc_drive( const LcDriverOptions *opt ) {
     ** default so byte-identity of every existing exe test is preserved. */
     int output_kind = opt->output_kind;
     if ( opt->emit_dll ) output_kind = LC_OUTPUT_DLL;
+
+    /* --output=obj / --output=lib skip linking entirely: the codegen COFF is
+    ** the artifact (obj), optionally wrapped in a GNU-form archive (lib). No
+    ** aot_entry, no runtime pull-in, so --shared-rt has nothing to swap.
+    ** Reject the combination rather than silently drop it -- the user asked
+    ** for two mutually exclusive things. */
+    if ( opt->shared_rt &&
+         ( output_kind == LC_OUTPUT_OBJ || output_kind == LC_OUTPUT_LIB ) ) {
+        fprintf( stderr, "clua: error: --shared-rt cannot be combined with "
+                         "--output=%s (no link happens; the shared runtime "
+                         "would have nowhere to be pulled in)\n",
+                 ( output_kind == LC_OUTPUT_OBJ ) ? "obj" : "lib" );
+        return 2;
+    }
 
     /* ---- 1. closed-world discovery (reused front-end) ---- */
     char            dirbuf[ 512 ] = { 0 };
@@ -420,6 +435,74 @@ int lc_drive( const LcDriverOptions *opt ) {
             goto cleanup;
         }
 
+        /* --output=obj / --output=lib: republish the staged COFF as the final
+        ** artifact and return before the native link. `obj` copies the COFF
+        ** to opt->output; `lib` wraps that same COFF in a single-member
+        ** GNU-form ar archive. Neither pulls the runtime or aot_entry.
+        **
+        ** Rationale for going through the staged temp path rather than writing
+        ** to opt->output directly: LcCoff_Write's temp path is on the same
+        ** volume as %TEMP%, so a rename would land cross-volume in the common
+        ** case; a byte-for-byte copy is simpler and keeps the "atomic COFF
+        ** write followed by promotion" shape symmetric across kinds. */
+        if ( output_kind == LC_OUTPUT_OBJ ) {
+            FILE   *in  = fopen( obj_path,   "rb" );
+            FILE   *out = NULL;
+            char    chunk[ 8192 ];
+            size_t  n;
+            int     copy_ok = 1;
+            if ( in == NULL ) {
+                fprintf( stderr, "aotc: error: cannot re-open staged obj '%s'\n",
+                         obj_path );
+                if ( !opt->keep_temps ) remove( obj_path );
+                goto cleanup;
+            }
+            out = fopen( opt->output, "wb" );
+            if ( out == NULL ) {
+                fprintf( stderr, "aotc: error: cannot open output '%s'\n",
+                         opt->output );
+                fclose( in );
+                if ( !opt->keep_temps ) remove( obj_path );
+                goto cleanup;
+            }
+            while ( ( n = fread( chunk, 1, sizeof( chunk ), in ) ) > 0 ) {
+                if ( fwrite( chunk, 1, n, out ) != n ) { copy_ok = 0; break; }
+            }
+            if ( ferror( in ) ) copy_ok = 0;
+            fflush( out );
+            if ( fclose( out ) != 0 ) copy_ok = 0;
+            fclose( in );
+            if ( !copy_ok ) {
+                fprintf( stderr, "aotc: error: copy to '%s' failed\n",
+                         opt->output );
+                if ( !opt->keep_temps ) remove( obj_path );
+                remove( opt->output );
+                goto cleanup;
+            }
+            if ( !opt->keep_temps ) remove( obj_path );
+            printf( "[+] %s (%zu module%s, %u function%s) -> %s\n",
+                    opt->input, res.Count, res.Count == 1 ? "" : "s",
+                    reach.count, reach.count == 1 ? "" : "s", opt->output );
+            rc = 0;
+            goto cleanup;
+        }
+        if ( output_kind == LC_OUTPUT_LIB ) {
+            char aerr[ 256 ] = { 0 };
+            if ( !LcArWrite_SingleMemberObject( obj_path, opt->output,
+                                                aerr, sizeof( aerr ) ) ) {
+                fprintf( stderr, "aotc: error: ar write failed: %s\n",
+                         aerr[0] ? aerr : "(unknown)" );
+                if ( !opt->keep_temps ) remove( obj_path );
+                goto cleanup;
+            }
+            if ( !opt->keep_temps ) remove( obj_path );
+            printf( "[+] %s (%zu module%s, %u function%s) -> %s\n",
+                    opt->input, res.Count, res.Count == 1 ? "" : "s",
+                    reach.count, reach.count == 1 ? "" : "s", opt->output );
+            rc = 0;
+            goto cleanup;
+        }
+
         /* Programs that never mention "debug" can't activate debug hooks, so
         ** their exes drop the bytecode interpreter (same conservative scan
         ** that gates the -O1 type proofs). Programs referencing ffi/bit get
@@ -520,7 +603,8 @@ static void usage( const char *argv0 ) {
     fprintf( stderr,
              "aotc (LuaC) — Lua 5.4 -> native Windows x64 PE\n"
              "usage: %s <main.lua> [-o output] [-O<n>] [-L <pkg>]... "
-             "[--shared-rt] [--output=exe|dll] [-shared] [--emit-def=<path>]\n",
+             "[--shared-rt] [--output=exe|dll|obj|lib] [-shared] "
+             "[--emit-def=<path>]\n",
              argv0 );
 }
 
@@ -560,9 +644,13 @@ int main( int argc, char **argv ) {
                 opt.output_kind = LC_OUTPUT_EXE;
             } else if ( strcmp( kind, "dll" ) == 0 ) {
                 opt.output_kind = LC_OUTPUT_DLL;
+            } else if ( strcmp( kind, "obj" ) == 0 ) {
+                opt.output_kind = LC_OUTPUT_OBJ;
+            } else if ( strcmp( kind, "lib" ) == 0 ) {
+                opt.output_kind = LC_OUTPUT_LIB;
             } else {
                 fprintf( stderr, "aotc: unknown --output kind '%s' "
-                                 "(supported: exe, dll)\n", kind );
+                                 "(supported: exe, dll, obj, lib)\n", kind );
                 return 2;
             }
         } else if ( strncmp( a, "--emit-def=", 11 ) == 0 ) {
@@ -626,7 +714,12 @@ int main( int argc, char **argv ) {
     if ( opt.output == NULL &&
          opt.emit_mode == LC_EMIT_NONE &&
          !opt.emit_only ) {
-        opt.output = ( opt.output_kind == LC_OUTPUT_DLL ) ? "out.dll" : "out.exe";
+        switch ( opt.output_kind ) {
+            case LC_OUTPUT_DLL: opt.output = "out.dll"; break;
+            case LC_OUTPUT_OBJ: opt.output = "out.o";   break;
+            case LC_OUTPUT_LIB: opt.output = "out.lib"; break;
+            default:            opt.output = "out.exe"; break;
+        }
     }
     if ( nforce > 0 ) {
         opt.force_pkgs  = force;
