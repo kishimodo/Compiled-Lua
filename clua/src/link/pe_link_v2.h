@@ -25,6 +25,34 @@
    caller may free its RESOLVED_EXPORT_T array immediately after the call. */
 struct _RESOLVED_EXPORT;   /* full type in compiler/resolve.h                */
 
+#include <stdint.h>
+
+/* Resource inputs handed to the linker to embed in an .rsrc PE section.
+** Every field is optional; a zero-initialised struct produces the pre-.rsrc
+** byte layout (no section, no data-directory entry). String fields are UTF-8
+** and NUL-terminated; any missing value gets a documented default (see
+** clua/src/link/rsrc_versioninfo.c). */
+typedef struct LuacRsrcInputs {
+    /* If nonzero, embed VS_VERSION_INFO built from these fields. */
+    int         want_versioninfo;
+    const char *product_name;         /* default "CLua Compiled Program"    */
+    const char *product_version;      /* default = derived from FileVersion */
+    const char *file_version;         /* default = CLUA_VERSION_STRING       */
+    const char *file_description;     /* default = product name              */
+    const char *company_name;         /* default empty                       */
+    const char *legal_copyright;      /* default empty                       */
+    const char *original_filename;    /* default = basename(out_path)         */
+
+    /* If nonzero, embed the default RT_MANIFEST unless manifest_xml is set. */
+    int            want_manifest;
+    const uint8_t *manifest_xml;      /* NULL = use default template         */
+    uint32_t       manifest_xml_len;
+
+    /* If nonzero, embed an application icon from raw .ico bytes. */
+    const uint8_t *icon_bytes;
+    uint32_t       icon_bytes_len;
+} LuacRsrcInputs;
+
 /* Link the program. Returns 1 on success, 0 + message in `err`.
 **   userObj   — the codegen COFF .o (luac_fn_<i> bodies + .rdata$L blob)
 **   outExe    — output PE path
@@ -66,6 +94,13 @@ struct _RESOLVED_EXPORT;   /* full type in compiler/resolve.h                */
 **               concrete type in compiler/resolve.h). NULL when there are no
 **               exports or output_kind != LC_OUTPUT_DLL.
 **   nexports   — number of entries in exports[].
+**   rsrc       — optional. When non-NULL and any of its `want_*` / icon fields
+**               is set, the internal linker emits a .rsrc section carrying the
+**               requested VS_VERSION_INFO / RT_MANIFEST / RT_ICON resources.
+**               NULL, or an all-zero struct, yields a resource-less output
+**               (byte-identical to the pre-.rsrc code path). Only honored by
+**               the internal linker; the gcc/ld path ignores it for now (needs
+**               windres to be genuinely useful).
 */
 int LuacLink_LinkProgram( const char *userObj, const char *outExe,
                           int no_interp, int require_ffi, int require_coro,
@@ -74,6 +109,7 @@ int LuacLink_LinkProgram( const char *userObj, const char *outExe,
                           int output_kind,
                           struct _RESOLVED_EXPORT *exports, size_t nexports,
                           int strip_mode,
+                          const LuacRsrcInputs *rsrc,
                           char *err, size_t errlen );
 
 /* Emit the .DEF module-definition file that describes a DLL build's exports.

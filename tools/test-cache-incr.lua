@@ -47,10 +47,13 @@ local WORK   = TEMP .. "\\clua-cache-incr"
 local CACHE  = WORK .. "\\cache"
 local CACHE2 = WORK .. "\\cache-alt"
 local FIX    = WORK .. "\\fixture.lua"
-local OUT1   = WORK .. "\\out-fresh.exe"
-local OUT2   = WORK .. "\\out-cached.exe"
-local OUT_NC1 = WORK .. "\\out-nc1.exe"
-local OUT_NC2 = WORK .. "\\out-nc2.exe"
+-- Byte-identity checks below reuse ONE output filename per pair: the .rsrc
+-- VS_VERSION_INFO block embeds OriginalFilename/InternalName derived from -o,
+-- so distinct filenames would make byte-identical builds look different.
+local OUT1   = WORK .. "\\out.exe"
+local OUT2   = WORK .. "\\out.exe"
+local OUT_NC1 = WORK .. "\\out-nc.exe"
+local OUT_NC2 = WORK .. "\\out-nc.exe"
 local OUT_ALT = WORK .. "\\out-alt.exe"
 
 os.execute('if not exist "' .. WORK .. '" mkdir "' .. WORK .. '" >nul 2>&1')
@@ -150,6 +153,9 @@ local ok_cold, t_cold = timed_build(OUT1, '--cache-dir="' .. CACHE .. '"')
 local cold_files = count_files(CACHE, "*.co")
 check(ok_cold and cold_files > 0,
       ("first build populates the cache (%d .co files created)"):format(cold_files))
+-- Save the cold build's bytes NOW; the warm build below writes to the same
+-- path, so we need to snapshot before it overwrites.
+local COLD_BYTES = slurp(OUT1)
 
 local ok_warm, t_warm = timed_build(OUT2, '--cache-dir="' .. CACHE .. '"')
 check(ok_warm, "second build succeeds against a populated cache")
@@ -177,10 +183,10 @@ check(timing_win or file_win,
 
 -- ---- 3. byte-identity across fresh and cached builds ------------------------
 -- The correctness invariant. If a cache hit ever produces different bytes,
--- the whole scheme is unsound. Compare the entire PE. (An unrelated
--- timestamp/nondeterminism would show up here too, but AOT output is
--- byte-reproducible today -- see docs/audits.)
-local a = slurp(OUT1)
+-- the whole scheme is unsound. Compare the entire PE. OUT1 == OUT2 by design
+-- so the .rsrc InternalName/OriginalFilename are identical; we slurped the
+-- cold build's bytes before the warm build overwrote the file.
+local a = COLD_BYTES
 local b = slurp(OUT2)
 check(a and b and #a == #b and a == b,
       ("fresh and cached builds produce byte-identical PEs (%d vs %d bytes)")

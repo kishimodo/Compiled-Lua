@@ -23,9 +23,11 @@
 */
 #include "link/pe_link_v2.h"
 #include "link/pe_emit.h"
+#include "link/rsrc_emit.h"       /* .rsrc content builders                 */
 #include "compiler/resolve.h"     /* RESOLVED_EXPORT_T */
 #include "link/import_lib.h"      /* LcEmit_DefFile / LcEmit_DeriveDefPath */
 #include "common/stdlib_libs.h"   /* LCLIB_* bits of the used-libs mask */
+#include "common/version.h"       /* CLUA_VERSION_STRING for default FileVersion */
 
 /* Kept in lock-step with LC_OUTPUT_EXE / LC_OUTPUT_DLL in driver/aotc.h.
    Not pulled through the include tree to avoid dragging the whole driver
@@ -365,6 +367,154 @@ static const char *kCrtArchives[] = {
 };
 #define N_CRT_ARCHIVES ( (int)( sizeof(kCrtArchives)/sizeof(kCrtArchives[0]) ) )
 
+/* Convert a CLUA_VERSION_STRING (semver, possibly with a `-prerelease` tail)
+** into a 4-part dot-delimited form suitable for VS_FIXEDFILEINFO. Missing
+** parts are padded with 0 -- so "0.3.0" -> "0.3.0.0" and "0.3.0-beta.4" ->
+** "0.3.0.4" (the trailing integer of the prerelease becomes the build). */
+static void DeriveFilVersion4( const char *ver, char out[ 32 ] ) {
+    unsigned v[ 4 ] = { 0, 0, 0, 0 };
+    int      i = 0;
+    const char *s = ver ? ver : "0.0.0.0";
+    while ( *s && i < 4 ) {
+        unsigned n = 0; int digs = 0;
+        while ( *s >= '0' && *s <= '9' ) { n = n * 10 + ( unsigned )( *s - '0' ); s++; digs++; }
+        if ( !digs ) { s++; continue; }
+        v[ i++ ] = n;
+        if ( *s == '.' || *s == '-' || *s == '+' ) { s++; continue; }
+        break;
+    }
+    snprintf( out, 32, "%u.%u.%u.%u", v[0], v[1], v[2], v[3] );
+}
+
+/* basename(path). Returns a pointer INTO `path` after the last / or \ */
+static const char *BaseName( const char *path ) {
+    const char *b = path, *p;
+    if ( path == NULL ) return "";
+    for ( p = path; *p; p++ ) if ( *p == '/' || *p == '\\' ) b = p + 1;
+    return b;
+}
+
+/* Build the VS_VERSION_INFO / RT_MANIFEST / RT_ICON blobs from a
+** LuacRsrcInputs snapshot. Populates the four ptr/len fields of
+** *rin_out (all-NULL for a resource-less build). The caller owns the
+** returned buffers and must free them after LcPe_Link returns. */
+typedef struct {
+    uint8_t *versioninfo;
+    uint32_t versioninfo_len;
+    uint8_t *manifest;
+    uint32_t manifest_len;
+    uint8_t *icon;
+    uint32_t icon_len;
+} LuacBuiltRsrc;
+
+static void FreeBuiltRsrc( LuacBuiltRsrc *b ) {
+    if ( !b ) return;
+    free( b->versioninfo ); free( b->manifest ); free( b->icon );
+    memset( b, 0, sizeof *b );
+}
+
+static int ReadFileAlloc( const char *path, uint8_t **out, uint32_t *out_len,
+                          char *err, size_t errlen ) {
+    FILE  *f;
+    long   sz;
+    if ( out ) *out = NULL;
+    if ( out_len ) *out_len = 0;
+    f = fopen( path, "rb" );
+    if ( f == NULL ) {
+        set_errv( err, errlen, "cannot open '%s'", path );
+        return 0;
+    }
+    if ( fseek( f, 0, SEEK_END ) != 0 || ( sz = ftell( f ) ) < 0 ||
+         fseek( f, 0, SEEK_SET ) != 0 ) {
+        fclose( f );
+        set_errv( err, errlen, "cannot size '%s'", path );
+        return 0;
+    }
+    uint8_t *buf = ( uint8_t * )malloc( sz ? ( size_t )sz : 1 );
+    if ( buf == NULL ) { fclose( f ); set_errv( err, errlen, "oom" ); return 0; }
+    if ( sz > 0 && fread( buf, 1, ( size_t )sz, f ) != ( size_t )sz ) {
+        free( buf ); fclose( f );
+        set_errv( err, errlen, "cannot read '%s'", path );
+        return 0;
+    }
+    fclose( f );
+    *out = buf;
+    *out_len = ( uint32_t )sz;
+    return 1;
+}
+
+static int BuildRsrc( const LuacRsrcInputs *in, const char *out_path,
+                      LuacBuiltRsrc *b, char *err, size_t errlen ) {
+    char rsrc_err[ 256 ];
+    memset( b, 0, sizeof *b );
+    if ( in == NULL ) return 1;   /* pure zero-init behaviour */
+    if ( in->want_versioninfo ) {
+        char        fv[ 32 ];
+        const char *fv_str = in->file_version;
+        char        derived[ 32 ];
+        if ( fv_str == NULL || fv_str[0] == '\0' ) {
+            DeriveFilVersion4( CLUA_VERSION_STRING, derived );
+            fv_str = derived;
+        } else {
+            DeriveFilVersion4( fv_str, fv );
+            fv_str = fv;
+        }
+        const char *pv_str = in->product_version;
+        char        pvbuf[ 32 ];
+        if ( pv_str == NULL || pv_str[0] == '\0' ) pv_str = fv_str;
+        else { DeriveFilVersion4( pv_str, pvbuf ); pv_str = pvbuf; }
+        const char *base = BaseName( out_path );
+        const char *orig = ( in->original_filename && in->original_filename[0] )
+                         ? in->original_filename : base;
+        uint8_t *vi = NULL; size_t vlen = 0;
+        if ( !LcRsrc_BuildVersionInfo(
+                fv_str, pv_str,
+                ( in->product_name && in->product_name[0] ) ? in->product_name
+                                                             : "CLua Compiled Program",
+                in->file_description,
+                ( in->company_name    ? in->company_name    : "" ),
+                ( in->legal_copyright ? in->legal_copyright : "" ),
+                orig,                                 /* InternalName == basename */
+                orig,                                 /* OriginalFilename         */
+                0x0409, 0x04B0,
+                &vi, &vlen, rsrc_err, sizeof rsrc_err ) ) {
+            set_errv( err, errlen, "rsrc: %s", rsrc_err );
+            FreeBuiltRsrc( b );
+            return 0;
+        }
+        b->versioninfo = vi;
+        b->versioninfo_len = ( uint32_t )vlen;
+    }
+    if ( in->want_manifest ) {
+        const uint8_t *xml = in->manifest_xml;
+        uint32_t       xlen = in->manifest_xml_len;
+        const char    *def_xml = NULL;
+        size_t         def_xlen = 0;
+        if ( xml == NULL || xlen == 0 ) {
+            LcRsrc_DefaultManifest( &def_xml, &def_xlen );
+            xml = ( const uint8_t * )def_xml;
+            xlen = ( uint32_t )def_xlen;
+        }
+        uint8_t *mf = NULL; size_t mlen = 0;
+        if ( !LcRsrc_BuildManifest( xml, xlen, &mf, &mlen,
+                                    rsrc_err, sizeof rsrc_err ) ) {
+            set_errv( err, errlen, "rsrc: %s", rsrc_err );
+            FreeBuiltRsrc( b );
+            return 0;
+        }
+        b->manifest = mf;
+        b->manifest_len = ( uint32_t )mlen;
+    }
+    if ( in->icon_bytes && in->icon_bytes_len ) {
+        uint8_t *ic = ( uint8_t * )malloc( in->icon_bytes_len );
+        if ( ic == NULL ) { set_errv( err, errlen, "oom" ); FreeBuiltRsrc( b ); return 0; }
+        memcpy( ic, in->icon_bytes, in->icon_bytes_len );
+        b->icon = ic;
+        b->icon_len = in->icon_bytes_len;
+    }
+    return 1;
+}
+
 /* Link the program with the built-in COFF->PE64 linker (no gcc). */
 static int LinkInternal( const LcToolchain *tc, const char *userObj,
                          const char *outExe, const char *entry_obj,
@@ -375,6 +525,7 @@ static int LinkInternal( const LcToolchain *tc, const char *userObj,
                          const char *const *export_abi_shapes,
                          int nexport_names,
                          int strip_mode,
+                         const LuacBuiltRsrc *rsrc,
                          char *err, size_t errlen ) {
     char  objbuf[ 6 ][ LC_PATH_MAX ];
     char  arcbuf[ N_CRT_ARCHIVES + 2 ][ LC_PATH_MAX ];
@@ -453,6 +604,15 @@ static int LinkInternal( const LcToolchain *tc, const char *userObj,
     in.dll_module_name    = NULL; /* default: basename of out_path            */
     in.strip_mode         = strip_mode;
 
+    if ( rsrc ) {
+        in.rsrc_versioninfo     = rsrc->versioninfo;
+        in.rsrc_versioninfo_len = rsrc->versioninfo_len;
+        in.rsrc_manifest        = rsrc->manifest;
+        in.rsrc_manifest_len    = rsrc->manifest_len;
+        in.rsrc_icon            = rsrc->icon;
+        in.rsrc_icon_len        = rsrc->icon_len;
+    }
+
     return LcPe_Link( &in, err, errlen );
 }
 
@@ -463,6 +623,7 @@ int LuacLink_LinkProgram( const char *userObj, const char *outExe,
                           int output_kind,
                           struct _RESOLVED_EXPORT *exports, size_t nexports,
                           int strip_mode,
+                          const LuacRsrcInputs *rsrc,
                           char *err, size_t errlen ) {
     char        cmd[ 4096 ];
     char        staged_out[ MAX_PATH ];
@@ -603,7 +764,17 @@ int LuacLink_LinkProgram( const char *userObj, const char *outExe,
     ** The built-in COFF->PE64 linker against the CRT sysroot — no gcc/ld.
     ** Static link only (shared_rt stays on the gcc path). */
     if ( use_internal && !shared_rt ) {
+        LuacBuiltRsrc built; memset( &built, 0, sizeof built );
         if ( !MakeStagedOutput( outExe, staged_out, err, errlen ) ) {
+            free( export_name_ptrs );
+            free( export_shape_ptrs );
+            return 0;
+        }
+        /* Build the resource blobs from the caller's descriptor (may be
+        ** NULL for a resource-less build). Uses outExe (the final path) to
+        ** derive default OriginalFilename / InternalName. */
+        if ( !BuildRsrc( rsrc, outExe, &built, err, errlen ) ) {
+            DeleteFileA( staged_out );
             free( export_name_ptrs );
             free( export_shape_ptrs );
             return 0;
@@ -614,12 +785,15 @@ int LuacLink_LinkProgram( const char *userObj, const char *outExe,
                             output_kind, export_name_ptrs, export_shape_ptrs,
                             nexport_name_ptrs,
                             strip_mode,
+                            &built,
                             err, errlen ) ) {
+            FreeBuiltRsrc( &built );
             DeleteFileA( staged_out );
             free( export_name_ptrs );
             free( export_shape_ptrs );
             return 0;
         }
+        FreeBuiltRsrc( &built );
         free( export_name_ptrs );
         free( export_shape_ptrs );
         return PublishStagedOutput( staged_out, outExe, err, errlen );

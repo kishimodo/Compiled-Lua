@@ -23,6 +23,7 @@
 #include "../link/pe_link_v2.h"
 #include "../link/import_lib.h"
 #include "../link/ar_write.h"
+#include "../common/version.h"    /* CLUA_VERSION_STRING */
 
 #include "../compiler/resolve.h"
 #include "../compiler/paths.h"
@@ -846,6 +847,84 @@ int lc_drive( const LcDriverOptions *opt ) {
             goto cleanup;
         }
 
+        /* Resource inputs: load the user's manifest / icon files from disk
+        ** if paths were supplied. Byte buffers live for the duration of the
+        ** link call and are freed right after. */
+        LuacRsrcInputs rsrc; memset( &rsrc, 0, sizeof rsrc );
+        uint8_t *manifest_buf = NULL; uint32_t manifest_len = 0;
+        uint8_t *icon_buf     = NULL; uint32_t icon_len     = 0;
+        int      rsrc_ok = 1;
+
+        rsrc.want_versioninfo = ( output_kind != LC_OUTPUT_OBJ &&
+                                  output_kind != LC_OUTPUT_LIB ) &&
+                                opt->emit_versioninfo ? 1 : 0;
+        rsrc.want_manifest    = ( output_kind == LC_OUTPUT_EXE ) &&
+                                opt->emit_manifest ? 1 : 0;
+        rsrc.product_name     = opt->product_name;
+        rsrc.product_version  = opt->product_version;
+        rsrc.file_version     = CLUA_VERSION_STRING;   /* single source of truth */
+        rsrc.file_description = opt->file_description;
+        rsrc.company_name     = opt->company_name;
+        rsrc.legal_copyright  = opt->legal_copyright;
+        rsrc.original_filename = NULL;    /* defaults to basename(out_path)     */
+
+        if ( opt->manifest_path && opt->manifest_path[0] ) {
+            FILE *mf = fopen( opt->manifest_path, "rb" );
+            if ( mf == NULL ) {
+                fprintf( stderr, "aotc: error: cannot open --manifest '%s'\n",
+                         opt->manifest_path );
+                rsrc_ok = 0;
+            } else {
+                fseek( mf, 0, SEEK_END );
+                long msz = ftell( mf );
+                fseek( mf, 0, SEEK_SET );
+                if ( msz < 0 ) msz = 0;
+                manifest_buf = ( uint8_t * )malloc( msz ? ( size_t )msz : 1 );
+                if ( manifest_buf == NULL ) { fclose( mf ); rsrc_ok = 0; }
+                else if ( msz > 0 && fread( manifest_buf, 1, ( size_t )msz, mf ) != ( size_t )msz ) {
+                    fclose( mf ); free( manifest_buf ); manifest_buf = NULL; rsrc_ok = 0;
+                    fprintf( stderr, "aotc: error: short read on --manifest '%s'\n",
+                             opt->manifest_path );
+                } else {
+                    fclose( mf );
+                    manifest_len = ( uint32_t )msz;
+                    rsrc.want_manifest = 1;
+                    rsrc.manifest_xml = manifest_buf;
+                    rsrc.manifest_xml_len = manifest_len;
+                }
+            }
+        }
+        if ( rsrc_ok && opt->icon_path && opt->icon_path[0] ) {
+            FILE *icf = fopen( opt->icon_path, "rb" );
+            if ( icf == NULL ) {
+                fprintf( stderr, "aotc: error: cannot open --icon '%s'\n",
+                         opt->icon_path );
+                rsrc_ok = 0;
+            } else {
+                fseek( icf, 0, SEEK_END );
+                long isz = ftell( icf );
+                fseek( icf, 0, SEEK_SET );
+                if ( isz < 0 ) isz = 0;
+                icon_buf = ( uint8_t * )malloc( isz ? ( size_t )isz : 1 );
+                if ( icon_buf == NULL ) { fclose( icf ); rsrc_ok = 0; }
+                else if ( isz > 0 && fread( icon_buf, 1, ( size_t )isz, icf ) != ( size_t )isz ) {
+                    fclose( icf ); free( icon_buf ); icon_buf = NULL; rsrc_ok = 0;
+                    fprintf( stderr, "aotc: error: short read on --icon '%s'\n",
+                             opt->icon_path );
+                } else {
+                    fclose( icf );
+                    icon_len = ( uint32_t )isz;
+                    rsrc.icon_bytes = icon_buf;
+                    rsrc.icon_bytes_len = icon_len;
+                }
+            }
+        }
+        if ( !rsrc_ok ) {
+            free( manifest_buf ); free( icon_buf );
+            if ( !opt->keep_temps ) remove( obj_path );
+            goto cleanup;
+        }
+
         /* Programs that never mention "debug" can't activate debug hooks, so
         ** their exes drop the bytecode interpreter (same conservative scan
         ** that gates the -O1 type proofs). Programs referencing ffi/bit get
@@ -872,12 +951,15 @@ int lc_drive( const LcDriverOptions *opt ) {
                                     output_kind,
                                     res.Exports, res.ExportCount,
                                     effective_strip,
+                                    &rsrc,
                                     err, sizeof( err ) ) ) {
             fprintf( stderr, "aotc: error: link failed: %s\n",
                      err[0] ? err : "(unknown)" );
+            free( manifest_buf ); free( icon_buf );
             if ( !opt->keep_temps ) remove( obj_path );
             goto cleanup;
         }
+        free( manifest_buf ); free( icon_buf );
         if ( !opt->keep_temps ) remove( obj_path );
 
         /* DLL builds: emit a .DEF module-definition file next to the .dll so
@@ -1061,6 +1143,12 @@ int main( int raw_argc, char **raw_argv ) {
     memset( &opt, 0, sizeof( opt ) );
     opt.opt_level = 0;
     opt.ld_internal = -1;          /* env (CLUA_LD) decides unless flagged */
+    /* .rsrc defaults: emit VS_VERSION_INFO + RT_MANIFEST by default so the
+    ** produced exe carries a populated "Details" tab and a Win10/11 manifest
+    ** without any user opt-in. --no-versioninfo / --no-manifest / -icon flags
+    ** below let the caller override. */
+    opt.emit_versioninfo = true;
+    opt.emit_manifest    = true;
 
     for ( i = 1; i < argc; i++ ) {
         const char *a = argv[ i ];
@@ -1201,6 +1289,24 @@ int main( int raw_argc, char **raw_argv ) {
             ** unknown category and prints its own diagnostic; keep going so
             ** the rest of the command line still parses. */
             ( void )LcWarn_ParseFlag( &opt.warn, a + 2 );
+        } else if ( strncmp( a, "--product-name=", 15 ) == 0 ) {
+            opt.product_name = a + 15;
+        } else if ( strncmp( a, "--product-version=", 18 ) == 0 ) {
+            opt.product_version = a + 18;
+        } else if ( strncmp( a, "--file-description=", 19 ) == 0 ) {
+            opt.file_description = a + 19;
+        } else if ( strncmp( a, "--company-name=", 15 ) == 0 ) {
+            opt.company_name = a + 15;
+        } else if ( strncmp( a, "--copyright=", 12 ) == 0 ) {
+            opt.legal_copyright = a + 12;
+        } else if ( strncmp( a, "--manifest=", 11 ) == 0 ) {
+            opt.manifest_path = a + 11;
+        } else if ( strncmp( a, "--icon=", 7 ) == 0 ) {
+            opt.icon_path = a + 7;
+        } else if ( strcmp( a, "--no-versioninfo" ) == 0 ) {
+            opt.emit_versioninfo = false;
+        } else if ( strcmp( a, "--no-manifest" ) == 0 ) {
+            opt.emit_manifest = false;
         } else if ( a[0] != '-' && opt.input == NULL ) {
             opt.input = a;
         } else {

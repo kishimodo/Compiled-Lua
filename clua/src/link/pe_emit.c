@@ -17,6 +17,7 @@
 #include "link/pe_emit.h"
 #include "link/coff_read.h"
 #include "link/ar_read.h"
+#include "link/rsrc_emit.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,6 +32,7 @@
 
 #define DIR_EXPORT     0
 #define DIR_IMPORT     1
+#define DIR_RESOURCE   2
 #define DIR_EXCEPTION  3
 #define DIR_BASERELOC  5
 #define DIR_TLS        9
@@ -78,7 +80,7 @@ static void w64( uint8_t *p, uint64_t v ) { w32(p,(uint32_t)v); w32(p+4,(uint32_
 ** (an ALLOC section from an object) is appended into one of these, recording
 ** its assigned offset so relocations can be resolved later. */
 enum { OS_TEXT, OS_RDATA, OS_DATA, OS_PDATA, OS_XDATA, OS_BSS,
-       OS_TLS, OS_IDATA, OS_RELOC, OS_CLUALN, OS_COUNT };
+       OS_TLS, OS_IDATA, OS_RSRC, OS_RELOC, OS_CLUALN, OS_COUNT };
 
 typedef struct {
     const char *name;
@@ -228,6 +230,16 @@ typedef struct {
     int          nexport_names;
     char        *dll_module_name;         /* value written into the export
                                              directory Name field             */
+
+    /* Resource inputs owned by the caller of LcPe_Link; copied by pointer at
+    ** setup time and re-read once during .rsrc build. NULL for a resource-less
+    ** build (the default; byte-identical to the pre-.rsrc path). */
+    const uint8_t *rsrc_versioninfo;
+    uint32_t       rsrc_versioninfo_len;
+    const uint8_t *rsrc_manifest;
+    uint32_t       rsrc_manifest_len;
+    const uint8_t *rsrc_icon;
+    uint32_t       rsrc_icon_len;
 
     char        err[512];
 } Linker;
@@ -1375,9 +1387,12 @@ static int layout_sections( Linker *L ) {
     /* stable sort: decorate with original index */
     /* simple insertion-stable approach: copy, sort with index tiebreak */
     for ( i = 0; i < OS_COUNT; i++ ) {
+        /* Order MUST match the OS_* enumeration (OS_TEXT, OS_RDATA, OS_DATA,
+        ** OS_PDATA, OS_XDATA, OS_BSS, OS_TLS, OS_IDATA, OS_RSRC, OS_RELOC,
+        ** OS_CLUALN). Missing / mismatched entries yield unnamed sections. */
         static const char *names[OS_COUNT] = {
             ".text", ".rdata", ".data", ".pdata", ".xdata", ".bss",
-            ".tls", ".idata", ".reloc", ".clualn" };
+            ".tls", ".idata", ".rsrc", ".reloc", ".clualn" };
         static const uint32_t chars[OS_COUNT] = {
             LC_IMAGE_SCN_CNT_CODE|LC_IMAGE_SCN_MEM_EXECUTE|LC_IMAGE_SCN_MEM_READ,
             LC_IMAGE_SCN_CNT_INITIALIZED_DATA|LC_IMAGE_SCN_MEM_READ,
@@ -1387,6 +1402,10 @@ static int layout_sections( Linker *L ) {
             LC_IMAGE_SCN_CNT_UNINIT_DATA|LC_IMAGE_SCN_MEM_READ|LC_IMAGE_SCN_MEM_WRITE,
             LC_IMAGE_SCN_CNT_INITIALIZED_DATA|LC_IMAGE_SCN_MEM_READ|LC_IMAGE_SCN_MEM_WRITE,
             LC_IMAGE_SCN_CNT_INITIALIZED_DATA|LC_IMAGE_SCN_MEM_READ|LC_IMAGE_SCN_MEM_WRITE,
+            /* .rsrc: initialized read-only data. The Windows loader consults
+            ** the RESOURCE data directory whenever code calls FindResource /
+            ** LoadResource / VerQueryValue. */
+            LC_IMAGE_SCN_CNT_INITIALIZED_DATA|LC_IMAGE_SCN_MEM_READ,
             LC_IMAGE_SCN_CNT_INITIALIZED_DATA|LC_IMAGE_SCN_MEM_READ|LC_IMAGE_SCN_MEM_DISCARDABLE,
             /* .clualn: read-only + discardable so runtime loaders may drop it
             ** from memory; a Lua-side post-mortem tool reads it from the PE
@@ -1927,7 +1946,8 @@ static uint32_t align_up( uint32_t v, uint32_t a ) { return ( v + a - 1 ) & ~( a
 ** must remain last so place_reloc_section can find the end of everything
 ** else. Empty when -g was not passed -- os_emitted skips zero-length slots. */
 static const int kSecOrder[] = { OS_TEXT, OS_RDATA, OS_DATA, OS_PDATA, OS_XDATA,
-                                 OS_IDATA, OS_TLS, OS_BSS, OS_CLUALN, OS_RELOC };
+                                 OS_IDATA, OS_TLS, OS_BSS, OS_CLUALN, OS_RSRC,
+                                 OS_RELOC };
 #define N_SECORDER ( (int)( sizeof(kSecOrder)/sizeof(kSecOrder[0]) ) )
 
 /* A section appears in the image only if it has nonzero virtual size. Empty
@@ -2403,6 +2423,243 @@ static int build_reloc_section( Linker *L ) {
 }
 
 /* ===================================================================
+** .rsrc section synthesis.
+**
+** The section carries a three-level resource tree
+** (Type -> Name -> Language -> DataEntry) plus the raw payloads. Because
+** each IMAGE_RESOURCE_DATA_ENTRY.OffsetToData is stored as an RVA (not a
+** section-relative offset), the tree contents depend on the .rsrc RVA --
+** which assign_rvas only knows after every earlier section is placed.
+**
+** We handle this with a two-shot build:
+**   1. `build_rsrc_section_prep` runs BEFORE assign_rvas with rsrc_rva=0
+**      just to determine the section's raw byte length; that length is
+**      handed to assign_rvas via OS_RSRC's virt_size/raw.
+**   2. `build_rsrc_section_finalize` runs AFTER assign_rvas with the true
+**      RVA and rewrites OS_RSRC.raw in place. Layout is deterministic and
+**      independent of the RVA, so the two builds produce buffers of the
+**      same size and the in-place rewrite is safe.
+=================================================================== */
+
+/* Split a raw .ico file into (group icon dir, per-icon payload list). Returns
+** 1 on success; malloc'd arrays are handed to the caller (freed at end of
+** LcPe_Link via linker_free-like release inside the .rsrc build call site).
+**
+** ico layout:
+**   ICONDIR    { Reserved:2, Type:2, Count:2 }
+**   ICONDIRENTRY[Count] { Width:1, Height:1, ColorCount:1, Reserved:1,
+**                        Planes:2, BitCount:2, BytesInRes:4, ImageOffset:4 }
+**   <ImageOffset bytes at each entry point to a DIB (or a PNG) blob>
+**
+** RT_GROUP_ICON stores the same header + entries but the last field is a
+** 2-byte icon resource id (wOrdinal) that names an RT_ICON child resource
+** carrying the DIB/PNG bytes. */
+typedef struct {
+    uint8_t *group_dir;      /* GRPICONDIR bytes (6 + count*14)              */
+    uint32_t group_dir_len;
+    uint8_t **icons;         /* per-icon raw DIB/PNG payload copies           */
+    uint32_t *icon_lens;
+    uint32_t  nicons;
+} IcoSplit;
+
+static void ico_split_free( IcoSplit *s ) {
+    uint32_t i;
+    if ( !s ) return;
+    free( s->group_dir );
+    if ( s->icons ) for ( i = 0; i < s->nicons; i++ ) free( s->icons[i] );
+    free( s->icons );
+    free( s->icon_lens );
+    memset( s, 0, sizeof *s );
+}
+
+static int ico_split_parse( const uint8_t *ico, uint32_t ico_len, IcoSplit *s,
+                            char *err, size_t errlen ) {
+    memset( s, 0, sizeof *s );
+    if ( ico == NULL || ico_len < 6 ) {
+        if ( err && errlen ) snprintf( err, errlen, "icon: too short" );
+        return 0;
+    }
+    uint16_t type  = ( uint16_t )( ico[2] | ( ico[3] << 8 ) );
+    uint16_t count = ( uint16_t )( ico[4] | ( ico[5] << 8 ) );
+    if ( type != 1 ) {
+        if ( err && errlen ) snprintf( err, errlen, "icon: not an .ico (Type=%u)", type );
+        return 0;
+    }
+    if ( count == 0 || count > 256 ) {
+        if ( err && errlen ) snprintf( err, errlen, "icon: silly count %u", count );
+        return 0;
+    }
+    if ( 6u + ( uint32_t )count * 16u > ico_len ) {
+        if ( err && errlen ) snprintf( err, errlen, "icon: dir out of range" );
+        return 0;
+    }
+    /* Group icon dir: 6 header bytes + 14 bytes per entry */
+    uint32_t gdir_len = 6u + ( uint32_t )count * 14u;
+    s->group_dir = ( uint8_t * )malloc( gdir_len );
+    s->icons     = ( uint8_t ** )calloc( count, sizeof( uint8_t * ) );
+    s->icon_lens = ( uint32_t * )calloc( count, sizeof( uint32_t ) );
+    if ( !s->group_dir || !s->icons || !s->icon_lens ) {
+        ico_split_free( s );
+        if ( err && errlen ) snprintf( err, errlen, "icon: oom" );
+        return 0;
+    }
+    s->group_dir[0] = 0;    s->group_dir[1] = 0;   /* Reserved */
+    s->group_dir[2] = ( uint8_t )( type & 0xFF );
+    s->group_dir[3] = ( uint8_t )( type >> 8 );
+    s->group_dir[4] = ( uint8_t )( count & 0xFF );
+    s->group_dir[5] = ( uint8_t )( count >> 8 );
+    s->group_dir_len = gdir_len;
+    s->nicons = count;
+    /* Fill per-entry: copy first 12 bytes (Width..BytesInRes) then write the
+    ** wOrdinal in place of ImageOffset. RT_ICON resource ids start at 1. */
+    for ( uint32_t i = 0; i < count; i++ ) {
+        const uint8_t *ent = ico + 6 + i * 16;
+        uint32_t offset =
+            ( uint32_t )ent[12] | ( ( uint32_t )ent[13] << 8 ) |
+            ( ( uint32_t )ent[14] << 16 ) | ( ( uint32_t )ent[15] << 24 );
+        uint32_t sz =
+            ( uint32_t )ent[ 8] | ( ( uint32_t )ent[ 9] << 8 ) |
+            ( ( uint32_t )ent[10] << 16 ) | ( ( uint32_t )ent[11] << 24 );
+        if ( offset > ico_len || sz > ico_len - offset ) {
+            ico_split_free( s );
+            if ( err && errlen ) snprintf( err, errlen, "icon: entry %u out of range", i );
+            return 0;
+        }
+        uint8_t *gent = s->group_dir + 6 + i * 14;
+        memcpy( gent, ent, 12 );
+        uint16_t ord = ( uint16_t )( i + 1 );
+        gent[12] = ( uint8_t )( ord & 0xFF );
+        gent[13] = ( uint8_t )( ord >> 8 );
+        s->icons[i]     = ( uint8_t * )malloc( sz ? sz : 1 );
+        s->icon_lens[i] = sz;
+        if ( !s->icons[i] ) {
+            ico_split_free( s );
+            if ( err && errlen ) snprintf( err, errlen, "icon: oom" );
+            return 0;
+        }
+        memcpy( s->icons[i], ico + offset, sz );
+    }
+    return 1;
+}
+
+/* Collect the resource-entry table from the linker's rsrc_* fields. `s` is
+** filled with the parsed icon split (may be zeroed if no icon). `entries`
+** is allocated with room for up to 2 + max icon count entries. Returns 1
+** on success; on error the caller must free ico via ico_split_free. */
+static int build_rsrc_entries( Linker *L, IcoSplit *ico_out,
+                               LcRsrcEntry **entries_out, size_t *nentries_out ) {
+    size_t maxent = 2;   /* version + manifest */
+    if ( L->rsrc_icon && L->rsrc_icon_len ) {
+        /* pre-parse to get the icon count */
+        if ( !ico_split_parse( L->rsrc_icon, L->rsrc_icon_len, ico_out,
+                               L->err, sizeof L->err ) ) return 0;
+        maxent += 1u + ( size_t )ico_out->nicons;   /* GROUP_ICON + N * ICON */
+    }
+    LcRsrcEntry *e = ( LcRsrcEntry * )calloc( maxent ? maxent : 1,
+                                              sizeof( LcRsrcEntry ) );
+    if ( !e ) {
+        ico_split_free( ico_out );
+        lerr( L, "oom (rsrc entries)", NULL );
+        return 0;
+    }
+    size_t n = 0;
+    if ( L->rsrc_versioninfo && L->rsrc_versioninfo_len ) {
+        e[n].type_id = LC_RT_VERSION;
+        e[n].name_id = 1;
+        e[n].lang_id = 0x0409;
+        e[n].data    = L->rsrc_versioninfo;
+        e[n].size    = L->rsrc_versioninfo_len;
+        n++;
+    }
+    if ( L->rsrc_manifest && L->rsrc_manifest_len ) {
+        e[n].type_id = LC_RT_MANIFEST;
+        e[n].name_id = 1;   /* CREATEPROCESS_MANIFEST_RESOURCE_ID */
+        e[n].lang_id = 0x0409;
+        e[n].data    = L->rsrc_manifest;
+        e[n].size    = L->rsrc_manifest_len;
+        n++;
+    }
+    if ( L->rsrc_icon && L->rsrc_icon_len ) {
+        e[n].type_id = LC_RT_GROUP_ICON;
+        e[n].name_id = 1;
+        e[n].lang_id = 0x0409;
+        e[n].data    = ico_out->group_dir;
+        e[n].size    = ico_out->group_dir_len;
+        n++;
+        for ( uint32_t i = 0; i < ico_out->nicons; i++ ) {
+            e[n].type_id = LC_RT_ICON;
+            e[n].name_id = ( uint16_t )( i + 1 );
+            e[n].lang_id = 0x0409;
+            e[n].data    = ico_out->icons[i];
+            e[n].size    = ico_out->icon_lens[i];
+            n++;
+        }
+    }
+    *entries_out = e;
+    *nentries_out = n;
+    return 1;
+}
+
+/* True if any resource input was provided; caller uses this to short-circuit
+** every .rsrc pass when the exe has no resources. */
+static int rsrc_present( const Linker *L ) {
+    return ( L->rsrc_versioninfo && L->rsrc_versioninfo_len )
+        || ( L->rsrc_manifest    && L->rsrc_manifest_len )
+        || ( L->rsrc_icon        && L->rsrc_icon_len );
+}
+
+/* Pre-build the .rsrc section content at RVA 0 to size OS_RSRC before
+** assign_rvas runs. The bytes are provisional; they will be overwritten
+** in build_rsrc_section_finalize once the real RVA is known. */
+static int build_rsrc_section_prep( Linker *L ) {
+    if ( !rsrc_present( L ) ) return 1;
+    IcoSplit    ico; memset( &ico, 0, sizeof ico );
+    LcRsrcEntry *e = NULL;
+    size_t       n = 0;
+    if ( !build_rsrc_entries( L, &ico, &e, &n ) ) return 0;
+    uint8_t *bytes = NULL;
+    size_t   blen = 0;
+    if ( !LcRsrc_Build( e, n, 0, &bytes, &blen, L->err, sizeof L->err ) ) {
+        free( e ); ico_split_free( &ico );
+        return 0;
+    }
+    OutSec *os = &L->out[OS_RSRC];
+    /* Replace any prior raw (defensive; first call from empty). */
+    free( os->raw.p );
+    os->raw.p = bytes; os->raw.len = blen; os->raw.cap = blen;
+    os->virt_size = ( uint32_t )blen;
+    os->present = blen ? 1 : 0;
+    free( e ); ico_split_free( &ico );
+    return 1;
+}
+
+/* Rebuild the .rsrc bytes now that OS_RSRC.rva is known. Size is stable, so
+** the buffer is reused in place. */
+static int build_rsrc_section_finalize( Linker *L ) {
+    if ( !rsrc_present( L ) ) return 1;
+    IcoSplit    ico; memset( &ico, 0, sizeof ico );
+    LcRsrcEntry *e = NULL;
+    size_t       n = 0;
+    if ( !build_rsrc_entries( L, &ico, &e, &n ) ) return 0;
+    uint8_t *bytes = NULL;
+    size_t   blen = 0;
+    if ( !LcRsrc_Build( e, n, L->out[OS_RSRC].rva, &bytes, &blen,
+                        L->err, sizeof L->err ) ) {
+        free( e ); ico_split_free( &ico );
+        return 0;
+    }
+    OutSec *os = &L->out[OS_RSRC];
+    if ( blen != os->raw.len ) {
+        /* Should never happen; keep loud if it does. */
+        free( bytes ); free( e ); ico_split_free( &ico );
+        return lerr( L, "rsrc: size drift between prep and finalize", NULL );
+    }
+    memcpy( os->raw.p, bytes, blen );
+    free( bytes ); free( e ); ico_split_free( &ico );
+    return 1;
+}
+
+/* ===================================================================
 ** Final PE emission. Counts the present sections, lays the headers, then
 ** writes section headers + raw data at FILE_ALIGN offsets.
 =================================================================== */
@@ -2584,6 +2841,12 @@ static int emit_pe( Linker *L, const char *out_path, ImportLayout *il,
             w32( oh + 112 + DIR_EXCEPTION*8 + 0, L->out[OS_PDATA].rva );
             w32( oh + 112 + DIR_EXCEPTION*8 + 4, L->out[OS_PDATA].virt_size );
         }
+        /* Resource directory. The RVA/size pair points at the .rsrc section's
+        ** IMAGE_RESOURCE_DIRECTORY (which sits at offset 0 in the section). */
+        if ( L->out[OS_RSRC].present ) {
+            w32( oh + 112 + DIR_RESOURCE*8 + 0, L->out[OS_RSRC].rva );
+            w32( oh + 112 + DIR_RESOURCE*8 + 4, L->out[OS_RSRC].virt_size );
+        }
         /* TLS directory: _tls_used points at the IMAGE_TLS_DIRECTORY64 (0x28
         ** bytes) the mingw CRT builds. Without this, TLS callbacks / __tls_*
         ** init never run and TLS-using startup faults. */
@@ -2702,6 +2965,17 @@ int LcPe_Link( const LcPeLinkInputs *in, char *err, size_t errlen ) {
                                              ** to decide whether the user
                                              ** object's .clualn survives. */
     L.output_kind = in->output_kind;
+
+    /* Resource inputs: borrow the caller's buffers by pointer for use during
+    ** the .rsrc build pass. They are read exactly once, after all other
+    ** sections are laid out, so the caller may free them the moment
+    ** LcPe_Link returns. */
+    L.rsrc_versioninfo     = in->rsrc_versioninfo;
+    L.rsrc_versioninfo_len = in->rsrc_versioninfo_len;
+    L.rsrc_manifest        = in->rsrc_manifest;
+    L.rsrc_manifest_len    = in->rsrc_manifest_len;
+    L.rsrc_icon            = in->rsrc_icon;
+    L.rsrc_icon_len        = in->rsrc_icon_len;
 
     /* DLL: copy the export-name list into linker-owned storage now so the
     ** later emit passes can rely on it (and sort it) without touching the
@@ -2838,6 +3112,13 @@ int LcPe_Link( const LcPeLinkInputs *in, char *err, size_t errlen ) {
         snprintf( err, errlen, "%s", L.err ); goto out;
     }
 
+    /* Pre-build the .rsrc section content at RVA 0 so OS_RSRC has its virt/raw
+    ** size before assign_rvas allocates addresses. Real bytes get rewritten in
+    ** build_rsrc_section_finalize below once the RVA is known. */
+    if ( !build_rsrc_section_prep( &L ) ) {
+        snprintf( err, errlen, "%s", L.err ); goto out;
+    }
+
     /* headers size depends on the final section count. .reloc is built later
     ** (it needs RVAs), so predict whether it will exist: any ADDR64 site
     ** produces a base relocation. Reserve its header slot up front so the
@@ -2861,6 +3142,13 @@ int LcPe_Link( const LcPeLinkInputs *in, char *err, size_t errlen ) {
 
     /* assign RVAs / file offsets */
     assign_rvas( &L, sizeof_headers );
+
+    /* Rewrite the .rsrc bytes with the true section RVA now that assign_rvas
+    ** has placed OS_RSRC. Size is stable across the two builds (layout is
+    ** deterministic and RVA-independent), so the in-place rewrite is safe. */
+    if ( !build_rsrc_section_finalize( &L ) ) {
+        snprintf( err, errlen, "%s", L.err ); goto out;
+    }
 
     /* resolve every symbol address */
     if ( !resolve_addrs( &L, &il ) ) { snprintf( err, errlen, "%s", L.err ); goto out; }

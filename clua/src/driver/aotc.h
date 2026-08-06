@@ -157,6 +157,27 @@ typedef struct LcDriverOptions {
                                 default to STRIP_NONE if -g / debug_line_info
                                 was requested, so the emitted .clualn is not
                                 immediately stripped again. */
+
+  /* --------------------------------------------------------------------- */
+  /*  .rsrc section content: VS_VERSION_INFO, RT_MANIFEST, RT_GROUP_ICON.  */
+  /*                                                                       */
+  /*  When any of these is non-default, the internal linker emits an       */
+  /*  .rsrc section carrying the requested resources so Windows populates  */
+  /*  the file's "Details" tab, applies the manifest at load, and shows a  */
+  /*  custom icon in Explorer. Defaults keep the pre-.rsrc byte-shape:     */
+  /*  emit_versioninfo / emit_manifest default to TRUE for exe builds      */
+  /*  (see main.c / clua_main.c), but the caller-side driver structs are   */
+  /*  zero-initialised, so an explicit `--no-versioninfo` / `--no-manifest`*/
+  /*  is not needed to keep old byte layouts in the general case.          */
+  bool         emit_versioninfo;    /* embed VS_VERSION_INFO                   */
+  bool         emit_manifest;       /* embed RT_MANIFEST                       */
+  const char  *product_name;        /* --product-name=<str>                    */
+  const char  *product_version;     /* --product-version=<str>                 */
+  const char  *file_description;    /* --file-description=<str>                */
+  const char  *company_name;        /* --company-name=<str>                    */
+  const char  *legal_copyright;     /* --copyright=<str>                       */
+  const char  *manifest_path;       /* --manifest=<path>: user-supplied XML    */
+  const char  *icon_path;           /* --icon=<path>: .ico embedded            */
 } LcDriverOptions;
 
 /* Returns process exit code. */

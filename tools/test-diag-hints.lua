@@ -84,7 +84,7 @@ check("bad_operator",
 --    not a runtime type error, so the hint fires from the parser message.
 check("const_reassign",
   "local x <const> = 1\nx = 2\n",
-  "<const> attribute")
+  "cannot be reassigned")
 
 -- 5) SCOPE / goto across a local. `goto L; local x; ::L::` triggers
 --    `jumps into the scope of local 'x'` at compile time. The hint text

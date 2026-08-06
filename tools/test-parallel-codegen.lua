@@ -50,8 +50,12 @@ os.execute('if not exist "' .. TMP .. '" mkdir "' .. TMP .. '" >nul 2>&1')
 
 local JOB_COUNTS = { 1, 4, 8 }
 
+-- SAME output filename per -j run: the .rsrc VS_VERSION_INFO
+-- (OriginalFilename/InternalName) is derived from -o, so a per-jobs filename
+-- would make byte-identical builds look different. compile() slurps the file
+-- into a fresh string right after each build; the string outlives the file.
 local function compile(jobs)
-  local exe = TMP .. "\\rover-j" .. jobs .. ".exe"
+  local exe = TMP .. "\\rover-out.exe"
   os.remove(exe)
   -- -O1 rather than the clua default -O2 because -O2 today is byte-identical
   -- to -O1 (the level 2 passes are stubs, per docs/plan-0.3.0-beta.2.md), and

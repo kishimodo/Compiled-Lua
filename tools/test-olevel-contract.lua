@@ -109,8 +109,12 @@ end
 -- ---- 2. supported levels still work --------------------------------------
 
 local bytes = {}
+-- SAME output filename per level: the .rsrc VS_VERSION_INFO block embeds
+-- InternalName / OriginalFilename derived from the -o path, so a per-level
+-- filename would make identical builds look byte-different. Copy the slurped
+-- bytes out before the next compile overwrites the file.
+local out = TMP .. "\\ok.exe"
 for _, lvl in ipairs({ "-O0", "-O1", "-O2", "-O3", "-O" }) do
-  local out = TMP .. "\\ok" .. lvl:gsub("-", "") .. ".exe"
   os.remove(out)
   local code, txt = run('"' .. CLUA .. '" build "' .. SRC .. '" ' .. lvl
                         .. ' -o "' .. out .. '"')
@@ -120,8 +124,8 @@ for _, lvl in ipairs({ "-O0", "-O1", "-O2", "-O3", "-O" }) do
     bytes[lvl] = slurp(out)
     if not bytes[lvl] then fail("no executable produced for %s", lvl) end
   end
-  os.remove(out)
 end
+os.remove(out)
 
 -- bare -O must mean -O1, not "some level"
 if bytes["-O"] and bytes["-O1"] and bytes["-O"] ~= bytes["-O1"] then

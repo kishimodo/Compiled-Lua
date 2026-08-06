@@ -66,15 +66,16 @@ end
 
 -- ---- build twice: quiet, then instrumented -------------------------------
 
-local QUIET = TMP .. "\\quiet.exe"
-local DEBUG = TMP .. "\\debug.exe"
+-- Reuse ONE output filename so the .rsrc VS_VERSION_INFO
+-- (OriginalFilename / InternalName) is byte-identical; slurp the quiet build
+-- BEFORE the instrumented build overwrites the file.
+local OUT = TMP .. "\\out.exe"
 
-local quiet_out = sh('"' .. CLUA .. '" build "' .. SRC .. '" -O1 -o "' .. QUIET .. '"')
+local quiet_out = sh('"' .. CLUA .. '" build "' .. SRC .. '" -O1 -o "' .. OUT .. '"')
+local quiet_bytes = slurp(OUT)
 local debug_out = sh('set "CLUA_GC_DEBUG=1" && "' .. CLUA .. '" build "' .. SRC
-                     .. '" -O1 -o "' .. DEBUG .. '"')
-
-local quiet_bytes = slurp(QUIET)
-local debug_bytes = slurp(DEBUG)
+                     .. '" -O1 -o "' .. OUT .. '"')
+local debug_bytes = slurp(OUT)
 
 if not quiet_bytes then fail("quiet build produced no executable: %s", quiet_out) end
 if not debug_bytes then fail("instrumented build produced no executable: %s", debug_out) end

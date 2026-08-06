@@ -35,6 +35,7 @@
 #define LUAC_LINK_PE_EMIT_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 /* PE output subsystem. exe (default) shipped every build before this arc;
    dll flips IMAGE_FILE_DLL, builds an export directory from `exports[]`, and
@@ -93,6 +94,18 @@ typedef struct LcPeLinkInputs {
     int                strip_mode;      /* LC_PE_STRIP_ALL (default) /
                                            _DEBUG / _NONE. Threaded from the
                                            driver's --strip=<mode>.             */
+
+    /* .rsrc content. When any of these is non-NULL/nonzero, an .rsrc section
+    ** is emitted and the PE RESOURCE data directory populated. All three are
+    ** optional; passing all NULL leaves the exe resource-less (byte-identical
+    ** to the pre-.rsrc output). Bytes are OWNED BY THE CALLER; the linker
+    ** reads them during build and does not free them.                        */
+    const uint8_t     *rsrc_versioninfo;      /* VS_VERSION_INFO blob         */
+    uint32_t           rsrc_versioninfo_len;
+    const uint8_t     *rsrc_manifest;         /* RT_MANIFEST XML payload       */
+    uint32_t           rsrc_manifest_len;
+    const uint8_t     *rsrc_icon;             /* raw .ico file bytes           */
+    uint32_t           rsrc_icon_len;
 } LcPeLinkInputs;
 
 /* Link. Returns 1 on success, 0 + a message in err. */

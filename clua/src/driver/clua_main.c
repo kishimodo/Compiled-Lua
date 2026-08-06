@@ -176,6 +176,26 @@ static void usage( FILE *to ) {
         "                   response file: its whitespace-separated tokens\n"
         "                   are spliced into argv at that position (one level\n"
         "                   deep; nested @ is left as a literal token).\n"
+        "  --product-name=<str>\n"
+        "                   ProductName in the embedded VS_VERSION_INFO. Default\n"
+        "                   \"CLua Compiled Program\".\n"
+        "  --product-version=<str>\n"
+        "                   ProductVersion in VS_VERSION_INFO. Default = the\n"
+        "                   CLua version (CLUA_VERSION_STRING).\n"
+        "  --file-description=<str>\n"
+        "                   FileDescription. Default = product name.\n"
+        "  --company-name=<str>\n"
+        "                   CompanyName. Default empty.\n"
+        "  --copyright=<str>\n"
+        "                   LegalCopyright. Default empty.\n"
+        "  --manifest=<path>\n"
+        "                   Embed <path> as the RT_MANIFEST resource. Overrides\n"
+        "                   the default Win10/11 manifest.\n"
+        "  --icon=<path>    Embed <path> (.ico file) as RT_GROUP_ICON + RT_ICON.\n"
+        "                   Default is no custom icon (Windows uses its generic\n"
+        "                   console-app icon in Explorer).\n"
+        "  --no-versioninfo suppress the default VS_VERSION_INFO resource.\n"
+        "  --no-manifest    suppress the default RT_MANIFEST resource.\n"
         "\n"
         "environment:\n"
         "  CLUA_HOME        CLua installation root (lib\\runtime-aot.a ...)\n"
@@ -261,6 +281,12 @@ static int parse_build_args( CluaArgs *a, int argc, char **argv, int from,
                                                 ** default is 2 for forward compatibility, and usage()
                                                 ** says so per level rather than implying work happens. */
     a->opt.ld_internal = -1;                    /* env (CLUA_LD) decides   */
+    /* .rsrc defaults: emit VS_VERSION_INFO + RT_MANIFEST on by default. Both
+    ** cost ~2-3 KB total but give the resulting exe a populated File Explorer
+    ** "Details" tab, a Win10/11-tagged manifest, and PerMonitorV2 DPI /
+    ** UTF-8 active code page. --no-versioninfo / --no-manifest turn them off. */
+    a->opt.emit_versioninfo = true;
+    a->opt.emit_manifest    = true;
 
     for ( i = from; i < argc; i++ ) {
         const char *s = argv[ i ];
@@ -395,6 +421,24 @@ static int parse_build_args( CluaArgs *a, int argc, char **argv, int from,
             ** parsing so the rest of the command line is still processed
             ** rather than aborting the build on a lint typo. */
             ( void )LcWarn_ParseFlag( &a->opt.warn, s + 2 );
+        } else if ( strncmp( s, "--product-name=", 15 ) == 0 ) {
+            a->opt.product_name = s + 15;
+        } else if ( strncmp( s, "--product-version=", 18 ) == 0 ) {
+            a->opt.product_version = s + 18;
+        } else if ( strncmp( s, "--file-description=", 19 ) == 0 ) {
+            a->opt.file_description = s + 19;
+        } else if ( strncmp( s, "--company-name=", 15 ) == 0 ) {
+            a->opt.company_name = s + 15;
+        } else if ( strncmp( s, "--copyright=", 12 ) == 0 ) {
+            a->opt.legal_copyright = s + 12;
+        } else if ( strncmp( s, "--manifest=", 11 ) == 0 ) {
+            a->opt.manifest_path = s + 11;
+        } else if ( strncmp( s, "--icon=", 7 ) == 0 ) {
+            a->opt.icon_path = s + 7;
+        } else if ( strcmp( s, "--no-versioninfo" ) == 0 ) {
+            a->opt.emit_versioninfo = false;
+        } else if ( strcmp( s, "--no-manifest" ) == 0 ) {
+            a->opt.emit_manifest = false;
         } else if ( s[0] != '-' && a->opt.input == NULL ) {
             a->opt.input = s;
         } else {
