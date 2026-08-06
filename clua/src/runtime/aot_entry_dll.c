@@ -147,10 +147,9 @@ static BOOL CALLBACK ModuleInitCb( PINIT_ONCE O, PVOID P, PVOID *C ) {
 static lua_State *g_L         = NULL;   /* the DLL's Lua state              */
 static int        g_ExportsRef = LUA_NOREF; /* registry ref -> _exports tbl */
 
-/* Sorted export names table, populated after the module chunk runs; the
-   dispatcher below indexes into it by ordinal. Declared here (forward)
-   because Rt_ModuleFini frees it. Definition + description near
-   Rt_DllExportDispatch. */
+/* Sorted export names, populated after the module chunk runs. Forward-
+   declared here because Rt_ModuleFini frees them; definition is near
+   Rt_DllExportDispatch where the dispatcher reads them. */
 static const char **g_ExportNames;
 static int          g_ExportCount;
 
@@ -254,7 +253,9 @@ static void Rt_ModuleFini( void ) {
    captured `_exports` table and sorts the keys with the same comparator
    the linker used (byte-order strcmp on the C strings) so ordinal N here
    maps to the same name as AddressOfFunctions[N] in the export table. */
-/* Definition (forward-declared near the top for Rt_ModuleFini). */
+/* Definition (forward-declared near g_L for Rt_ModuleFini). Tentative-
+   definition merge in C: the top forward-decl and this initialized definition
+   collapse to one object. */
 static const char **g_ExportNames = NULL;
 static int          g_ExportCount = 0;
 
