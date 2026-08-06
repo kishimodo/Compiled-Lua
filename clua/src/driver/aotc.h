@@ -115,13 +115,13 @@ typedef struct LcDriverOptions {
   bool         verbose;      /* -v / --verbose: per-phase wall-clock timings
                                 on stderr at the end of the build. Off = zero
                                 overhead (QPC only runs when set).            */
-  LcWarnFlags  warn;         /* -W / -Wno- / -Wall / -Werror[=cat]. Parsed by
-                                the -W token handler in main.c / clua_main.c
-                                before the fall-through to unknown-arg. When
-                                a category is set, the driver runs the
-                                matching scanner after the front end; a
-                                promoted (per-cat or -Werror-all) hit becomes
-                                a hard error and a non-zero exit.            */
+  LcWarnFlags  warn;         /* -W / -Wno- / -Wall / -Werror[=cat]. When a
+                                category is set, the driver runs the matching
+                                scanner after the front end; a promoted hit
+                                becomes a hard error.                        */
+  bool         debug_line_info; /* -g / --debug: emit a .clualn (native-off ->
+                                Lua source line) section for post-mortem
+                                tooling. Off by default; adds bytes.         */
 } LcDriverOptions;
 
 /* Returns process exit code. */

@@ -92,6 +92,27 @@ static int fail( char *err, size_t errlen, const char *msg ) {
     return 0;
 }
 
+/* ---- serialize one function's -g line-info rows into the on-disk .clualn
+** payload described in codegen.h. The producer (codegen.c) already writes
+** rows in emit order, which is monotone in native_off, so the section body
+** is naturally sorted for a decoder to bisect. ---- */
+static int clualn_emit( Buf *b, const LcCompiledFunc *fn ) {
+    const char *sp   = fn->source_path ? fn->source_path : "";
+    unsigned    slen = ( unsigned )strlen( sp );
+    unsigned    nlen = ( unsigned )strlen( fn->name );
+    unsigned    k;
+    if ( !put32( b, nlen ) )                     return 0;
+    if ( nlen && !putn( b, fn->name, nlen ) )    return 0;
+    if ( !put32( b, slen ) )                     return 0;
+    if ( slen && !putn( b, sp, slen ) )          return 0;
+    if ( !put32( b, fn->nlinfo ) )               return 0;
+    for ( k = 0; k < fn->nlinfo; k++ ) {
+        if ( !put32( b, fn->linfo[k].native_off ) ) return 0;
+        if ( !put32( b, fn->linfo[k].lua_line ) )   return 0;
+    }
+    return 1;
+}
+
 int LcCoff_Write( const char *path, const LcCodeModule *cm, char *err, size_t errlen ) {
     unsigned i, s;
     size_t   r;
@@ -102,10 +123,19 @@ int LcCoff_Write( const char *path, const LcCodeModule *cm, char *err, size_t er
     unsigned nsyms = 0, capsyms = 0;
     unsigned *text_off = NULL;     /* text offset of each function */
     Buf text, reloc, strtab, obj, lcpb_reloc;
+    /* -g debug: per-function .clualn$M<i> payloads (one Buf each). NULL when
+    ** the driver did not request debug info, so the object stays bit-for-bit
+    ** identical to a non-debug build. */
+    Buf     *clualn_bufs    = NULL;
+    unsigned nclualn        = 0;   /* number of functions with linfo != NULL */
+    unsigned *clualn_fn_idx = NULL;/* map slot k -> function index i           */
+    size_t  *clualn_name_off= NULL;/* strtab offset of the ".clualn$M<i>" name */
     unsigned have_rdata, have_lcpb, num_sections, rdata_section_no, lcpb_section_no;
     unsigned ptr_text, ptr_rdata, ptr_lcpb, ptr_reloc, ptr_lcpb_reloc, ptr_symtab;
+    unsigned ptr_clualn = 0;     /* base file offset of the .clualn raw blob */
     unsigned num_relocs = 0;
     unsigned lcpb_fn_table_len = 0, lcpb_raw_len = 0;
+    unsigned clualn_total_raw  = 0;
 
     memset( &text,       0, sizeof text );
     memset( &reloc,      0, sizeof reloc );
@@ -122,7 +152,17 @@ int LcCoff_Write( const char *path, const LcCodeModule *cm, char *err, size_t er
     ** Grouped into .rdata by the linker (PE COFF $-section semantics). */
     have_lcpb        = ( cm->protoblob && cm->protoblob_len > 0 ) ? 1u : 0u;
     lcpb_section_no  = have_lcpb ? 2u + have_rdata : 0u;
-    num_sections     = 1u + have_rdata + have_lcpb;
+    /* Count functions carrying -g line info: each becomes its own
+    ** .clualn$M<i> section, dollar-grouped into a single .clualn output
+    ** section by the linker. When no function has linfo (the default),
+    ** nclualn stays 0 and the serialized COFF is byte-identical to what
+    ** this writer produced before -g existed. */
+    for ( i = 0; i < cm->nfuncs; i++ ) {
+        if ( cm->funcs[i].linfo != NULL && cm->funcs[i].nlinfo > 0 ) nclualn++;
+    }
+    num_sections     = 1u + have_rdata + have_lcpb + nclualn;
+    if ( num_sections > 0xFFFFu )
+        return fail( err, errlen, "too many sections (>0xFFFF; likely nclualn overflow)" );
     if ( have_lcpb ) {
         if ( cm->nfuncs > 0xFFFFu )
             return fail( err, errlen, "too many functions for the fn-table reloc count" );
@@ -287,6 +327,30 @@ int LcCoff_Write( const char *path, const LcCodeModule *cm, char *err, size_t er
     }
 
     /* ---------------------------------------------------------------- */
+    /* -g debug: serialize each function's .clualn$M<i> payload into its  */
+    /* own Buf. Naming: dollar-grouped so the linker concatenates all     */
+    /* .clualn$M<i> inputs into a single .clualn output (PE COFF $-       */
+    /* section semantics; classify_section in pe_emit.c splits on '$').   */
+    /* Long section names (>8 bytes) are stored as "/<decimal-strtab-off>"*/
+    /* in the header per PE/COFF; coff_read.c already decodes that form.  */
+    /* ---------------------------------------------------------------- */
+    if ( nclualn > 0 ) {
+        unsigned k = 0;
+        clualn_bufs     = ( Buf * )calloc( nclualn, sizeof( Buf ) );
+        clualn_fn_idx   = ( unsigned * )calloc( nclualn, sizeof( unsigned ) );
+        clualn_name_off = ( size_t * )calloc( nclualn, sizeof( size_t ) );
+        if ( !clualn_bufs || !clualn_fn_idx || !clualn_name_off ) { fail( err, errlen, "oom" ); goto done; }
+        for ( i = 0; i < cm->nfuncs; i++ ) {
+            const LcCompiledFunc *fn = &cm->funcs[i];
+            if ( !fn->linfo || fn->nlinfo == 0 ) continue;
+            if ( !clualn_emit( &clualn_bufs[k], fn ) ) { fail( err, errlen, "oom" ); goto done; }
+            clualn_fn_idx[k] = i;
+            clualn_total_raw += ( unsigned )clualn_bufs[k].len;
+            k++;
+        }
+    }
+
+    /* ---------------------------------------------------------------- */
     /* String table: collect names > 8 chars. Starts with a 4-byte total */
     /* length prefix (includes itself), so the first string is at off 4. */
     /* ---------------------------------------------------------------- */
@@ -297,6 +361,18 @@ int LcCoff_Write( const char *path, const LcCodeModule *cm, char *err, size_t er
             if ( !putn( &strtab, syms[i].name, strlen( syms[i].name ) + 1 ) ) { fail( err, errlen, "oom" ); goto done; }
         }
     }
+    /* -g debug: intern each ".clualn$M<i>" long section name into the string
+    ** table. The section header emits "/<decimal offset>" pointing here. */
+    {
+        unsigned k;
+        for ( k = 0; k < nclualn; k++ ) {
+            char lname[32];
+            int  n = snprintf( lname, sizeof lname, ".clualn$M%u", clualn_fn_idx[k] );
+            if ( n < 0 || n >= ( int )sizeof lname ) { fail( err, errlen, "clualn name too long" ); goto done; }
+            clualn_name_off[k] = strtab.len;
+            if ( !putn( &strtab, lname, ( size_t )n + 1 ) ) { fail( err, errlen, "oom" ); goto done; }
+        }
+    }
     { unsigned tl = ( unsigned )strtab.len;
       strtab.p[0] = ( unsigned char )( tl );        strtab.p[1] = ( unsigned char )( tl >> 8 );
       strtab.p[2] = ( unsigned char )( tl >> 16 );  strtab.p[3] = ( unsigned char )( tl >> 24 ); }
@@ -304,10 +380,14 @@ int LcCoff_Write( const char *path, const LcCodeModule *cm, char *err, size_t er
     /* ---------------------------------------------------------------- */
     /* File offsets.                                                     */
     /* ---------------------------------------------------------------- */
-    ptr_text  = LC_SZ_FILE_HEADER + num_sections * LC_SZ_SECTION_HEADER;
-    ptr_rdata = ptr_text + ( unsigned )text.len;
-    ptr_lcpb  = ptr_rdata + ( have_rdata ? ( unsigned )cm->rodata_len : 0u );
-    ptr_reloc = ptr_lcpb + lcpb_raw_len;
+    ptr_text   = LC_SZ_FILE_HEADER + num_sections * LC_SZ_SECTION_HEADER;
+    ptr_rdata  = ptr_text + ( unsigned )text.len;
+    ptr_lcpb   = ptr_rdata + ( have_rdata ? ( unsigned )cm->rodata_len : 0u );
+    /* .clualn$M<i> raw payloads sit between .rdata$L raw and the .text
+    ** relocation table so file-offset order still matches section-header
+    ** order (text, rdata, rdata$L, clualn*). Zero-sized when -g is off. */
+    ptr_clualn = ptr_lcpb + lcpb_raw_len;
+    ptr_reloc  = ptr_clualn + clualn_total_raw;
     ptr_lcpb_reloc = ptr_reloc + num_relocs * LC_SZ_RELOCATION;
     ptr_symtab = ptr_lcpb_reloc + ( have_lcpb ? cm->nfuncs * LC_SZ_RELOCATION : 0u );
     /* string table follows the symbol table */
@@ -374,6 +454,32 @@ int LcCoff_Write( const char *path, const LcCodeModule *cm, char *err, size_t er
         { fail( err, errlen, "oom" ); goto done; }
     }
 
+    /* .clualn$M<i> IMAGE_SECTION_HEADERs (optional; one per debug-instrumented
+    ** function). Long name -> "/<decimal strtab offset>" in the 8-byte name
+    ** field. No relocations. A single ALIGN_1BYTES simplifies the decoder
+    ** (raw payload starts exactly at PointerToRawData). */
+    {
+        unsigned k;
+        unsigned run_off = ptr_clualn;
+        for ( k = 0; k < nclualn; k++ ) {
+            char nm[8] = { 0 };
+            int  wr = snprintf( nm, sizeof nm, "/%u", ( unsigned )clualn_name_off[k] );
+            if ( wr < 0 || wr >= ( int )sizeof nm ) { fail( err, errlen, "clualn strtab offset too large" ); goto done; }
+            if ( !putn( &obj, nm, 8 ) ||
+                 !put32( &obj, 0 ) ||                      /* VirtualSize          */
+                 !put32( &obj, 0 ) ||                      /* VirtualAddress       */
+                 !put32( &obj, ( unsigned )clualn_bufs[k].len ) || /* SizeOfRawData */
+                 !put32( &obj, run_off ) ||                /* PointerToRawData     */
+                 !put32( &obj, 0 ) ||                      /* PointerToRelocations */
+                 !put32( &obj, 0 ) ||                      /* PointerToLinenumbers */
+                 !put16( &obj, 0 ) ||                      /* NumberOfRelocations  */
+                 !put16( &obj, 0 ) ||                      /* NumberOfLinenumbers  */
+                 !put32( &obj, LC_IMAGE_SCN_CNT_INITIALIZED_DATA | LC_IMAGE_SCN_MEM_READ ) )
+            { fail( err, errlen, "oom" ); goto done; }
+            run_off += ( unsigned )clualn_bufs[k].len;
+        }
+    }
+
     /* .text raw bytes */
     if ( text.len && !putn( &obj, text.p, text.len ) ) { fail( err, errlen, "oom" ); goto done; }
 
@@ -388,6 +494,18 @@ int LcCoff_Write( const char *path, const LcCodeModule *cm, char *err, size_t er
         }
         if ( !putn( &obj, cm->protoblob, cm->protoblob_len ) )
         { fail( err, errlen, "oom" ); goto done; }
+    }
+
+    /* .clualn$M<i> raw bytes (one per debug-instrumented function). Emitted
+    ** concatenated: each section's PointerToRawData / SizeOfRawData in the
+    ** header above brackets its own slice. */
+    {
+        unsigned k;
+        for ( k = 0; k < nclualn; k++ ) {
+            if ( clualn_bufs[k].len &&
+                 !putn( &obj, clualn_bufs[k].p, clualn_bufs[k].len ) )
+            { fail( err, errlen, "oom" ); goto done; }
+        }
     }
 
     /* .text relocations */
@@ -435,5 +553,12 @@ done:
     free( obj.p );
     free( syms );
     free( text_off );
+    if ( clualn_bufs ) {
+        unsigned k;
+        for ( k = 0; k < nclualn; k++ ) free( clualn_bufs[k].p );
+        free( clualn_bufs );
+    }
+    free( clualn_fn_idx );
+    free( clualn_name_off );
     return rc;
 }

@@ -78,7 +78,7 @@ static void w64( uint8_t *p, uint64_t v ) { w32(p,(uint32_t)v); w32(p+4,(uint32_
 ** (an ALLOC section from an object) is appended into one of these, recording
 ** its assigned offset so relocations can be resolved later. */
 enum { OS_TEXT, OS_RDATA, OS_DATA, OS_PDATA, OS_XDATA, OS_BSS,
-       OS_TLS, OS_IDATA, OS_RELOC, OS_COUNT };
+       OS_TLS, OS_IDATA, OS_RELOC, OS_CLUALN, OS_COUNT };
 
 typedef struct {
     const char *name;
@@ -971,6 +971,10 @@ static int classify_section( const char *name, uint32_t characteristics,
     else if ( strcmp( group, ".dtors" ) == 0 ) out = OS_RDATA;
     else if ( strcmp( group, ".eh_frame")==0 ) out = OS_RDATA;
     else if ( strcmp( group, ".gcc_except_table")==0 ) out = OS_RDATA;
+    /* -g / --debug: source-line mapping. Standalone output section so a
+    ** post-mortem tool can locate it by name in the final PE. Concatenates
+    ** every .clualn$M<i> input (dollar-grouped) into one contiguous blob. */
+    else if ( strcmp( group, ".clualn" ) == 0 ) out = OS_CLUALN;
     else                                       out = OS_RDATA; /* default RO */
     return out;
 }
@@ -1180,6 +1184,11 @@ static int gc_keep_by_name( const char *n ) {
     if ( strncmp( n, ".tls",   4 ) == 0 ) return 1;  /* TLS template/callbacks*/
     if ( strncmp( n, ".pdata", 6 ) == 0 ) return 1;  /* SEH unwind (loader)   */
     if ( strncmp( n, ".xdata", 6 ) == 0 ) return 1;
+    /* -g / --debug: mirror .pdata/.xdata -- debug info sections are reached
+    ** by an external tool, not by ordinary relocations, so mark them live
+    ** unconditionally (belt-and-suspenders; the user object's sections are
+    ** already all roots, but a later refactor should not have to remember). */
+    if ( strncmp( n, ".clualn", 7 ) == 0 ) return 1;
     /* mingw pseudo-reloc list bracket sections */
     if ( strstr( n, "RUNTIME_PSEUDO_RELOC_LIST" ) ) return 1;
     return 0;
@@ -1353,7 +1362,7 @@ static int layout_sections( Linker *L ) {
     for ( i = 0; i < OS_COUNT; i++ ) {
         static const char *names[OS_COUNT] = {
             ".text", ".rdata", ".data", ".pdata", ".xdata", ".bss",
-            ".tls", ".idata", ".reloc" };
+            ".tls", ".idata", ".reloc", ".clualn" };
         static const uint32_t chars[OS_COUNT] = {
             LC_IMAGE_SCN_CNT_CODE|LC_IMAGE_SCN_MEM_EXECUTE|LC_IMAGE_SCN_MEM_READ,
             LC_IMAGE_SCN_CNT_INITIALIZED_DATA|LC_IMAGE_SCN_MEM_READ,
@@ -1363,6 +1372,10 @@ static int layout_sections( Linker *L ) {
             LC_IMAGE_SCN_CNT_UNINIT_DATA|LC_IMAGE_SCN_MEM_READ|LC_IMAGE_SCN_MEM_WRITE,
             LC_IMAGE_SCN_CNT_INITIALIZED_DATA|LC_IMAGE_SCN_MEM_READ|LC_IMAGE_SCN_MEM_WRITE,
             LC_IMAGE_SCN_CNT_INITIALIZED_DATA|LC_IMAGE_SCN_MEM_READ|LC_IMAGE_SCN_MEM_WRITE,
+            LC_IMAGE_SCN_CNT_INITIALIZED_DATA|LC_IMAGE_SCN_MEM_READ|LC_IMAGE_SCN_MEM_DISCARDABLE,
+            /* .clualn: read-only + discardable so runtime loaders may drop it
+            ** from memory; a Lua-side post-mortem tool reads it from the PE
+            ** file on disk, not from a mapped page. */
             LC_IMAGE_SCN_CNT_INITIALIZED_DATA|LC_IMAGE_SCN_MEM_READ|LC_IMAGE_SCN_MEM_DISCARDABLE };
         L->out[i].name = names[i];
         L->out[i].characteristics = chars[i];
@@ -1893,9 +1906,13 @@ static int finalize_exports( Linker *L, ExportLayout *el ) {
 =================================================================== */
 static uint32_t align_up( uint32_t v, uint32_t a ) { return ( v + a - 1 ) & ~( a - 1 ); }
 
-/* The output-section emission order (must match section-header order). */
+/* The output-section emission order (must match section-header order).
+** OS_CLUALN sits after the loader-consumed sections (they define the image
+** boundaries the loader cares about) and immediately before OS_RELOC, which
+** must remain last so place_reloc_section can find the end of everything
+** else. Empty when -g was not passed -- os_emitted skips zero-length slots. */
 static const int kSecOrder[] = { OS_TEXT, OS_RDATA, OS_DATA, OS_PDATA, OS_XDATA,
-                                 OS_IDATA, OS_TLS, OS_BSS, OS_RELOC };
+                                 OS_IDATA, OS_TLS, OS_BSS, OS_CLUALN, OS_RELOC };
 #define N_SECORDER ( (int)( sizeof(kSecOrder)/sizeof(kSecOrder[0]) ) )
 
 /* A section appears in the image only if it has nonzero virtual size. Empty

@@ -54,6 +54,16 @@ typedef struct LcModReloc {
   uint8_t     width;       /* 4 = rip-relative disp32 (default), 8 = abs64      */
 } LcModReloc;
 
+/* One (native offset -> Lua source line) mapping row emitted under -g into
+** the per-function .clualn$M<i> section. Consumed by tools/decode-clualn.lua
+** and a future Lua-side post-mortem tool to map a native pc inside a compiled
+** body back to the source line the LcInst that produced it originated from.
+** Rows are appended in emit order and are naturally sorted by native_off. */
+typedef struct LcLineRow {
+  uint32_t native_off;   /* byte offset within this function's .text bytes    */
+  uint32_t lua_line;     /* source line in source_path (Proto's lineinfo[bc_pc]) */
+} LcLineRow;
+
 /* The compiled output for one LcFunc.
 **
 ** Task-11 data-flow contract (consumed by the COFF writer / Task 12 and
@@ -70,6 +80,12 @@ typedef struct LcCompiledFunc {
   char      name[64];      /* this function's symbol, e.g. "luac_fn_0"          */
   uint8_t  *unwind;        /* Win64 UNWIND_INFO blob -> .xdata (M0: NULL/0)     */
   size_t    unwind_len;
+  /* -g / --debug source-line mapping (NULL when the driver did NOT request
+  ** debug info; byte-identity of the produced object depends on this staying
+  ** NULL for the default build). See docs/… and tools/decode-clualn.lua. */
+  LcLineRow *linfo;
+  uint32_t   nlinfo;
+  char      *source_path;  /* strdup of getstr(f->source->source) minus leading '@' */
 } LcCompiledFunc;
 
 typedef struct LcCodeModule {
@@ -90,7 +106,9 @@ typedef struct LcCodeModule {
    function is generated, then READ-ONLY, so it is shareable by const pointer
    across future per-function workers. */
 typedef struct LcCgCtx {
-    int opt_level;   /* 0 = faithful boxed baseline; >=1 the M1 typed fastpaths */
+    int opt_level;       /* 0 = faithful boxed baseline; >=1 the M1 typed fastpaths */
+    int emit_line_info;  /* -g / --debug: populate LcCompiledFunc.linfo per LcInst.
+                            Off by default; adds bytes to the object AND to the exe. */
 } LcCgCtx;
 
 LcCodeModule *lc_codegen(LcModule *m);

@@ -18,6 +18,7 @@
 #include "lstate.h"        /* lua_State, CallInfo, StkIdRel layout */
 #include "lobject.h"       /* LClosure, Proto, TValue layout (for k recovery) */
 #include "lopcodes.h"      /* OP_* opcodes for the M0 bc_op dispatch */
+#include "ldebug.h"        /* luaG_getfuncline (Proto's lineinfo decoder)     */
 
 #include <stddef.h>
 #include <stdlib.h>
@@ -2485,6 +2486,11 @@ int LcCg_CompileFunctionBody( LcModule *m, LcCodeModule *cm,
     LcCodeBuf buf;
     int ok = 1;
     int saw_return = 0;
+    /* -g / --debug: per-instruction (native_offset, lua_line) accumulator.
+       Left NULL when the driver did not request debug info so the object
+       is bit-for-bit identical to a non-debug build. */
+    LcLineRow *linfo = NULL;
+    uint32_t   nlinfo = 0, capinfo = 0;
 
     if (!LcCodeBuf_Init(&buf, 256)) return 0;
 
@@ -2579,6 +2585,26 @@ int LcCg_CompileFunctionBody( LcModule *m, LcCodeModule *cm,
         /* Record this bytecode pc -> current code offset BEFORE lowering, so
            backward branches and the pc->offset resolution see the right base. */
         LcBr_RecordPc(&Br, in->bc_pc, buf.used);
+        /* -g / --debug: append one (native_offset, lua_line) row for this
+           LcInst. Grow-by-doubling to keep this O(N) across the function.
+           A failed realloc drops the accumulator (frees what we had, sets
+           NULL) rather than failing codegen -- debug info is best-effort:
+           the compiled program still runs, only the .clualn section is
+           missing for this function. */
+        if (cg->emit_line_info && f && f->source) {
+          if (nlinfo == capinfo) {
+            uint32_t nc = capinfo ? capinfo * 2 : 32;
+            LcLineRow *nl = (LcLineRow *)realloc(linfo, nc * sizeof(LcLineRow));
+            if (!nl) { free(linfo); linfo = NULL; nlinfo = capinfo = 0; }
+            else     { linfo = nl; capinfo = nc; }
+          }
+          if (linfo != NULL) {
+            int line = luaG_getfuncline(f->source, in->bc_pc);
+            linfo[nlinfo].native_off = (uint32_t)buf.used;
+            linfo[nlinfo].lua_line   = (uint32_t)(line < 0 ? 0 : line);
+            nlinfo++;
+          }
+        }
         /* Observation point: make the frame fully current before the helper
            runs (residents stay authoritative afterwards -- no refill; see the
            spill-around block comment). Emitted AFTER the pc label so a branch
@@ -2619,7 +2645,7 @@ int LcCg_CompileFunctionBody( LcModule *m, LcCodeModule *cm,
 
     free(Br.pc_off); free(Br.seen); free(Br.fwd);
 
-    if (!ok) { LcCodeBuf_Free(&buf); return 0; }
+    if (!ok) { free(linfo); LcCodeBuf_Free(&buf); return 0; }
 
     /* Take ownership of the buffer's bytes + relocs (do NOT LcCodeBuf_Free). */
     cf->code      = buf.bytes;
@@ -2629,6 +2655,23 @@ int LcCg_CompileFunctionBody( LcModule *m, LcCodeModule *cm,
     cf->unwind    = NULL;     /* M0 epsilon: deferred to the pcall/.pdata plan */
     cf->unwind_len = 0;
     snprintf(cf->name, sizeof(cf->name), "luac_fn_%u", (unsigned)i);
+
+    /* -g: hand ownership of the line-info accumulator to the compiled func
+       and copy the source path out of the Proto (a '@'-prefixed string; we
+       drop the leading '@' so the decoded name is a plain filesystem path).
+       Leaves cf->linfo / source_path NULL when the flag was off -- exactly
+       what lc_codemodule_free's free(NULL) expects. */
+    if (cg->emit_line_info && linfo != NULL && nlinfo > 0) {
+      cf->linfo  = linfo;
+      cf->nlinfo = nlinfo;
+      linfo = NULL; /* moved */
+      if (f && f->source && f->source->source) {
+        const char *s = getstr(f->source->source);
+        if (s && s[0] == '@') s++;
+        if (s) cf->source_path = _strdup(s);
+      }
+    }
+    free(linfo);  /* NULL if moved above, or empty accumulator */
 
     /* Null out the moved-from buffer so a stray free can't double-free. */
     buf.bytes = NULL; buf.relocs = NULL;
@@ -2673,6 +2716,7 @@ LcCodeModule *lc_codegen(LcModule *m) {
      run, so a future worker can share it by const pointer. */
   LcCgCtx cg;
   cg.opt_level = m->opt_level;        /* -O1+ enables the M1 arith fastpaths */
+  cg.emit_line_info = m->emit_line_info; /* -g / --debug: record .clualn rows */
   LcCodeModule *cm = (LcCodeModule *)calloc(1, sizeof(LcCodeModule));
   if (!cm) return NULL;
   cm->nfuncs = m->nfuncs;
@@ -2717,6 +2761,8 @@ void lc_codemodule_free(LcCodeModule *cm) {
       free(cm->funcs[i].code);
       free(cm->funcs[i].relocs);
       free(cm->funcs[i].unwind);
+      free(cm->funcs[i].linfo);
+      free(cm->funcs[i].source_path);
     }
     free(cm->funcs);
   }

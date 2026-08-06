@@ -114,6 +114,10 @@ static void usage( FILE *to ) {
         "  -v, --verbose    print per-phase wall-clock timings on stderr\n"
         "                   after the build (resolve, lift, optimize,\n"
         "                   codegen, link, total). Off = zero overhead.\n"
+        "  -g, --debug      emit a .clualn (native offset -> Lua source line)\n"
+        "                   debug section into the produced PE, one per\n"
+        "                   compiled function. Consumed by\n"
+        "                   tools\\decode-clualn.lua. Off by default.\n"
         "  --emit-def=<path> / --emit-implib=<path>\n"
         "                   for DLL builds, write a .DEF module-definition\n"
         "                   file at <path> listing the DLL's exports. Both\n"
@@ -272,6 +276,10 @@ static int parse_build_args( CluaArgs *a, int argc, char **argv, int from,
             ** -v` at the top-level still means "version" -- that path never
             ** reaches parse_build_args. */
             a->opt.verbose = true;
+        } else if ( strcmp( s, "-g" ) == 0 || strcmp( s, "--debug" ) == 0 ) {
+            /* Emit the .clualn (native-pc -> Lua-line) debug section into
+            ** the produced PE. See tools/decode-clualn.lua. Off by default. */
+            a->opt.debug_line_info = true;
         } else if ( ( emit_rc = parse_emit_arg( a, s ) ) != -1 ) {
             if ( emit_rc == 0 ) return 0;
         } else if ( strncmp( s, "--emit-compdb=", 14 ) == 0 ) {

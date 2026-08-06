@@ -474,6 +474,7 @@ int lc_drive( const LcDriverOptions *opt ) {
     }
     m->opt_level = opt->opt_level;   /* codegen picks M1 fastpaths at -O1+ */
     m->jobs      = opt->jobs;        /* -j N; 0 = env CLUA_JOBS or CPU count */
+    m->emit_line_info = opt->debug_line_info ? 1 : 0; /* -g: .clualn per fn */
 
     /* Tag each REQUIRED module's main-chunk LcFunc with its require-name so the
     ** ProtoInit emitter registers it in package.preload at startup (the entry,
@@ -872,6 +873,11 @@ int main( int argc, char **argv ) {
             ** overhead when unset -- every QPC read in lc_drive is guarded
             ** by opt->verbose. */
             opt.verbose = true;
+        } else if ( strcmp( a, "-g" ) == 0 || strcmp( a, "--debug" ) == 0 ) {
+            /* Emit .clualn source-line mapping into the produced PE. Off by
+            ** default; adds bytes to the exe. Byte-identity of a non-debug
+            ** build depends on the flag staying off. */
+            opt.debug_line_info = true;
         } else if ( strncmp( a, "--emit=", 7 ) == 0 ) {
             const char *v = a + 7;
             if      ( strcmp( v, "bytecode" ) == 0 ) opt.emit_mode = LC_EMIT_BYTECODE;
