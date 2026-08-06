@@ -87,7 +87,9 @@ local NLINES = 11
 -- --------------- 1. build WITHOUT -g -> no .clualn section ---------------
 do
   os.remove(EXE_NODBG)
-  local code, out = run(('"%s" build "%s" -o "%s"'):format(CLUA_ABS, FIXTURE, EXE_NODBG))
+  -- --no-cache so a prior test that populated the cache under a different
+  -- --debug flag cannot serve stale entries that lack .clualn rows.
+  local code, out = run(('"%s" build --no-cache "%s" -o "%s"'):format(CLUA_ABS, FIXTURE, EXE_NODBG))
   if code ~= 0 or not exists(EXE_NODBG) then
     ok(false, "release build (no -g) succeeds",
        ("code=%s out=%q"):format(tostring(code), out))
@@ -104,7 +106,7 @@ end
 -- --------------- 2. build WITH -g -> .clualn section present ---------------
 do
   os.remove(EXE_DBG)
-  local code, out = run(('"%s" build "%s" -o "%s" -g'):format(CLUA_ABS, FIXTURE, EXE_DBG))
+  local code, out = run(('"%s" build --no-cache "%s" -o "%s" -g'):format(CLUA_ABS, FIXTURE, EXE_DBG))
   if code ~= 0 or not exists(EXE_DBG) then
     ok(false, "-g build succeeds",
        ("code=%s out=%q"):format(tostring(code), out))

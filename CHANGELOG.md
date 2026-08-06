@@ -7,6 +7,65 @@ of truth, `clua/src/common/version.h`, and this file in step.
 
 ## [Unreleased]
 
+## [0.3.0-beta.4] - 2026-08-06
+
+### Added
+
+- **Constant-fold `if false` and `while false` blocks at -O2.** Lua's front
+  end emits `OP_LOADFALSE R; OP_TEST R (jmp over); OP_JMP end` and the
+  optimizer never removed the dead block, so every OP_CLOSURE inside a
+  guarded block kept its target Proto alive. The new pass folds the exact
+  3-instruction pattern when the guarded block contains at least one
+  OP_CLOSURE, letting dead_global mark the enclosed functions dead.
+- **Dead-function codegen skip at -O2.** Functions marked dead by the
+  reachability pass get a minimal `prologue + Rt_PrepReturn(0,0,0) +
+  epilogue` body. --gc-sections drops the section entirely at link time.
+  luac_fn_table indices stay stable (ProtoInit still walks every slot),
+  so no runtime invariants change.
+- **Whole-program dead-function elimination (LTO-style).**
+  `lc_build_callgraph` (was a stub) now populates adjacency lists from
+  OP_CLOSURE parent-to-child edges and OP_CALL_DIRECT caller-to-callee
+  edges (when ip_typeprop resolved the callee). require("literal") edges
+  bring in module main chunks. Reachability sweeps from `m->entry` plus
+  transitively-required modules; unreachable functions get f->dead=true.
+  Conservative fallback: if the module names ffi/coroutine/debug or
+  materializes globals, every module main-chunk is treated as a root.
+- **Per-function persistent COFF cache.** `%LOCALAPPDATA%\clua\cache\`
+  by default; `--cache-dir=<path>` overrides; `--no-cache` or
+  `CLUA_NO_CACHE=1` disables. On a rebuild, functions whose IR + Proto +
+  opt_level + compiler-version + emit-line-info hash to a known key skip
+  the emitter and load `.text` + relocs from disk. Byte-identity across
+  fresh and cached builds is a hard gate (`tools/test-cache-incr.lua`).
+  100 MB cap with oldest-mtime eviction.
+- **`-W` diagnostic categories framework + `-Wunused`.** Locals that are
+  set but never read at any point in their scope produce a
+  `warning[Wunused]` diagnostic (yellow, clang/rustc shape). `-Werror`
+  promotes all warnings to hard errors; `-Werror=<cat>` promotes one
+  category. Skips locals whose name starts with `_`. Correctly treats
+  upvalue-captured slots as read.
+- **`-g` / `--debug` emits `.clualn` source-line section.** Per compiled
+  function: `(name, source_path, [(native_offset, lua_line)])`. The section
+  is grouped `.clualn$M<i>` per function and dollar-concatenated by the
+  linker; --gc-sections KEEPs it. Off by default (adds about 512 bytes to
+  hello.exe). Decoded by `tools/decode-clualn.lua`. Prep for real .pdb
+  support in a future arc; the format documentation is in codegen.h.
+
+### Changed
+
+- Hello .exe -4,096 bytes was the coro anchor prune; the fold + dead_global
+  wins are program-specific and only fire on real programs with unused
+  paths. Byte-identity of exe output preserved at -O0 / -O1.
+
+### Deferred (design notes only)
+
+- **OP_GETFIELD inline fast path.** Design comment above the dispatch case
+  documents the 4-load key path (via RBP-cached Proto pointer), the
+  encoders a future arc needs to add, and the honest cost/benefit against
+  this host's ~10% measurement floor.
+- **OP_SETI / OP_SETFIELD inline fast paths.** Design comment documents
+  why the GC barrier makes safe inlining harder than the getter case, and
+  what three variants a future arc could pick from.
+
 ## [0.3.0-beta.3] - 2026-08-06
 
 ### Added
