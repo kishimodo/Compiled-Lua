@@ -319,7 +319,155 @@ bool lc_optimize(LcModule *m, const LcPassConfig *cfg) {
 /* ---- STUB pass bodies: implement per milestone (PROMPT §9). ---- */
 void lc_analyze_dominators(LcFunc *f) { (void)f; /* TODO(M0) */ }
 void lc_analyze_liveness(LcFunc *f)   { (void)f; /* TODO(M0) */ }
-void lc_build_callgraph(LcModule *m)  { (void)m; /* TODO(M2) complete graph + FFI sentinels */ }
+
+/* Look up a module's main-chunk LcFunc by its require-name. Returns UINT32_MAX
+   if no matching module_name is found (name typo, module dropped by a later
+   pass, or the caller was miscalibrated). */
+static uint32_t cg_find_module_by_name(LcModule *m, const char *name) {
+  uint32_t i;
+  if (!m || !name) return UINT32_MAX;
+  for (i = 0; i < m->nfuncs; i++) {
+    LcFunc *f = m->funcs[i];
+    if (f && f->module_name && strcmp(f->module_name, name) == 0) return i;
+  }
+  return UINT32_MAX;
+}
+
+/* Look up the LcFunc index whose source Proto is `p`. */
+static uint32_t cg_find_func_by_proto(LcModule *m, Proto *p) {
+  uint32_t i;
+  if (!m || !p) return UINT32_MAX;
+  for (i = 0; i < m->nfuncs; i++) {
+    if (m->funcs[i] && m->funcs[i]->source == p) return i;
+  }
+  return UINT32_MAX;
+}
+
+/* Grow-append a callee index to fi's adjacency list (dedup: no double edges).
+   Uses plain malloc/free to match the ir.c convention that call-graph tables
+   are not on the arena (they realloc). Returns 0 on OOM. */
+static int cg_add_edge(LcModule *m, uint32_t fi, uint32_t callee) {
+  uint32_t j, n;
+  uint32_t *list;
+  if (fi >= m->nfuncs || callee >= m->nfuncs) return 1;   /* silently ignore */
+  n = m->ncallees[fi];
+  list = m->callees[fi];
+  for (j = 0; j < n; j++) if (list[j] == callee) return 1;
+  {
+    /* grow-by-double, starting at 4 */
+    uint32_t cap;
+    if (n == 0) cap = 4;
+    else if ((n & (n - 1)) == 0 && n >= 4) cap = n * 2;
+    else cap = 0;
+    if (cap) {
+      uint32_t *grown = (uint32_t *)realloc(list, cap * sizeof(uint32_t));
+      if (!grown) return 0;
+      m->callees[fi] = grown;
+      list = grown;
+    }
+  }
+  list[n] = callee;
+  m->ncallees[fi] = n + 1;
+  return 1;
+}
+
+/* Scan a Proto's own bytecode for the require("literal") pattern -- exactly the
+   shape resolve.c's ScanProto keys on, but NOT recursing into nested protos
+   (each nested proto is its own LcFunc and gets its own scan). For each hit,
+   look up the required module's main-chunk LcFunc by module_name and record
+   an edge fi -> that module. */
+static void cg_add_require_edges(LcModule *m, uint32_t fi, Proto *p) {
+  int i;
+  if (!p) return;
+  for (i = 0; i + 2 < p->sizecode; i++) {
+    Instruction op = p->code[i];
+    if (GET_OPCODE(op) != OP_GETTABUP) continue;
+    {
+      int c = GETARG_C(op);
+      const TValue *k;
+      if (c < 0 || c >= p->sizek) continue;
+      k = &p->k[c];
+      if (!ttisstring(k)) continue;
+      if (strcmp(getstr(tsvalue(k)), "require") != 0) continue;
+    }
+    /* next inst should be LOADK with the module-name constant string */
+    {
+      Instruction op2 = p->code[i + 1];
+      int bx;
+      const TValue *kn;
+      const char *name;
+      uint32_t midx;
+      if (GET_OPCODE(op2) != OP_LOADK) continue;
+      bx = GETARG_Bx(op2);
+      if (bx < 0 || bx >= p->sizek) continue;
+      kn = &p->k[bx];
+      if (!ttisstring(kn)) continue;
+      name = getstr(tsvalue(kn));
+      midx = cg_find_module_by_name(m, name);
+      if (midx != UINT32_MAX) (void)cg_add_edge(m, fi, midx);
+    }
+  }
+}
+
+/* lc_build_callgraph: populate m->callees[] / m->ncallees[] with the edges
+** dead_global consumes. Idempotent -- frees any prior graph before rebuilding
+** so the driver can call it a second time once ip_typeprop has resolved the
+** OP_CALL callee indices.
+**
+** Edges added:
+**   1. OP_CLOSURE fi -> child (looked up by Proto identity in m->funcs[]).
+**      This is ALWAYS-live because a captured closure can be called from
+**      anywhere the value flows. Sound-conservative.
+**   2. OP_CALL fi -> in->call_callee (only when ip_typeprop resolved it).
+**   3. require("literal") fi -> module-with-that-name (scanned from Proto
+**      bytecode, same shape resolve.c keys on). */
+void lc_build_callgraph(LcModule *m) {
+  uint32_t i, bi;
+  if (!m || m->nfuncs == 0) return;
+
+  /* free any previously-built graph (rebuild path) */
+  if (m->callees) {
+    for (i = 0; i < m->nfuncs; i++) free(m->callees[i]);
+    free(m->callees);
+  }
+  free(m->ncallees);
+  m->callees  = (uint32_t **)calloc(m->nfuncs, sizeof(uint32_t *));
+  m->ncallees = (uint32_t  *)calloc(m->nfuncs, sizeof(uint32_t));
+  if (!m->callees || !m->ncallees) {
+    free(m->callees);  m->callees  = NULL;
+    free(m->ncallees); m->ncallees = NULL;
+    return;
+  }
+
+  for (i = 0; i < m->nfuncs; i++) {
+    LcFunc *f = m->funcs[i];
+    Proto  *p;
+    if (!f) continue;
+    p = f->source;
+
+    /* CLOSURE + resolved-CALL edges, walking the IR (post-lift form) */
+    for (bi = 0; bi < f->nblocks; bi++) {
+      LcInst *in;
+      if (!f->blocks[bi]) continue;
+      for (in = f->blocks[bi]->first; in; in = in->next) {
+        if (in->bc_op == OP_CLOSURE) {
+          int bx = in->b;
+          if (p && bx >= 0 && bx < p->sizep && p->p[bx]) {
+            uint32_t tgt = cg_find_func_by_proto(m, p->p[bx]);
+            if (tgt != UINT32_MAX) (void)cg_add_edge(m, i, tgt);
+          }
+        } else if (in->bc_op == OP_CALL && in->call_callee > 0 &&
+                   (uint32_t)in->call_callee < m->nfuncs) {
+          (void)cg_add_edge(m, i, (uint32_t)in->call_callee);
+        }
+      }
+    }
+
+    /* Require edges from the Proto's own bytecode (each Proto scanned once;
+       nested protos are separate LcFuncs and reach here on their own turn). */
+    cg_add_require_edges(m, i, p);
+  }
+}
 
 void lc_pass_mem2reg(LcFunc *f)     { (void)f; /* TODO(M0) */ }
 void lc_pass_dce(LcFunc *f)         { (void)f; /* TODO(M0) effect-aware */ }
@@ -824,48 +972,68 @@ void lc_pass_fold_dead_branches(LcFunc *f) {
 
 /* lc_pass_dead_global: whole-program reachability from the roots.
 **
-** A function is a ROOT if it is the program entry (m->entry) or a
-** required-module main chunk (module_name != NULL). The runtime registers
-** the latter into package.preload, so `require` can reach them even though
-** no IR-level CALL/CLOSURE in the module does; treating them as roots is
-** the sound thing to do.
+** ROOT SET (the LTO frontier):
+**   1. m->entry -- the program's real entry, always executed.
+**   2. Every required-module main chunk reached by a `require` edge from a
+**      reachable function. Modules that are BUNDLED (their main chunk exists
+**      as an LcFunc with module_name != NULL) but never actually required by
+**      the reachable set become dead here -- that is the cross-module LTO
+**      win. The intra-module rule -- "every module main chunk is a root" --
+**      is expressly NOT applied any more; it made every bundled function
+**      live trivially.
+**   3. Every module main chunk is a root when a MODULE-WIDE escape hatch
+**      fires:
+**       - the module names "ffi" / "bit" (Lua closures may be handed to C
+**         via ffi.callback and called from outside),
+**       - the module names "coroutine" (coroutine.create/wrap take a Lua
+**         function argument the analyzer cannot enumerate calls of),
+**       - the module names "debug" (debug.getinfo/gethook can enumerate
+**         every reachable proto),
+**       - the module hoists globals as a value (`_G[k]`, `pairs(_ENV)`,
+**         etc.) so a computed key can reach any named-global closure.
+**     When these fire we fall back to the old behavior (every module main
+**     chunk stays live via the root set; CLOSURE edges walk from there to
+**     every function it defines). NEVER falsely mark a live function dead:
+**     sound-conservative always. Un-tracked ordinary OP_CALLs to globals
+**     like `print` are NOT a widener on their own -- the callee is a C
+**     function that takes no user-Lua-closure argument. The widener is the
+**     escape channels above, which is the same conservative family
+**     lc_module_used_libs and the anchor split already rely on.
 **
-** Two reachability edges out of a reachable function are followed:
+** EDGES (consumed from m->callees / m->ncallees, built by lc_build_callgraph):
+**   - OP_CLOSURE parent -> child (always: a captured closure can escape).
+**   - OP_CALL caller -> in->call_callee when ip_typeprop resolved it.
+**   - require("literal") caller -> module-with-that-name main chunk.
 **
-**   1. OP_CLOSURE (instantiation). The `b` field carries the parent's
-**      p->p[] index; the target LcFunc is the one whose `source` pointer
-**      matches p->p[bx]. This is the DEFAULT edge: current lift always
-**      emits CLOSURE for `local function f() ... end`, so almost every
-**      function has a closure fired by its parent, which makes CLOSURE
-**      reachability a superset of "is called" -- expect very few dead
-**      marks in current CLua from this edge alone.
-**
-**   2. OP_CALL with `call_callee` resolved to a module index by
-**      lc_pass_ip_typeprop (-O1). Redundant with edge 1 today (a callee
-**      must have been closured first) but harmless, and it is the seed a
-**      future analysis will use once CLOSURE ceases to be a required
-**      antecedent (inline closure elision, direct-CALL_DIRECT lowering).
-**      Because arena memory starts zeroed and ip_typeprop rewrites
-**      call_callee to -1 up front, a call_callee of 0 on a program where
-**      ip_typeprop did not run only ever OVER-marks function 0 as live,
-**      which is sound (fewer dead marks, never a false dead).
-**
-** The result is stored on LcFunc.dead. This pass is DATA ONLY: codegen and
-** ProtoInit still emit an entry for every function, unchanged. Wiring the
-** pruning into codegen and stripping dead entries from luac_fn_table is a
-** correctness-sensitive follow-up (see the commit message).
-**
-** Defensive: if a CLOSURE's Bx is out of range for the parent Proto's p[]
-** array or the referenced Proto has no matching LcFunc in the module, the
-** edge is skipped. The walk terminates because every mark flips a true to
-** a false and only newly-marked nodes are pushed onto the worklist. */
+** OUTPUT: LcFunc.dead = true for every unreachable function. DATA ONLY;
+** codegen and ProtoInit still emit an entry for every function until the
+** parallel codegen-skip task lands. The walk terminates because every mark
+** flips a true to a false and only newly-marked nodes go on the worklist. */
 void lc_pass_dead_global(LcModule *m) {
   uint32_t i;
   uint32_t *work = NULL;
   uint32_t wn = 0;
+  bool conservative;
   int debug = getenv("CLUA_DEBUG_DEADGLOBAL") != NULL;
 
   if (!m || m->nfuncs == 0) return;
+
+  /* Rebuild the graph now that ip_typeprop has had a chance to fill in
+     call_callee for statically-resolvable OP_CALL sites (it runs at -O1 and
+     lc_pass_dead_global runs at -O2, so the resolved indices are visible to
+     the sweep even though the -O0 driver call to lc_build_callgraph found
+     none). Idempotent. */
+  lc_build_callgraph(m);
+
+  /* MODULE-WIDE conservative fallback: if any escape shape can reach a
+     Lua-callable through a channel the closed-world graph doesn't model, we
+     must not shrink the root set past "all module main chunks". The four
+     shapes below correspond to the named-library conservatives
+     lc_module_used_libs and the anchor split already rely on. */
+  conservative = lc_module_uses_ffi(m)
+              || lc_module_uses_coroutine(m)
+              || lc_module_uses_debug(m)
+              || lc_module_reflects_globals(m);
 
   /* start with every function dead */
   for (i = 0; i < m->nfuncs; i++)
@@ -874,57 +1042,42 @@ void lc_pass_dead_global(LcModule *m) {
   work = (uint32_t *)malloc((size_t)m->nfuncs * sizeof(uint32_t));
   if (!work) return;
 
-  /* seed roots: the entry, and every required-module main chunk */
+  /* seed roots */
   for (i = 0; i < m->nfuncs; i++) {
     LcFunc *f = m->funcs[i];
+    bool is_root = false;
     if (!f) continue;
-    if (f == m->entry || f->module_name != NULL) {
-      if (f->dead) { f->dead = false; work[wn++] = i; }
-    }
+    if (f == m->entry) is_root = true;
+    /* fallback: keep old behaviour (every module main chunk is a root) when
+       any escape shape widens the potential caller set beyond our graph. */
+    else if (conservative && f->module_name != NULL) is_root = true;
+    /* TODO(DLL): once LcFunc grows an `exports` flag, mark exported functions
+       roots here too. Today the exports table is discovered post-optimize by
+       resolve.c and never round-trips onto LcFunc, so the flag is a no-op --
+       DLL builds already opt out by naming "ffi" via _exports = { ... }
+       hitting the conservative gate above in every current fixture. */
+    if (is_root && f->dead) { f->dead = false; work[wn++] = i; }
   }
 
-  /* worklist fixpoint over CLOSURE + resolved-CALL edges */
+  /* worklist fixpoint over the pre-built call graph */
   while (wn > 0) {
     uint32_t fi = work[--wn];
-    LcFunc *f = m->funcs[fi];
-    Proto *p = f ? f->source : NULL;
-    uint32_t bi;
-    LcInst *in;
-    if (!f || !p) continue;
-    for (bi = 0; bi < f->nblocks; bi++) {
-      if (!f->blocks[bi]) continue;
-      for (in = f->blocks[bi]->first; in; in = in->next) {
-        int target = -1;
-        if (in->bc_op == OP_CLOSURE) {
-          int bx = in->b;
-          if (bx >= 0 && bx < p->sizep && p->p[bx]) {
-            Proto *np = p->p[bx];
-            uint32_t cj;
-            for (cj = 0; cj < m->nfuncs; cj++) {
-              if (m->funcs[cj] && m->funcs[cj]->source == np) {
-                target = (int)cj;
-                break;
-              }
-            }
-          }
-        } else if (in->bc_op == OP_CALL && in->call_callee > 0 &&
-                   (uint32_t)in->call_callee < m->nfuncs) {
-          target = in->call_callee;
-        }
-        if (target >= 0 && (uint32_t)target < m->nfuncs) {
-          LcFunc *tf = m->funcs[target];
-          if (tf && tf->dead) {
-            tf->dead = false;
-            work[wn++] = (uint32_t)target;
-          }
-        }
-      }
+    uint32_t j;
+    uint32_t n = (m->ncallees) ? m->ncallees[fi] : 0;
+    uint32_t *edges = (m->callees) ? m->callees[fi] : NULL;
+    for (j = 0; j < n; j++) {
+      uint32_t tgt = edges[j];
+      LcFunc *tf;
+      if (tgt >= m->nfuncs) continue;
+      tf = m->funcs[tgt];
+      if (tf && tf->dead) { tf->dead = false; work[wn++] = tgt; }
     }
   }
 
   free(work);
 
   if (debug) {
+    unsigned live = 0, dead = 0;
     for (i = 0; i < m->nfuncs; i++) {
       LcFunc *f = m->funcs[i];
       const char *name = "(anon)";
@@ -935,7 +1088,10 @@ void lc_pass_dead_global(LcModule *m) {
         name = getstr(f->source->source);
       fprintf(stderr, "[dg] fn %u %s dead=%d\n",
               (unsigned)i, name, f->dead ? 1 : 0);
+      if (f->dead) dead++; else live++;
     }
+    fprintf(stderr, "[dg] summary: %u live / %u dead / %u total, conservative=%d\n",
+            live, dead, live + dead, conservative ? 1 : 0);
   }
 }
 
