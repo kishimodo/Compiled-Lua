@@ -147,6 +147,13 @@ static BOOL CALLBACK ModuleInitCb( PINIT_ONCE O, PVOID P, PVOID *C ) {
 static lua_State *g_L         = NULL;   /* the DLL's Lua state              */
 static int        g_ExportsRef = LUA_NOREF; /* registry ref -> _exports tbl */
 
+/* Sorted export names table, populated after the module chunk runs; the
+   dispatcher below indexes into it by ordinal. Declared here (forward)
+   because Rt_ModuleFini frees it. Definition + description near
+   Rt_DllExportDispatch. */
+static const char **g_ExportNames;
+static int          g_ExportCount;
+
 /* Set the module's lua_State up: open the libs the driver linked, run the
    entry chunk (which populates the globals table, including `_exports`),
    then capture globals._exports in the registry for later trampoline
@@ -247,6 +254,7 @@ static void Rt_ModuleFini( void ) {
    captured `_exports` table and sorts the keys with the same comparator
    the linker used (byte-order strcmp on the C strings) so ordinal N here
    maps to the same name as AddressOfFunctions[N] in the export table. */
+/* Definition (forward-declared near the top for Rt_ModuleFini). */
 static const char **g_ExportNames = NULL;
 static int          g_ExportCount = 0;
 

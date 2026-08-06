@@ -1,0 +1,83 @@
+site_name: clua
+site_description: ahead-of-time lua 5.4 compiler for windows x64
+site_url: https://kishimodo.github.io/Compiled-Lua/
+repo_url: https://github.com/kishimodo/Compiled-Lua
+repo_name: kishimodo/Compiled-Lua
+edit_uri: edit/main/docs/site/
+
+docs_dir: .
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.instant
+    - content.code.copy
+    - content.code.annotate
+    - search.suggest
+    - search.highlight
+    - toc.follow
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+
+plugins:
+  - search
+
+nav:
+  - home: index.md
+  - getting started:
+      - install: getting-started/install.md
+      - first program: getting-started/first-program.md
+      - common commands: getting-started/common-commands.md
+  - language:
+      - closed world: language/closed-world.md
+      - lua 5.4 support: language/lua-5.4-support.md
+  - cli:
+      - clua build: cli/clua-build.md
+      - clua run: cli/clua-run.md
+      - clua check: cli/clua-check.md
+      - clua init: cli/clua-init.md
+      - clua version: cli/clua-version.md
+      - rover init: cli/rover-init.md
+  - packages:
+      - overview: packages/index.md
+  - ffi:
+      - overview: ffi/overview.md
+  - perf:
+      - optimization levels: perf/optimization-levels.md
+  - internals:
+      - overview: internals/overview.md
+  - release notes:
+      - overview: release-notes/index.md
