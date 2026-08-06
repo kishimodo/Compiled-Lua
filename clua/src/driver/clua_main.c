@@ -294,6 +294,14 @@ static int parse_build_args( CluaArgs *a, int argc, char **argv, int from,
             } else {
                 ++i;
             }
+        } else if ( s[0] == '-' && s[1] == 'W' && s[2] != '\0' ) {
+            /* Diagnostic-category flags. See main.c for the same branch;
+            ** placed BEFORE the "unknown argument" fall-through below so a
+            ** legitimate -Wunused / -Werror is never rejected. An unknown
+            ** category is reported by LcWarn_ParseFlag (returns 0), we keep
+            ** parsing so the rest of the command line is still processed
+            ** rather than aborting the build on a lint typo. */
+            ( void )LcWarn_ParseFlag( &a->opt.warn, s + 2 );
         } else if ( s[0] != '-' && a->opt.input == NULL ) {
             a->opt.input = s;
         } else {

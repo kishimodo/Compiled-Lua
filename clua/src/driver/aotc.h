@@ -11,6 +11,8 @@
 #include <stdbool.h>
 #include <stddef.h>   /* NULL, for lc_parse_opt_level below */
 
+#include "../compiler/warn_unused.h"   /* LcWarnFlags: -W / -Wall / -Werror  */
+
 /* Parse a `-O<n>` argument strictly. Returns false for anything not supported
 ** instead of letting it become a level nobody asked for.
 **
@@ -113,6 +115,13 @@ typedef struct LcDriverOptions {
   bool         verbose;      /* -v / --verbose: per-phase wall-clock timings
                                 on stderr at the end of the build. Off = zero
                                 overhead (QPC only runs when set).            */
+  LcWarnFlags  warn;         /* -W / -Wno- / -Wall / -Werror[=cat]. Parsed by
+                                the -W token handler in main.c / clua_main.c
+                                before the fall-through to unknown-arg. When
+                                a category is set, the driver runs the
+                                matching scanner after the front end; a
+                                promoted (per-cat or -Werror-all) hit becomes
+                                a hard error and a non-zero exit.            */
 } LcDriverOptions;
 
 /* Returns process exit code. */

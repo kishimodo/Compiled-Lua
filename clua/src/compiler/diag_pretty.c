@@ -118,12 +118,20 @@ static const char *C_BoldCynSeq ( int C ) { return C ? "\x1b[1;36m" : ""; }
 static const char *C_BoldBluSeq ( int C ) { return C ? "\x1b[1;34m" : ""; }
 static const char *C_BoldWhtSeq ( int C ) { return C ? "\x1b[1;37m" : ""; }
 
-/* Pick the category color. Anything that isn't "warning"/"note" is treated
- * as an error -- keeps unknown categories loud rather than silently dim. */
+/* Pick the category color. "warning" and its bracketed variants (e.g.
+ * "warning[Wunused]" from the -W scanner) paint yellow; "note" cyan; every
+ * other value paints as an error (bold red) -- so a typoed or unknown
+ * category is loud rather than silently dim. */
 static const char *CategoryColor( const char *Category, int C ) {
     if ( Category == NULL ) { return C_BoldRedSeq( C ); }
-    if ( strcmp( Category, "warning" ) == 0 ) { return C_BoldYelSeq( C ); }
-    if ( strcmp( Category, "note"    ) == 0 ) { return C_BoldCynSeq( C ); }
+    if ( strncmp( Category, "warning", 7 ) == 0 &&
+         ( Category[ 7 ] == '\0' || Category[ 7 ] == '[' ) ) {
+        return C_BoldYelSeq( C );
+    }
+    if ( strncmp( Category, "note", 4 ) == 0 &&
+         ( Category[ 4 ] == '\0' || Category[ 4 ] == '[' ) ) {
+        return C_BoldCynSeq( C );
+    }
     return C_BoldRedSeq( C );
 }
 

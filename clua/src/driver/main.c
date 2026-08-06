@@ -26,6 +26,7 @@
 #include "../compiler/resolve.h"
 #include "../compiler/paths.h"
 #include "../compiler/diag.h"
+#include "../compiler/warn_unused.h"
 #include "../driver/lc_undump.h"
 #include "../driver/closed_world.h"
 #include "../driver/supported_ops.h"
@@ -409,6 +410,37 @@ int lc_drive( const LcDriverOptions *opt ) {
     if ( entryProto == NULL || reach.count == 0 ) {
         fprintf( stderr, "aotc: error: no entry proto\n" );
         goto cleanup;
+    }
+
+    /* -W diagnostic categories run here, right after the front end has
+    ** produced Protos for every module. Order matters:
+    **   - AFTER closed-world / supported-ops so we know the module set is
+    **     well-formed enough that a Proto walk is meaningful.
+    **   - BEFORE check_only's short-circuit and BEFORE lifting/codegen so
+    **     the warnings surface in `clua check` too and don't cost the
+    **     expensive tail of the pipeline in a warning-only run.
+    ** Every enabled category walks each module's entry Proto (which recurses
+    ** into nested Protos). Fatal_count is turned into a non-zero exit at
+    ** the very end so ALL warnings across ALL modules print before we bail. */
+    {
+        int warn_fatal = 0;
+        if ( opt->warn.unused ) {
+            size_t i;
+            bool   promote = opt->warn.werror_all ||
+                             ( opt->warn.werror_bits &
+                               LCWARN_BIT( LCWARN_CAT_UNUSED ) );
+            for ( i = 0; i < res.Count; i++ ) {
+                if ( modProtos[ i ] == NULL ) continue;
+                LcWarn_ScanUnused( modProtos[ i ], res.Modules[ i ].Path,
+                                   promote, &warn_fatal );
+            }
+        }
+        if ( warn_fatal > 0 ) {
+            fprintf( stderr,
+                     "aotc: %d warning%s treated as errors (-Werror)\n",
+                     warn_fatal, warn_fatal == 1 ? "" : "s" );
+            goto cleanup;
+        }
     }
 
     /* `check` mode: the front-end, closed-world and supported-ops gates all
@@ -864,6 +896,15 @@ int main( int argc, char **argv ) {
             } else {
                 ++i;
             }
+        } else if ( a[0] == '-' && a[1] == 'W' && a[2] != '\0' ) {
+            /* -W diagnostic-category flags: -Wname / -Wno-name / -Wall /
+            ** -Werror / -Werror=name. Handled BEFORE the fall-through so a
+            ** typoed -Wfoo lands in LcWarn_ParseFlag's own message rather
+            ** than the generic "unknown argument" text below (which the tests
+            ** for other flags key off of). LcWarn_ParseFlag returns 0 for an
+            ** unknown category and prints its own diagnostic; keep going so
+            ** the rest of the command line still parses. */
+            ( void )LcWarn_ParseFlag( &opt.warn, a + 2 );
         } else if ( a[0] != '-' && opt.input == NULL ) {
             opt.input = a;
         } else {
