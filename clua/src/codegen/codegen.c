@@ -2105,6 +2105,78 @@ static int lower_inst( LcBranchCtx *Br, LcFunc *f, LcInst *in ) {
                                return lower_gettable_inline( B, in );
                            return lower_table_frame( B, in, "Rt_GetTableF",
                                                      "Rt_GetTable", /*signed_c*/0 );
+        /* OP_SETI / OP_SETFIELD inline fast path -- deferred, and the
+         * blocker is different from the one that deferred OP_GETFIELD.
+         *
+         * Prior art: see the OP_GETFIELD block above for the three-shape
+         * (A/B/C) framework this note reuses. That block explains why the
+         * pure "duplicate the tag check" wrapper (shape A) is a strict
+         * size loss with no speed win, and why shape C (fully inline the
+         * probe) is the only version that pays. The GETI inline path
+         * (lower_geti_inline at ~line 780) is the working shape-C template
+         * for the get side.
+         *
+         * The get path can inline safely because on a hit it just copies
+         * 16 bytes from the array slot to R[A]. That is a read: it does
+         * not change the table's GC state, so no barrier fires and the
+         * inlined body is a strict superset of what luaV_finishfastget
+         * does (which is nothing beyond the copy). GETI's fast path is
+         * therefore a straight tag check + bounds check + isempty check +
+         * MOVUPS pair.
+         *
+         * The set path writes into the table's array (OP_SETI) or hash
+         * (OP_SETFIELD, if it hit the hash side of luaV_fastget). If the
+         * table is old-gen and the value being written is a fresh (young)
+         * GC object, the write introduces a young reference from an old
+         * object, which the GC must know about or it will free a
+         * still-reachable value on the next incremental cycle. That is
+         * what luaC_barrierback fires for: luaV_finishfastset (lvm.h:108)
+         * is literally { setobj2t; luaC_barrierback }, and skipping the
+         * barrier is a memory-safety bug, not just a GC-timing quirk.
+         *
+         * Three options for a future arc to inline these safely:
+         *
+         *   A. Prove the value is non-collectable at compile time. If the
+         *      value source is LOADI / LOADF / LOADFALSE / LOADTRUE /
+         *      LOADNIL -- or any operand the type-prop pass has flagged
+         *      as a non-GC scalar -- the barrier is a provable no-op and
+         *      can be elided at emit time. Useful surface exists (the
+         *      ip_typeprop pass already tracks INT/FLT/BOOL/NIL residency
+         *      on the source register) but limited: table-value stores
+         *      and store-from-call-result are the common hot cases and
+         *      neither is provable statically today.
+         *
+         *   B. Inline the barrier check itself: after the store, test the
+         *      table's GC-color bit (the "old" flag in the GCObject
+         *      header) and the value's color bit; on old-table + white-
+         *      value take a slow arc that calls a helper. About 15 more
+         *      bytes per site and the helper (a thin wrapper over
+         *      luaC_barrierback_) still needs to be linkable from
+         *      emitted .text. Complexity is comparable to shape C for
+         *      GETFIELD and the win is a full CALL avoided on the hot
+         *      path -- the strongest of the three but also the biggest
+         *      write.
+         *
+         *   C. Ship both A and B and let the register allocator pick the
+         *      shorter one per site (A when the source proves scalar, B
+         *      otherwise). Too much complexity for the return on this
+         *      host given the 10% wall-clock resolution floor documented
+         *      in docs/benchmarks/size-and-speed-current.md; the two
+         *      arcs would need to land together to be measurable.
+         *
+         * Recommended for a future arc: option B. Option A is cheap but
+         * narrow (it only fires when the operand chain from the value
+         * source through to the SETI already resolved to a scalar tag,
+         * which the current type-prop marks conservatively as UNK after
+         * any table read or call -- see the passes.c:183 no_proofs
+         * note); B pays on every hit regardless of the value's static
+         * type. C is not worth the coordination cost until B is
+         * measured.
+         *
+         * Until one of those arcs lands, keeping OP_SETI and OP_SETFIELD
+         * on the single-CALL frame lowering wins on size (~24 bytes per
+         * site) and on maintenance, and matches what the OP_GETFIELD
+         * comment above deferred for a different reason. */
         case OP_SETFIELD:  return lower_table_frame( B, in, "Rt_SetFieldF",
                                                      "Rt_SetField", /*signed_c*/1 );
         case OP_SETI:      return lower_table_frame( B, in, "Rt_SetIF",
