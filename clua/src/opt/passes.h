@@ -1,11 +1,11 @@
 /*
 ** passes.h — The LuaC optimization pipeline.
 **
-** Passes are grouped by delivery milestone (see ../../PROMPT.md §Phasing). Each
-** is sound: it only fires when the closed-world proof holds, so output always
-** matches the boxed Lua 5.4 semantics. The interprocedural passes iterate to a
-** fixpoint over the call graph; FFI edges and any value of type LC_T_ANY act as
-** conservative cut points.
+** Passes are grouped by delivery milestone. Each is sound: it only fires when
+** the closed-world proof holds, so output always matches the boxed Lua 5.4
+** semantics. The interprocedural passes iterate to a fixpoint over the call
+** graph; FFI edges and any value of type LC_T_ANY act as conservative cut
+** points.
 **
 ** Ordering matters: build SSA + CFG analyses first, then local refinement, then
 ** the whole-program fixpoint, then lowering-prep.

@@ -1,5 +1,5 @@
 /*
-** codegen.c — Optimized IR -> relocatable x64. See codegen.h and ../../PROMPT.md §11.
+** codegen.c — Optimized IR -> relocatable x64. See codegen.h.
 ** STUB: implement for Milestone M0 (generic lowering: every op -> Rt_* / luaV_* call).
 **
 ** REUSE src/codegen/x64_emit.* (adapted from the removed v1 JIT encoder) for encoding and

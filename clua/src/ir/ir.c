@@ -1,6 +1,6 @@
 /*
 ** ir.c — LcModule/LcFunc/LcBlock/LcInst construction + SSA verifier.
-** See ir.h and ../../PROMPT.md §7. STUB: implement for Milestone M0.
+** See ir.h. STUB: implement for Milestone M0.
 */
 #include "ir.h"
 #include <stdlib.h>

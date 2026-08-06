@@ -1,5 +1,5 @@
 /*
-** lift.c — Bytecode -> SSA IR. See lift.h and ../../PROMPT.md §8.
+** lift.c — Bytecode -> SSA IR. See lift.h.
 **
 ** M0 (Plan 1): faithful, generic, *memory-form* (pre-SSA) lowering of the
 ** arithmetic + control-flow op set (loads, arith/bitwise/unary/len/concat,

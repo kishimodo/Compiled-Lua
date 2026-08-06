@@ -124,7 +124,6 @@ linker assembles the PE from the sysroot snapshot. gcc is optional — used only
 for `--ld=gcc`, `--shared-rt`, or a cold-tree entry compile (`CLUA_GCC` /
 `CLUA_LD` override the choice).
 
-- Build spec & implementation prompt: [`PROMPT.md`](PROMPT.md)
 - Known bugs / bounded divergences: [`docs/known-bugs-2026-06-07.md`](docs/known-bugs-2026-06-07.md)
 - Test system design: [`docs/test-system-design-2026-06-07.md`](docs/test-system-design-2026-06-07.md)
 
