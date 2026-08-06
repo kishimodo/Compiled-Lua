@@ -180,6 +180,16 @@ typedef struct {
     int         ncontribs, capcontribs;
     GcMap       contrib_map;     /* (object, section) -> contribution index  */
 
+    /* per-object cache of resolved GSym indexes, keyed by raw symbol slot.
+    ** Built once after the resolve fixpoint (symbol table stable then), read
+    ** by the gc_sections mark phase so it does not re-call gsym_find on
+    ** every external relocation target. Each entry is a signed index into
+    ** L->syms, or LC_GSYM_NONE for slots that carry no lookup result (aux
+    ** slot, empty name, or a name the global table never interned). Freed
+    ** at end of link. */
+    int32_t   **gsym_by_symidx;  /* one array per L->objs[i]                 */
+    int         gsym_cache_nobjs;/* number of populated per-obj arrays       */
+
     OutSec      out[OS_COUNT];
 
     ImportEntry *imports;
@@ -1058,6 +1068,71 @@ static int contrib_map_build( Linker *L ) {
     return 1;
 }
 
+/* Sentinel for the per-object symbol-slot cache: this slot has no cached
+** GSym (aux slot, empty name, or lookup returned NULL). Any consumer must
+** treat it as a cache miss and either skip or fall back. */
+#define LC_GSYM_NONE (-1)
+
+/* Build the per-object symidx -> GSym-index cache. Called ONCE after the
+** resolve fixpoint completes and before gc_sections. Pre-fills the cache
+** for every symbol slot that a relocation could name, so the mark phase
+** does not have to hash-lookup a symbol name per relocation. Cheap: a
+** single linear scan of every object's primary symbol slots.
+**
+** The cache stores a signed index into L->syms so it survives if L->syms
+** is realloc'd; both the symbol table and the objs array must be quiescent
+** for the lifetime of this cache. That is the invariant after
+** resolve_fixpoint returns and until linker_free. */
+static void gsym_cache_free( Linker *L ) {
+    int i;
+    if ( !L->gsym_by_symidx ) return;
+    for ( i = 0; i < L->gsym_cache_nobjs; i++ ) free( L->gsym_by_symidx[i] );
+    free( L->gsym_by_symidx );
+    L->gsym_by_symidx  = NULL;
+    L->gsym_cache_nobjs = 0;
+}
+
+static int gsym_cache_build( Linker *L ) {
+    int oi;
+    gsym_cache_free( L );
+    if ( L->nobjs <= 0 ) return 1;
+    L->gsym_by_symidx = ( int32_t ** )calloc( ( size_t )L->nobjs,
+                                              sizeof( int32_t * ) );
+    if ( !L->gsym_by_symidx ) return 0;
+    L->gsym_cache_nobjs = L->nobjs;
+    for ( oi = 0; oi < L->nobjs; oi++ ) {
+        LcCoffObj *o = L->objs[oi];
+        uint32_t n = o->nsymbols_slots;
+        int32_t *arr;
+        uint32_t s;
+        if ( n == 0 ) { L->gsym_by_symidx[oi] = NULL; continue; }
+        arr = ( int32_t * )malloc( ( size_t )n * sizeof( int32_t ) );
+        if ( !arr ) return 0;
+        L->gsym_by_symidx[oi] = arr;
+        for ( s = 0; s < n; s++ ) {
+            const LcCoffSymbol *sy = LcCoff_SymByIndex( o, s );
+            GSym *g;
+            if ( !sy || !sy->name || !sy->name[0] ) {
+                arr[s] = LC_GSYM_NONE; continue;
+            }
+            g = gsym_find( L, sy->name );
+            arr[s] = g ? ( int32_t )( g - L->syms ) : LC_GSYM_NONE;
+        }
+    }
+    return 1;
+}
+
+/* Return the per-object cache array for object `o`, or NULL if none.
+** Called once per contribution scan; the returned pointer is then indexed
+** directly by symidx in the hot inner loop. */
+static const int32_t *gsym_cache_row( Linker *L, const LcCoffObj *o ) {
+    int oi;
+    if ( !L->gsym_by_symidx ) return NULL;
+    for ( oi = 0; oi < L->gsym_cache_nobjs; oi++ )
+        if ( L->objs[oi] == o ) return L->gsym_by_symidx[oi];
+    return NULL;
+}
+
 /* Sections kept even when no live relocation targets them. */
 static int gc_keep_by_name( const char *n ) {
     if ( strncmp( n, ".ctors", 6 ) == 0 ) return 1;
@@ -1073,9 +1148,17 @@ static int gc_keep_by_name( const char *n ) {
 
 /* Mark the contribution that defines symbol `sy` (referenced from object `o`)
 ** live, enqueueing it. Mirrors reloc_target_rva()'s resolution so the mark and
-** the later relocation pass agree on which section a symbol lands in. */
+** the later relocation pass agree on which section a symbol lands in.
+**
+** `cache_row` is the per-object symidx -> GSym-index array built by
+** gsym_cache_build; `symidx` is the raw slot index the relocation carries.
+** When the cache row is present the by-name path skips gsym_find entirely.
+** Passing NULL / an out-of-range symidx falls back to the name lookup so the
+** function remains correct in isolation (e.g. gc_root_symbol still works).
+*/
 static void gc_mark_target( Linker *L, GcMap *map, int *queue, int *qn,
-                            LcCoffObj *o, const LcCoffSymbol *sy ) {
+                            LcCoffObj *o, const LcCoffSymbol *sy,
+                            const int32_t *cache_row, uint32_t symidx ) {
     int ci;
     /* local definition in THIS object (covers STATIC section symbols and
     ** ordinary local refs) — unless it is a dropped COMDAT dup, in which case
@@ -1089,7 +1172,23 @@ static void gc_mark_target( Linker *L, GcMap *map, int *queue, int *qn,
         /* not contributed (dropped COMDAT) -> resolve by name below */
     }
     if ( sy->name[0] ) {
-        GSym *g = gsym_find( L, sy->name );
+        GSym *g;
+        if ( cache_row && symidx < o->nsymbols_slots ) {
+            int32_t gi = cache_row[symidx];
+            g = ( gi == LC_GSYM_NONE ) ? NULL : &L->syms[ gi ];
+#ifdef LC_GSYM_CACHE_ASSERT
+            {
+                GSym *fresh = gsym_find( L, sy->name );
+                /* Cache built after the resolve fixpoint and read while the
+                ** symbol table is frozen: it must agree exactly with a live
+                ** gsym_find. If this ever fires, an interner ran after the
+                ** cache was built. */
+                if ( fresh != g ) abort();
+            }
+#endif
+        } else {
+            g = gsym_find( L, sy->name );
+        }
         if ( g && g->defined && g->obj ) {
             ci = gc_map_get( map, g->obj, g->sec_index );
             if ( ci >= 0 && L->contribs[ci].dropped ) {
@@ -1104,11 +1203,13 @@ static void gc_scan_contrib( Linker *L, GcMap *map, int *queue, int *qn, int ci 
     Contrib *c = &L->contribs[ci];
     LcCoffObj *o = c->obj;
     LcCoffSection *sc = &o->sections[ c->sec_index ];
+    const int32_t *row = gsym_cache_row( L, o );
     uint32_t r;
     for ( r = 0; r < sc->nrelocs; r++ ) {
-        const LcCoffSymbol *sy = LcCoff_SymByIndex( o, sc->relocs[r].symidx );
+        uint32_t symidx = sc->relocs[r].symidx;
+        const LcCoffSymbol *sy = LcCoff_SymByIndex( o, symidx );
         if ( !sy ) continue;
-        gc_mark_target( L, map, queue, qn, o, sy );
+        gc_mark_target( L, map, queue, qn, o, sy, row, symidx );
     }
 }
 
@@ -2102,6 +2203,7 @@ static void linker_free( Linker *L ) {
     free( L->sym_slots );
     free( L->contribs );
     free( L->contrib_map.slots );
+    gsym_cache_free( L );
     for ( i = 0; i < OS_COUNT; i++ ) free( L->out[i].raw.p );
     for ( i = 0; i < L->nimports; i++ ) { free( L->imports[i].dll ); free( L->imports[i].func ); }
     free( L->imports );
@@ -2171,6 +2273,12 @@ int LcPe_Link( const LcPeLinkInputs *in, char *err, size_t errlen ) {
     /* collect contributions (COMDAT-deduped) */
     if ( !collect_contribs( &L ) ) { snprintf( err, errlen, "%s", L.err[0]?L.err:"collect failed" ); goto out; }
     if ( !contrib_map_build( &L ) ) { snprintf( err, errlen, "%s", "oom (contribution index)" ); goto out; }
+
+    /* Freeze the per-object symidx -> GSym cache the gc_sections mark phase
+    ** reads. Safe here because the resolve fixpoint has returned and no
+    ** further pass calls gsym_intern; the symbol table and objs list are
+    ** now stable for the rest of the link. */
+    if ( !gsym_cache_build( &L ) ) { snprintf( err, errlen, "%s", "oom (gsym cache)" ); goto out; }
 
     /* --gc-sections: drop unreachable function/data sections before layout. */
     if ( !gc_sections( &L, in->force_undef, in->nforce_undef ) ) {
