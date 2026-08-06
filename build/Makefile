@@ -608,7 +608,7 @@ imgui: $(BUILD_DIR)/imgui.a
 # A .d and its .o are one unit. An .o with no .d is silently untracked again, so
 # never delete only one kind -- use this, or `clean`, which removes $(BUILD_DIR)
 # wholesale. This target exists because the partial wipe it replaces was
-# documented in CLAUDE.md and done by hand.
+# previously done by hand.
 #
 # It must cover EVERY directory this project compiles into, not just the backend
 # ones. -MMD writes a fragment only as a side effect of compiling, so an object
