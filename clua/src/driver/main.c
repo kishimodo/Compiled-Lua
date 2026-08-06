@@ -20,6 +20,7 @@
 #include "../codegen/protoblob_emit.h"
 #include "../link/coff_write.h"
 #include "../link/pe_link_v2.h"
+#include "../link/import_lib.h"
 
 #include "../compiler/resolve.h"
 #include "../compiler/paths.h"
@@ -443,20 +444,54 @@ int lc_drive( const LcDriverOptions *opt ) {
         /* DLL builds: emit a .DEF module-definition file next to the .dll so
         ** downstream C consumers can produce a matching .lib (MSVC:
         ** `link /def:foo.def /dll`) or libfoo.a (MinGW:
-        ** `dlltool -d foo.def -D foo.dll -l foo.lib`). Gated on emit_dll --
-        ** an .exe has no import surface to describe, and skipping the write
-        ** for exe builds keeps the byte-for-byte output the fidelity tests
-        ** already pin. The export set today is {"clua_run"}: the DLL entry
-        ** that runtime_init.c publishes (__declspec(dllexport) int clua_run).
-        ** Adding module-level exports later means growing the array here; the
-        ** import_lib.c writer stays the same. */
-        if ( opt->emit_dll ) {
-            static const char *const kExports[] = { "clua_run" };
+        ** `dlltool -d foo.def -D foo.dll -l foo.lib`). Gated on
+        ** output_kind == LC_OUTPUT_DLL rather than the legacy emit_dll bool,
+        ** so `-shared` (which only sets output_kind) still triggers the .def
+        ** emit -- an .exe has no import surface to describe, and skipping the
+        ** write for exe builds keeps the byte-for-byte output the fidelity
+        ** tests already pin.
+        **
+        ** The export set is the real one: each name from the module's
+        ** `_exports = { name = fn, ...}` table, discovered by Resolve_Walk's
+        ** ScanEntryExports pass and shipped in res.Exports[]. The runtime
+        ** trampoline generator (pe_emit.c) wires each of those names into
+        ** the DLL's IMAGE_EXPORT_DIRECTORY, so what the .def lists matches
+        ** exactly what `dumpbin /exports` reports on the produced DLL. */
+        if ( output_kind == LC_OUTPUT_DLL ) {
+            const char **exp_names = NULL;
             char derr[ 256 ] = { 0 };
-            if ( !LuacLink_EmitDllDef( opt->output, opt->emit_def_path,
-                                       kExports,
-                                       sizeof( kExports ) / sizeof( kExports[0] ),
-                                       derr, sizeof( derr ) ) ) {
+            char def_derived[ 1024 ];
+            const char *def_target = opt->emit_def_path;
+            int emit_ok;
+
+            if ( def_target == NULL || def_target[0] == '\0' ) {
+                if ( !LcEmit_DeriveDefPath( opt->output, def_derived,
+                                            sizeof( def_derived ) ) ) {
+                    fprintf( stderr, "aotc: error: cannot derive .def path "
+                                     "from '%s' (path too long)\n", opt->output );
+                    goto cleanup;
+                }
+                def_target = def_derived;
+            }
+
+            if ( res.ExportCount > 0 ) {
+                size_t ei;
+                exp_names = ( const char ** )calloc( res.ExportCount,
+                                                    sizeof( char * ) );
+                if ( exp_names == NULL ) {
+                    fprintf( stderr, "aotc: oom\n" );
+                    goto cleanup;
+                }
+                for ( ei = 0; ei < res.ExportCount; ei++ ) {
+                    exp_names[ ei ] = res.Exports[ ei ].Name;
+                }
+            }
+
+            emit_ok = LuacLink_EmitDllDef( opt->output, def_target,
+                                           exp_names, res.ExportCount,
+                                           derr, sizeof( derr ) );
+            free( exp_names );
+            if ( !emit_ok ) {
                 fprintf( stderr, "aotc: error: .def emit failed: %s\n",
                          derr[0] ? derr : "(unknown)" );
                 goto cleanup;

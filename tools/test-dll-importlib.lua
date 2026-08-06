@@ -11,9 +11,14 @@
 --
 -- Contract (checked on any host that has clua.exe):
 --   * `clua build ... --dll -o foo.dll` also writes foo.def next to foo.dll.
+--   * `clua build ... --output=dll -o foo.dll` (no --dll, no --emit-def)
+--     ALSO auto-derives and writes foo.def next to foo.dll -- the gate lives
+--     on the resolved output kind, not on any legacy bool.
 --   * The .def opens with `LIBRARY "foo.dll"`.
---   * The .def has an `EXPORTS` section that names `clua_run` (the DLL entry
---     runtime_init.c publishes with __declspec(dllexport)).
+--   * The .def has an `EXPORTS` section that names every entry from the
+--     module's `_exports = { name = fn, ...}` table -- add, mul, greet in
+--     the fixture below -- matching what the DLL's IMAGE_EXPORT_DIRECTORY
+--     actually publishes.
 --   * An explicit --emit-def=<path> overrides the default derivation.
 --
 -- Skip discipline: this suite runs on hosts that may not yet ship the DLL
@@ -70,14 +75,21 @@ local function readfile(p)
   local s = f:read("*a"); f:close(); return s
 end
 
--- The fixture: a trivial closed-world program. The compiled DLL exports
--- clua_run (the runtime's __declspec(dllexport) entry), not per-Lua-function
--- symbols, so the fixture content doesn't affect the export table -- the
--- .def only names DLL-level entries.
+-- The fixture: a closed-world program whose module-scope `_exports = {...}`
+-- table names three functions. The resolver's ScanEntryExports pass picks
+-- those up and hands them to the .def writer, which must therefore list
+-- add / mul / greet -- the same names the DLL's export directory publishes
+-- (verified independently by tools/test-dll-output.lua).
 local src = TEMP .. "\\clua_t_dll.lua"
 local dll = TEMP .. "\\clua_t_dll.dll"
 local def_default = TEMP .. "\\clua_t_dll.def"
-writefile(src, 'print("hello from a CLua DLL")\n')
+writefile(src, [[
+_exports = {
+  add   = function(a, b) return a + b end,
+  mul   = function(a, b) return a * b end,
+  greet = function(name) return "hello, " .. name end,
+}
+]])
 
 os.remove(dll)
 os.remove(def_default)
@@ -118,14 +130,51 @@ ok(def:find('LIBRARY%s+"clua_t_dll%.dll"') ~= nil,
    'the .def opens with LIBRARY "<dll-basename>"',
    def:sub(1, 80))
 
--- EXPORTS section with the DLL entry name. The runtime publishes clua_run
--- as __declspec(dllexport) (clua/src/runtime/runtime_init.c); the export
--- set in the .def must list every symbol the DLL actually exports.
+-- EXPORTS section with the real names from `_exports = {...}`. The .def is
+-- the compile-time descriptor of the DLL's IMAGE_EXPORT_DIRECTORY, so every
+-- symbol the DLL actually publishes must show up here.
 ok(def:find("\nEXPORTS\n") ~= nil or def:find("^EXPORTS\n") ~= nil,
    'the .def has an EXPORTS section', def:sub(1, 120))
-ok(def:find("[\r\n]%s*clua_run[\r\n]") ~= nil
-   or def:find("[\r\n]%s*clua_run$") ~= nil,
-   'the EXPORTS section names clua_run', def:sub(1, 200))
+
+-- The .def writer emits one exported name per indented line
+-- ("    <name>\n"), so a plain '\n<ws><name>\n' anchor matches. Order in
+-- res.Exports[] follows the resolver's first-seen order (source order in
+-- the `_exports = {...}` literal), but the test only asserts membership.
+local function exports_name(name)
+  return def:find("[\r\n]%s*" .. name .. "[\r\n]") ~= nil
+      or def:find("[\r\n]%s*" .. name .. "$") ~= nil
+end
+ok(exports_name("add"),   'the EXPORTS section names add',   def:sub(1, 400))
+ok(exports_name("mul"),   'the EXPORTS section names mul',   def:sub(1, 400))
+ok(exports_name("greet"), 'the EXPORTS section names greet', def:sub(1, 400))
+
+-- ---- --output=dll alone (no --dll shim, no --emit-def) also auto-derives ----
+-- Regression: the auto-derive gate used to key off the legacy emit_dll bool,
+-- so `--output=dll` and `-shared` (both set only output_kind) skipped the
+-- .def emit entirely. Assert the gate now lives on the resolved output kind.
+local dll2 = TEMP .. "\\clua_t_dll_output.dll"
+local def2 = TEMP .. "\\clua_t_dll_output.def"
+os.remove(dll2); os.remove(def2)
+local co, oo = run(('"%s" build "%s" --output=dll -o "%s"')
+                   :format(clua_abs, src, dll2))
+ok(co == 0, "clua build --output=dll (alone) succeeds", oo:sub(1, 200))
+ok(exists(dll2), "clua build --output=dll produced the DLL at -o path", dll2)
+ok(exists(def2),
+   "--output=dll alone auto-derives the .def beside the DLL (no --emit-def)",
+   def2)
+if exists(def2) then
+  local d2 = readfile(def2) or ""
+  ok(d2:find('LIBRARY%s+"clua_t_dll_output%.dll"') ~= nil,
+     '--output=dll: .def opens with LIBRARY "<dll-basename>"',
+     d2:sub(1, 80))
+  local function d2_has(name)
+    return d2:find("[\r\n]%s*" .. name .. "[\r\n]") ~= nil
+        or d2:find("[\r\n]%s*" .. name .. "$") ~= nil
+  end
+  ok(d2_has("add") and d2_has("mul") and d2_has("greet"),
+     '--output=dll: .def lists add/mul/greet from `_exports`',
+     d2:sub(1, 400))
+end
 
 -- ---- explicit --emit-def=<path> overrides the derivation ----
 local custom_def = TEMP .. "\\clua_t_dll_custom.def"
@@ -150,6 +199,8 @@ ok(not exists(exe_def), "clua build (exe) emitted NO .def (nothing to describe)"
    exe_def)
 
 os.remove(src); os.remove(dll); os.remove(def_default); os.remove(custom_def)
+os.remove(TEMP .. "\\clua_t_dll_output.dll")
+os.remove(TEMP .. "\\clua_t_dll_output.def")
 os.remove(exe_src); os.remove(exe_out); os.remove(exe_def)
 
 if fails > 0 then os.exit(1) end
