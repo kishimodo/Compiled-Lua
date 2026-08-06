@@ -99,8 +99,10 @@ aot-entry: $(BUILD_DIR)/aot_entry.o
 
 # --- aot_entry_dll.o — entry object for --output=dll ------------------------
 # Same compile knobs as aot_entry.o above (size + no async unwind), just a
-# different source file. Provides Rt_DllMain / Rt_DllExportDefault and the
-# closed-world stubs. See clua/src/runtime/aot_entry_dll.c for the shape.
+# different source file. Provides Rt_DllMain plus the shared export
+# dispatcher Rt_DllExportDispatch (tail-jumped into by every per-export
+# trampoline the internal linker synthesises) and the closed-world stubs.
+# See clua/src/runtime/aot_entry_dll.c for the shape.
 $(BUILD_DIR)/aot_entry_dll.o: $(SRC_DIR)/runtime/aot_entry_dll.c
 	$(CC) -std=c99 -I$(SRC_DIR) -I$(LUA_DIR) \
 	    -DCLUA_TARGET_WINDOWS_X64=1 -DLUA_COMPAT_5_3 \

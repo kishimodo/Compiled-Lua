@@ -5,29 +5,34 @@
  *  aot_entry.c (main() + closed-world stubs + the lookup dispatch hook);
  *  this file provides the same closed-world stubs plus a `Rt_DllMain` entry
  *  point (the DLL loader's initial call), a `Rt_ModuleInit` / `Rt_ModuleFini`
- *  pair, and a placeholder `Rt_DllExportDefault` symbol every export in the
- *  synthesized IMAGE_EXPORT_DIRECTORY points at.
+ *  pair, and the `Rt_DllExportDispatch` symbol every export trampoline the
+ *  linker synthesises tail-jumps to.
  *
- *  This first arc lands the PE-header and export-directory plumbing. Each
- *  exported name resolves to `Rt_DllExportDefault`, which returns zero. Real
- *  per-export trampolines (extract args from the C ABI, push onto the Lua
- *  stack, call the `_exports[name]` closure, return the result) are the
- *  immediate follow-up documented in the commit message.
- *
- *  What does work end-to-end today:
+ *  What works end-to-end today:
  *    - `clua build foo.lua --output=dll -o foo.dll` produces a valid PE with
  *      IMAGE_FILE_DLL set, an IMAGE_EXPORT_DIRECTORY whose Name/Ordinal/RVA
  *      tables the Windows loader accepts, and each requested name available
  *      via GetProcAddress.
  *    - `Rt_DllMain` stands up the Lua state on DLL_PROCESS_ATTACH, runs the
- *      module chunk (which populates `_exports = {...}` in globals), stores
- *      that table in the registry for the follow-up trampoline work, and
- *      tears the state down on DLL_PROCESS_DETACH.
+ *      module chunk (which populates `_exports = {...}` in globals), and
+ *      captures that table in the registry (g_ExportsRef) so
+ *      Rt_DllExportDispatch can look it up. The state is torn down on
+ *      DLL_PROCESS_DETACH.
+ *    - Every exported name's AddressOfFunctions RVA points at a linker-
+ *      synthesised trampoline in .text that stashes the export's ordinal in
+ *      %r8d and tail-jumps to Rt_DllExportDispatch(double,double,int32_t).
+ *      That helper looks up the corresponding closure via g_ExportsRef +
+ *      ordinal-derived Lua array index, pushes the two double arguments,
+ *      lua_pcall's it, and returns the numeric result as a double. The
+ *      supported C ABI is `double fn(double, double)`, which the fixture's
+ *      `add = function(a,b) return a+b end` satisfies (Lua numbers coerce
+ *      cleanly from doubles).
  *
- *  What does NOT work end-to-end today, deliberately:
- *    - Calling an exported name from C actually invokes `Rt_DllExportDefault`
- *      (returns 0). Wiring the export RVA to a per-export C ABI trampoline
- *      is the immediate follow-up commit.
+ *  Not yet supported (deliberate scope for a later arc):
+ *    - Other signatures (int/pointer/string in or out). The trampoline
+ *      generator hard-codes the (double,double)->double marshalling; adding
+ *      more shapes needs either an `_export_types` annotation table or a
+ *      real signature parser and a per-shape trampoline template.
  *
  *  Compile-time: exactly one aot_entry_dll.o per DLL link. See pe_link_v2.c's
  *  toolchain resolution (aot_entry_dll_o).
@@ -206,11 +211,146 @@ static void Rt_ModuleFini( void ) {
         lua_close( g_L );
         g_L = NULL;
     }
+    if ( g_ExportNames != NULL ) {
+        int i;
+        for ( i = 0; i < g_ExportCount; i++ ) {
+            /* _strdup memory owned here; cast away const only for free. */
+            free( ( void * )g_ExportNames[ i ] );
+        }
+        free( ( void * )g_ExportNames );
+        g_ExportNames = NULL;
+        g_ExportCount = 0;
+    }
+}
+
+/* Shared per-export dispatcher. The linker synthesises one 11-byte trampoline
+   per exported name whose only work is:
+     mov r8d, <ordinal>            ; 41 B8 xx xx xx xx  (6 bytes)
+     jmp Rt_DllExportDispatch      ; E9 xx xx xx xx     (5 bytes)
+   The Windows x64 ABI maps the trampoline's (double, double) caller inputs
+   into xmm0/xmm1 directly, and Rt_DllExportDispatch's third parameter --
+   int32_t -- comes in r8d, exactly where the trampoline just wrote it. That
+   is why the signature order is (double,double,int32_t) rather than the more
+   natural (int,double,double): no argument shuffling is needed.
+
+   Ordinal is 0-based here (the linker sorts export_names alphabetically and
+   emits one trampoline per index). The registry ref g_ExportsRef points at
+   the `_exports` table; its keys are strings, not integers, so we translate
+   the ordinal to a name via the same sorted order the linker used --
+   g_ExportNames[] below is patched by the DLL entry each time a new export
+   list is captured. For the first arc we accept only (double,double)->double
+   Lua functions; any deviation returns 0.0 (Lua nil -> 0). */
+
+/* The names table is populated in Rt_CaptureExportNames after the module
+   chunk runs. aot_entry_dll.c is built once and reused for every DLL link,
+   so the names cannot be hard-coded here; instead the runtime walks the
+   captured `_exports` table and sorts the keys with the same comparator
+   the linker used (byte-order strcmp on the C strings) so ordinal N here
+   maps to the same name as AddressOfFunctions[N] in the export table. */
+static const char **g_ExportNames = NULL;
+static int          g_ExportCount = 0;
+
+double Rt_DllExportDispatch( double a, double b, int32_t ordinal ) {
+    lua_State *L;
+    double     result = 0.0;
+    int        status;
+    const char *name;
+
+    /* If the module never populated `_exports`, or the ordinal falls outside
+       the captured range, there is nothing to call. Returning 0.0 keeps the
+       function well-defined for FFI callers (LuaJIT-style ffi.cdef treats a
+       double return of 0 as a valid, non-error value). */
+    if ( g_L == NULL || g_ExportsRef == LUA_NOREF ||
+         g_ExportNames == NULL || ordinal < 0 || ordinal >= g_ExportCount ) {
+        return 0.0;
+    }
+    name = g_ExportNames[ ordinal ];
+    if ( name == NULL ) return 0.0;
+
+    EnterCriticalSection( &g_ModuleCs );
+    L = g_L;
+
+    /* Push _exports[name] onto the stack. If it is not callable, unwind and
+       return zero -- do not raise (the C caller has no Lua error path). */
+    lua_rawgeti( L, LUA_REGISTRYINDEX, g_ExportsRef );  /* [ tbl ] */
+    if ( lua_type( L, -1 ) != LUA_TTABLE ) {
+        lua_pop( L, 1 );
+        LeaveCriticalSection( &g_ModuleCs );
+        return 0.0;
+    }
+    lua_getfield( L, -1, name );                        /* [ tbl fn ] */
+    if ( !lua_isfunction( L, -1 ) ) {
+        lua_pop( L, 2 );
+        LeaveCriticalSection( &g_ModuleCs );
+        return 0.0;
+    }
+    /* Reorder to [ fn ] so pcall's stack layout is clean, then push args. */
+    lua_remove( L, -2 );                                /* [ fn ] */
+    lua_pushnumber( L, ( lua_Number )a );
+    lua_pushnumber( L, ( lua_Number )b );
+    status = lua_pcall( L, 2, 1, 0 );
+    if ( status == LUA_OK ) {
+        if ( lua_isnumber( L, -1 ) ) {
+            result = ( double )lua_tonumber( L, -1 );
+        }
+        lua_pop( L, 1 );
+    } else {
+        /* Swallow the error; a real API would need a diagnostic channel back
+           to the C caller. Pop the error message so the stack is balanced. */
+        lua_pop( L, 1 );
+    }
+    LeaveCriticalSection( &g_ModuleCs );
+    return result;
+}
+
+/* Populate g_ExportNames from the captured _exports table. Called once after
+   Rt_ModuleInit succeeds, before any user thread can dispatch. The names are
+   sorted alphabetically to match the order the internal linker uses when it
+   lays out AddressOfFunctions (see pe_emit.c: build_exports, qsort by name).
+   The strings are strdup'd into a small malloc'd array; freed by
+   Rt_ModuleFini. */
+static int compare_cstr_ptrs( const void *a, const void *b ) {
+    const char *sa = *( const char *const * )a;
+    const char *sb = *( const char *const * )b;
+    return strcmp( sa, sb );
+}
+
+static void Rt_CaptureExportNames( void ) {
+    lua_State *L = g_L;
+    int i, n = 0;
+    if ( L == NULL || g_ExportsRef == LUA_NOREF ) return;
+
+    lua_rawgeti( L, LUA_REGISTRYINDEX, g_ExportsRef );  /* [ tbl ] */
+    if ( lua_type( L, -1 ) != LUA_TTABLE ) { lua_pop( L, 1 ); return; }
+
+    /* Count string-keyed entries. */
+    lua_pushnil( L );
+    while ( lua_next( L, -2 ) != 0 ) {
+        if ( lua_type( L, -2 ) == LUA_TSTRING ) n++;
+        lua_pop( L, 1 );
+    }
+    if ( n == 0 ) { lua_pop( L, 1 ); return; }
+
+    g_ExportNames = ( const char ** )calloc( ( size_t )n, sizeof( char * ) );
+    if ( g_ExportNames == NULL ) { lua_pop( L, 1 ); return; }
+
+    i = 0;
+    lua_pushnil( L );
+    while ( lua_next( L, -2 ) != 0 && i < n ) {
+        if ( lua_type( L, -2 ) == LUA_TSTRING ) {
+            const char *k = lua_tostring( L, -2 );
+            g_ExportNames[ i++ ] = _strdup( k );
+        }
+        lua_pop( L, 1 );
+    }
+    lua_pop( L, 1 );  /* tbl */
+
+    qsort( g_ExportNames, ( size_t )i, sizeof( char * ), compare_cstr_ptrs );
+    g_ExportCount = i;
 }
 
 /* The DLL loader entry. Standard signature; MUST return TRUE on ATTACH for
-   the loader to accept the DLL. See the follow-up commit for the real
-   per-export trampolines that would call into g_L / g_ExportsRef. */
+   the loader to accept the DLL. */
 BOOL WINAPI Rt_DllMain( HINSTANCE inst, DWORD reason, LPVOID reserved ) {
     ( void )inst; ( void )reserved;
     InitOnceExecuteOnce( &g_ModuleOnce, ModuleInitCb, NULL, NULL );
@@ -221,6 +361,9 @@ BOOL WINAPI Rt_DllMain( HINSTANCE inst, DWORD reason, LPVOID reserved ) {
             LeaveCriticalSection( &g_ModuleCs );
             return FALSE;
         }
+        /* Snapshot the export-name array so Rt_DllExportDispatch can map an
+           ordinal back to a Lua key without repeatedly walking the table. */
+        Rt_CaptureExportNames( );
         LeaveCriticalSection( &g_ModuleCs );
         return TRUE;
     case DLL_PROCESS_DETACH:
@@ -236,12 +379,12 @@ BOOL WINAPI Rt_DllMain( HINSTANCE inst, DWORD reason, LPVOID reserved ) {
     }
 }
 
-/* Placeholder export target. Every entry in IMAGE_EXPORT_DIRECTORY.AddressOfFunctions
-   points at this symbol until the per-export trampoline generator lands.
-   Callers who take &foo via GetProcAddress will get a valid function pointer
-   that returns 0, rather than a garbage address. The signature is
-   deliberately int(void) so the loader-side type check (most FFIs coerce
-   the value type based on the caller's declared cdecl) does not reject it. */
+/* Legacy fallback export target. Retained so out-of-tree DLL entry objects
+   that still force-undef `Rt_DllExportDefault` continue to link cleanly. Not
+   referenced by the current export-directory wiring: the linker synthesises
+   per-name trampolines that tail-jump to Rt_DllExportDispatch above. If
+   gc-sections runs without any --undefined=Rt_DllExportDefault root this
+   function is dropped. */
 int Rt_DllExportDefault( void ) {
     return 0;
 }

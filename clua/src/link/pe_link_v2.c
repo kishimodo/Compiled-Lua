@@ -375,7 +375,7 @@ static int LinkInternal( const LcToolchain *tc, const char *userObj,
     char  arcbuf[ N_CRT_ARCHIVES + 2 ][ LC_PATH_MAX ];
     const char *objs[ 6 ];
     const char *arcs[ N_CRT_ARCHIVES + 2 ];
-    const char *undef[ 2 + CLUA_STDLIB_ANCHOR_MAX ];   /* +1 for Rt_DllExportDefault */
+    const char *undef[ 2 + CLUA_STDLIB_ANCHOR_MAX ];   /* +1 for Rt_DllExportDispatch */
     int   nobj = 0, narc = 0, nundef = 0, i;
     LcPeLinkInputs in;
 
@@ -409,9 +409,12 @@ static int LinkInternal( const LcToolchain *tc, const char *userObj,
     }
 
     if ( require_ffi ) undef[nundef++] = "Clua_OpenFfi";
-    /* DLL: force-undef the export stub so gc-sections cannot sweep it. Same
-    ** pattern as the stdlib anchors. */
-    if ( output_kind == LC_LINK_OUTPUT_DLL ) undef[nundef++] = "Rt_DllExportDefault";
+    /* DLL: force-undef the shared export dispatcher so gc-sections cannot
+    ** sweep it. Every AddressOfFunctions entry the linker synthesises tail-
+    ** jumps into this symbol; without an --undefined root it looks dead
+    ** because nothing in the object graph references it. Same pattern as
+    ** the stdlib anchors and Clua_OpenFfi. */
+    if ( output_kind == LC_LINK_OUTPUT_DLL ) undef[nundef++] = "Rt_DllExportDispatch";
     nundef += StdlibAnchorUndefs( used_libs, &undef[ nundef ] );
 
     memset( &in, 0, sizeof in );

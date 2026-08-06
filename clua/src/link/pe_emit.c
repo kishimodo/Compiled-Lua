@@ -1585,12 +1585,12 @@ static int build_imports( Linker *L, ImportLayout *il ) {
 ** (functions RVAs / name RVAs / ordinals) + the DLLName string + each
 ** export's name string, all placed contiguously into .rdata.
 **
-** All export functions point at the runtime helper Rt_DllExportDefault,
-** which must be defined by the DLL's entry object (aot_entry_dll.o). This
-** is the "stubs return a fixed value" arc; real per-export trampolines are
-** the immediate follow-up. Names are sorted alphabetically because the PE
-** spec requires it (the loader binary-searches the name array on
-** GetProcAddress).
+** Each AddressOfFunctions entry points at a per-name trampoline synthesised
+** into OS_TEXT (build_export_trampolines below). Every trampoline stashes
+** its ordinal in r8d and tail-jumps to Rt_DllExportDispatch, defined in the
+** DLL's entry object (aot_entry_dll.o). Names are sorted alphabetically so
+** the runtime dispatcher's ordinal-to-name mapping stays in lock-step with
+** the PE loader's binary search on GetProcAddress.
 =================================================================== */
 typedef struct {
     uint32_t dir_off;         /* offset of the export directory in OS_RDATA  */
@@ -1599,12 +1599,22 @@ typedef struct {
     uint32_t ords_off;        /* offset of the ordinal table                 */
     uint32_t dllname_off;     /* offset of the DLL name string               */
     uint32_t *name_off;       /* per-export name-string offset               */
+    /* Per-export trampoline offset within OS_TEXT.raw. The trampoline is an
+    ** 11-byte stub written by build_export_trampolines and patched by
+    ** finalize_exports once the dispatcher's RVA is known. */
+    uint32_t *trampoline_off;
     uint32_t nexports;
 } ExportLayout;
+
+/* Fixed size of each linker-synthesized export trampoline (mov r8d,imm32 +
+** jmp rel32). Kept as a compile-time constant so both the reservation pass
+** and the patch pass agree without threading a size parameter. */
+#define LC_EXPORT_TRAMPOLINE_BYTES 11
 
 static void export_layout_free( ExportLayout *el ) {
     if ( !el ) return;
     free( el->name_off );
+    free( el->trampoline_off );
     memset( el, 0, sizeof( *el ) );
 }
 
@@ -1632,6 +1642,8 @@ static int build_exports( Linker *L, ExportLayout *el ) {
     el->nexports = ( uint32_t )L->nexport_names;
     el->name_off = ( uint32_t * )calloc( el->nexports, sizeof( uint32_t ) );
     if ( !el->name_off ) return lerr( L, "oom exports", NULL );
+    el->trampoline_off = ( uint32_t * )calloc( el->nexports, sizeof( uint32_t ) );
+    if ( !el->trampoline_off ) return lerr( L, "oom exports", NULL );
 
     /* Reserve space starting at the current .rdata end so we do not perturb
     ** any layout downstream. Align to 4 for the directory header. */
@@ -1662,26 +1674,74 @@ static int build_exports( Linker *L, ExportLayout *el ) {
     return 1;
 }
 
+/* Reserve LC_EXPORT_TRAMPOLINE_BYTES per export inside OS_TEXT so each
+** exported name has a distinct RVA to advertise via AddressOfFunctions.
+** The bytes are zeroed here and patched by finalize_exports once the
+** dispatcher's final RVA is known. Runs immediately after build_imports
+** so the trampolines share the same .text growth path as the import
+** thunks (same 16-byte pre-alignment discipline).
+**
+** Layout of one 11-byte trampoline (little-endian):
+**   41 B8 xx xx xx xx      mov  r8d, <ordinal>
+**   E9 yy yy yy yy         jmp  Rt_DllExportDispatch   (rel32)
+**
+** The Windows x64 ABI pins the trampoline's two double parameters into
+** xmm0 / xmm1, which the dispatcher inherits by position (arg0=xmm0,
+** arg1=xmm1, arg2=r8/r8d for an int32). No shuffling is necessary. */
+static int build_export_trampolines( Linker *L, ExportLayout *el ) {
+    OutSec *text = &L->out[OS_TEXT];
+    uint32_t i;
+
+    if ( L->output_kind != LC_PE_OUTPUT_DLL || el->nexports == 0 ) return 1;
+
+    /* Match the import-thunk 16-byte pre-alignment for cleanliness (both are
+    ** short direct-jumps and share the same instruction-cache line rules). */
+    while ( text->virt_size % 16 ) {
+        if ( !b_zero( &text->raw, 1 ) ) return lerr( L, "oom", NULL );
+        text->virt_size++;
+    }
+    for ( i = 0; i < el->nexports; i++ ) {
+        uint8_t stub[ LC_EXPORT_TRAMPOLINE_BYTES ];
+        /* mov r8d, i (immediate patched in place: little-endian at +2) */
+        stub[ 0 ] = 0x41; stub[ 1 ] = 0xB8;
+        w32( stub + 2, i );
+        /* jmp rel32 -- displacement patched in finalize_exports */
+        stub[ 6 ] = 0xE9;
+        stub[ 7 ] = stub[ 8 ] = stub[ 9 ] = stub[ 10 ] = 0x00;
+        el->trampoline_off[ i ] = text->virt_size;
+        if ( !b_putn( &text->raw, stub, sizeof( stub ) ) )
+            return lerr( L, "oom", NULL );
+        text->virt_size += ( uint32_t )sizeof( stub );
+    }
+    text->present = 1;
+    return 1;
+}
+
 /* Write the export directory content once .rdata's final RVA and every
-** exported symbol's RVA are known. Every export points at the same runtime
-** stub Rt_DllExportDefault; if it is not defined the link errors. */
+** exported symbol's RVA are known. Each AddressOfFunctions slot points at
+** its per-name trampoline in OS_TEXT; each trampoline's jmp rel32 is
+** patched to target Rt_DllExportDispatch. The old placeholder symbol
+** Rt_DllExportDefault is no longer required by the export table (it
+** remains in aot_entry_dll.c as a legacy fallback for out-of-tree entry
+** objects). */
 static int finalize_exports( Linker *L, ExportLayout *el ) {
     OutSec  *rdata = &L->out[OS_RDATA];
+    OutSec  *text  = &L->out[OS_TEXT];
     uint8_t *base;
     uint32_t rva;
-    uint32_t stub_rva = 0;
-    GSym    *stub;
+    uint32_t dispatch_rva = 0;
+    GSym    *dispatch;
     int      i;
 
     if ( L->output_kind != LC_PE_OUTPUT_DLL || el->nexports == 0 ) return 1;
-    stub = gsym_find( L, "Rt_DllExportDefault" );
-    if ( !stub || !stub->defined ) {
+    dispatch = gsym_find( L, "Rt_DllExportDispatch" );
+    if ( !dispatch || !dispatch->defined ) {
         return lerr( L,
-            "DLL export target 'Rt_DllExportDefault' undefined "
+            "DLL export dispatcher 'Rt_DllExportDispatch' undefined "
             "(link aot_entry_dll.o or a compatible entry object)",
             NULL );
     }
-    stub_rva = stub->rva;
+    dispatch_rva = dispatch->rva;
     base = rdata->raw.p;
     rva  = rdata->rva;
 
@@ -1699,9 +1759,18 @@ static int finalize_exports( Linker *L, ExportLayout *el ) {
         w32( d + 32, rva + el->names_off );            /* AddressOfNames        */
         w32( d + 36, rva + el->ords_off );             /* AddressOfNameOrdinals */
     }
-    /* address table: every entry -> stub RVA */
+    /* address table: entry i -> RVA of trampoline i */
     for ( i = 0; i < ( int )el->nexports; i++ ) {
-        w32( base + el->funcs_off + ( uint32_t )i * 4, stub_rva );
+        uint32_t tr_rva = text->rva + el->trampoline_off[ i ];
+        w32( base + el->funcs_off + ( uint32_t )i * 4, tr_rva );
+        /* patch the trampoline's jmp rel32 to the dispatcher.
+        ** disp = target - (rip after jmp) = dispatch_rva - (tr_rva + 11) */
+        {
+            uint32_t jmp_off = el->trampoline_off[ i ] + 6; /* opcode E9 */
+            int32_t disp = ( int32_t )( dispatch_rva -
+                ( tr_rva + LC_EXPORT_TRAMPOLINE_BYTES ) );
+            w32( text->raw.p + jmp_off + 1, ( uint32_t )disp );
+        }
     }
     /* name pointer table + ordinal table */
     for ( i = 0; i < ( int )el->nexports; i++ ) {
@@ -2606,6 +2675,16 @@ int LcPe_Link( const LcPeLinkInputs *in, char *err, size_t errlen ) {
     /* DLL: reserve zeroed .rdata space for the export directory. Filled in
     ** finalize_exports once .rdata's RVA and the stub symbol RVA are known. */
     if ( !build_exports( &L, &el ) ) { snprintf( err, errlen, "%s", L.err ); goto out; }
+
+    /* DLL: emit per-export C-ABI trampolines into OS_TEXT. Must run before
+    ** assign_rvas so the added bytes are included in .text's final size,
+    ** and before resolve_addrs / apply_relocations so those passes see the
+    ** trampoline bytes as part of the text layout. Patching of the jmp
+    ** displacement is deferred to finalize_exports (needs the dispatcher's
+    ** final RVA). */
+    if ( !build_export_trampolines( &L, &el ) ) {
+        snprintf( err, errlen, "%s", L.err ); goto out;
+    }
 
     /* headers size depends on the final section count. .reloc is built later
     ** (it needs RVAs), so predict whether it will exist: any ADDR64 site

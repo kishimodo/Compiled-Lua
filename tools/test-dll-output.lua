@@ -7,13 +7,14 @@
 --   * every name from the module's `_exports = {...}` table is present in
 --     the export name table
 --
--- Does NOT cover (deliberately, this arc):
---   * calling an exported function via GetProcAddress and getting the Lua
---     result back -- the exports currently point at Rt_DllExportDefault
---     (returns 0) until the per-export trampoline generator lands.
+-- Also covers (arc that landed the trampoline generator):
+--   * loading the built DLL via LoadLibraryA + GetProcAddress
+--   * calling the exported `add` function with (double,double) and
+--     verifying the returned double is the Lua function's return value
 --
 -- Skips cleanly when build/bin/clua.exe is missing (worktree may not have
--- built the toolchain).
+-- built the toolchain), or when the FFI runtime library is not available
+-- to the host lua interpreter running this test.
 
 local CLUA = "build\\bin\\clua.exe"
 
@@ -173,6 +174,52 @@ if exists(dll) then
       end
       ok(names_found["add"],   "'add' appears in the export name table")
       ok(names_found["greet"], "'greet' appears in the export name table")
+    end
+  end
+end
+
+-- ---- 3. call the exported add(2,3) via LoadLibraryA + GetProcAddress ----
+-- The trampoline generator wires each AddressOfFunctions slot to a small
+-- .text stub that tail-jumps into Rt_DllExportDispatch(double,double,int).
+-- Supported signature for this arc: (double,double)->double. The Lua fn
+-- `add = function(a,b) return a+b end` is a natural match: numbers coerce
+-- from doubles in both directions.
+--
+-- The test loads the DLL through the platform's own loader (LoadLibraryA)
+-- so the DLL_PROCESS_ATTACH path -- Rt_DllMain / Rt_ModuleInit -- runs and
+-- populates g_ExportsRef. Skipped when the host Lua running this test does
+-- not provide the FFI (e.g. a stock lua.exe without CLua's runtime).
+if exists(dll) then
+  -- ffi is a runtime-provided global; on stock lua.exe it is absent.
+  local ffi = rawget(_G, "ffi")
+  if type(ffi) ~= "table" or type(ffi.cdef) ~= "function" then
+    print("[~] SKIP call-through-ffi (ffi global not available in host lua)")
+  else
+    -- Tolerate duplicate typedef/proto entries: if the host has already
+    -- ffi.cdef'd any of these (e.g. windows package was required earlier),
+    -- ignore the redefinition error and rely on the earlier declaration.
+    pcall(ffi.cdef, [[
+      typedef void* HMODULE;
+      typedef void* FARPROC;
+      HMODULE LoadLibraryA(const char *lpLibFileName);
+      int FreeLibrary(HMODULE hLibModule);
+      FARPROC GetProcAddress(HMODULE hModule, const char *lpProcName);
+    ]])
+    pcall(ffi.cdef, "typedef double (*add_fn_t)(double, double);")
+    local mod = ffi.C.LoadLibraryA(dll)
+    ok(mod ~= nil and mod ~= ffi.cast("HMODULE", 0),
+       "LoadLibraryA succeeds on the built DLL")
+    if mod ~= nil then
+      local proc = ffi.C.GetProcAddress(mod, "add")
+      ok(proc ~= nil and proc ~= ffi.cast("FARPROC", 0),
+         "GetProcAddress('add') returns a non-NULL address")
+      if proc ~= nil then
+        local add = ffi.cast("add_fn_t", proc)
+        local result = add(2.0, 3.0)
+        ok(result == 5.0, "add(2.0, 3.0) returned 5.0 through the trampoline",
+           ("got " .. tostring(result)))
+      end
+      ffi.C.FreeLibrary(mod)
     end
   end
 end
