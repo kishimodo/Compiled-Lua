@@ -131,6 +131,46 @@ int X64Emit_AddMemToReg( LcCodeBuf *Buf, X64_GPR_T Dst,
 
 /*!
  * @brief
+ *  REX.W = 1 SUB RAX, imm8   (48 83 E8 ib).  Encodes:  SUB RAX, imm8
+ *  (sign-extended). 4 bytes total; the imm8 must fit int8 (caller-checked).
+ *  Used by the OP_GETTABLE inline fast path to turn a one-based Lua key
+ *  into the zero-based array index for the bounds check.
+ */
+int X64Emit_SubRaxImm8( LcCodeBuf *Buf, int8_t Imm );
+
+/*!
+ * @brief
+ *  REX.W = 1 SHL RAX, imm8   (48 C1 E0 ib).  Encodes:  SHL RAX, imm8
+ *  (logical left shift by imm8 bits, imm8 in [0, 63]). 4 bytes total.
+ *  Used by the OP_GETTABLE inline fast path to scale the array index by
+ *  sizeof(TValue) = 16 for pointer arithmetic.
+ */
+int X64Emit_ShlRaxImm8( LcCodeBuf *Buf, int8_t Imm );
+
+/*!
+ * @brief
+ *  CMP r/m32, r32   (39 /r, no REX.W).  Encodes:  CMP [Base + Disp], Src32
+ *  32-bit compare of a memory dword with a 32-bit register. Used to compare
+ *  Table.alimit (unsigned int at [Table+12]) against a computed unsigned
+ *  index in EAX for the OP_GETTABLE array bounds check.
+ */
+int X64Emit_CmpMem32Reg( LcCodeBuf *Buf, X64_GPR_T Base, int32_t Disp,
+                         X64_GPR_T Src );
+
+/*!
+ * @brief
+ *  REX.W = 1 LEA r64, [Base + Index]   (48 8D /r + SIB, scale=00, disp0).
+ *  Encodes:  LEA Dst, [Base + Index]. Scale is fixed at 1 (SIB.ss=00).
+ *  Dst, Base, Index must all be RAX..RDI (low bank); the encoder returns 0
+ *  if a high register is supplied (a general SIB form would require REX.X
+ *  which no fast path needs today). 4 bytes total for the low-bank forms
+ *  used by the OP_GETTABLE inline path: base=RDX, index=RAX -> 48 8D 14 02.
+ */
+int X64Emit_LeaRegBaseIndex( LcCodeBuf *Buf, X64_GPR_T Dst,
+                             X64_GPR_T Base, X64_GPR_T Index );
+
+/*!
+ * @brief
  *  JNE rel8.  4-byte conditional skip-forward by N bytes.
  *  (We hand-compute the forward jump distance when emitting fast paths.)
  */

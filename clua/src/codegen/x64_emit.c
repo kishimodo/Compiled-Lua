@@ -208,6 +208,51 @@ int X64Emit_AddMemToReg( LcCodeBuf *Buf, X64_GPR_T Dst,
     return EmitMemOp( Buf, 0x03, Lo3( Dst ), IsHi( Dst ), Base, Disp, 1 );
 }
 
+int X64Emit_SubRaxImm8( LcCodeBuf *Buf, int8_t Imm ) {
+    /* 48 83 E8 ib   SUB RAX, imm8  (REX.W + 83 /5 + rm=RAX + sign-extended
+       imm8). ModR/M byte: mod=11, reg=/5 (SUB), rm=RAX (0) -> 0xE8. */
+    unsigned char Bytes[ 4 ] = { 0x48, 0x83, 0xE8, ( unsigned char )Imm };
+    return AppendBytes( Buf, Bytes, 4 );
+}
+
+int X64Emit_ShlRaxImm8( LcCodeBuf *Buf, int8_t Imm ) {
+    /* 48 C1 E0 ib   SHL RAX, imm8  (REX.W + C1 /4 + rm=RAX + imm8 in [0,63]).
+       ModR/M byte: mod=11, reg=/4 (SHL), rm=RAX (0) -> 0xE0. */
+    unsigned char Bytes[ 4 ] = { 0x48, 0xC1, 0xE0, ( unsigned char )Imm };
+    return AppendBytes( Buf, Bytes, 4 );
+}
+
+int X64Emit_CmpMem32Reg( LcCodeBuf *Buf, X64_GPR_T Base, int32_t Disp,
+                         X64_GPR_T Src ) {
+    /* 39 /r   CMP r/m32, r32  (32-bit operand; no REX.W, so the shared
+       EmitMemOp with UseW=0 does the right thing). REX prefix is emitted
+       only if Src is a high register (REX.R) or Base is high (REX.B). */
+    return EmitMemOp( Buf, 0x39, Lo3( Src ), IsHi( Src ), Base, Disp, 0 );
+}
+
+int X64Emit_LeaRegBaseIndex( LcCodeBuf *Buf, X64_GPR_T Dst,
+                             X64_GPR_T Base, X64_GPR_T Index ) {
+    /* 48 8D /r  SIB  LEA Dst, [Base + Index]  (scale=1, disp0).  Low-bank
+       registers only (RAX..RDI); the general SIB form would need REX.X for a
+       high index register and REX.B for a high base, and no caller in the
+       backend today wants a high SIB base or index. Reject cleanly instead of
+       silently emitting a wrong instruction. Also reject RBP/R13 as the base
+       (SIB with mod=00 and base=RBP encodes RIP + disp32, not [RBP]) and RSP
+       as the index (SIB.index=100 encodes "no index"). */
+    unsigned char Bytes[ 4 ];
+    if ( IsHi( Dst ) || IsHi( Base ) || IsHi( Index ) )   return 0;
+    if ( Lo3( Base ) == 5 )                               return 0;   /* RBP */
+    if ( Lo3( Index ) == 4 )                              return 0;   /* RSP */
+    /* 48 8D <ModR/M> <SIB>:
+         ModR/M = mod=00 reg=Dst rm=100 (SIB follows)
+         SIB    = ss=00 index=Index base=Base */
+    Bytes[ 0 ] = 0x48;
+    Bytes[ 1 ] = 0x8D;
+    Bytes[ 2 ] = ( unsigned char )( ( 0u << 6 ) | ( Lo3( Dst ) << 3 ) | 4u );
+    Bytes[ 3 ] = ( unsigned char )( ( 0u << 6 ) | ( Lo3( Index ) << 3 ) | Lo3( Base ) );
+    return AppendBytes( Buf, Bytes, 4 );
+}
+
 int X64Emit_JneRel8( LcCodeBuf *Buf, int8_t Rel ) {
     if ( !AppendByte( Buf, 0x75 ) )       return 0;
     return AppendBytes( Buf, &Rel, 1 );

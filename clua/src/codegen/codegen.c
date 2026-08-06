@@ -672,6 +672,130 @@ static int lower_geti_inline( LcCodeBuf *B, LcInst *in ) {
 
 /*!
  * @brief
+ *  -O2 inline fast path for OP_GETTABLE: R[A] = R[B][R[C]], where C is a
+ *  REGISTER index (unlike OP_GETI whose C is a literal integer). The key can
+ *  be anything at runtime -- integer, string, or something else -- so this
+ *  path guards on both the table tag AND the key tag: only an integer key
+ *  reaches the array probe.  Any miss (wrong tags, out of array bounds,
+ *  empty slot) drops into the existing Rt_GetTableF frame call whose
+ *  reload_after=1 handles __index / stack relocation.
+ *
+ *  The Rt_GetTableF slow half continues to handle every other case (string
+ *  keys, hash-part integer keys, ranges above alimit, __index), so the fast
+ *  prefix is purely additive: no semantics change, only latency, and only
+ *  for the integer-key-in-array case (which is the dominant OP_GETTABLE
+ *  shape in numeric Lua).
+ *
+ *  Semantics reproduced (from lvm.h fastgeti and Rt_GetTable's ttisinteger
+ *  arm):
+ *    tag byte at [t + 8] == ctb(LUA_VTABLE) = 0x45          (t is a table)
+ *    tag byte at [key + 8] == LUA_VNUMINT = 0x03            (key is an int)
+ *    (ivalue(key) - 1u) < hvalue(t)->alimit                 (array bounds)
+ *    !isempty(&array[ivalue(key) - 1])                      (slot occupied)
+ *  All four passing -> 16-byte TValue copy R[A] = array[k-1].
+ *
+ *  Register layout for the fast prefix:
+ *    RAX = key integer value  (then k-1, then (k-1)*16 as byte offset)
+ *    RDX = table pointer      (then array base, then &array[k-1])
+ *  RDI, RBX, RBP are the frame's callee-saved caches -- left untouched.
+ *
+ *  Design choice (SIB vs LEA): reusing the existing r/m encoders wants a
+ *  disp0/disp8 form off a base register, so once we have &array[k-1] in RDX
+ *  the empty-slot test and 16-byte load reuse X64Emit_TestMem8Imm8 and
+ *  X64Emit_MovupsLoadXmm at disp8=+8 / disp0 respectively. Getting there
+ *  needs one shift and one LEA (both new but small); an alternative with
+ *  SIB inside the test and movups would require SIB variants of both
+ *  encoders (more encoder surface, no size win).
+ *
+ *  Caller must have handled: LC_RTF_FITS(A, B, C) so lower_table_frame's
+ *  frame-form path applies (the slow half packs A/B/C the same way).
+ */
+static int lower_gettable_inline( LcCodeBuf *B, LcInst *in ) {
+    int    A = in->a, Br = in->b, C = in->c;
+    size_t jne_tbl, jne_key, jbe_bnd, je_emp, jmp_done;
+    size_t slow, done;
+
+    /* 1) table tag: cmp byte [rdi + B*16 + 8], 0x45 ; jne slow */
+    if ( !X64Emit_CmpMem8Imm8( B, X64_RDI, Br * 16 + 8, ( int8_t )0x45 ) ) return 0;
+    if ( !X64Emit_JneRel8( B, 0 ) ) return 0; jne_tbl = B->used - 1;
+
+    /* 2) key tag: cmp byte [rdi + C*16 + 8], 0x03 ; jne slow.  Non-integer
+       keys fall to the slow helper -- strings, floats (5.4 does not coerce
+       float keys to int in fastget), tables etc. all take Rt_GetTableF. */
+    if ( !X64Emit_CmpMem8Imm8( B, X64_RDI, C * 16 + 8, ( int8_t )0x03 ) ) return 0;
+    if ( !X64Emit_JneRel8( B, 0 ) ) return 0; jne_key = B->used - 1;
+
+    /* 3) rax = ivalue(key)   (the integer value lives at [rdi + C*16 + 0]) */
+    if ( !X64Emit_MovMemToReg( B, X64_RAX, X64_RDI, C * 16 ) ) return 0;
+
+    /* 4) rdx = table pointer at [rdi + B*16] */
+    if ( !X64Emit_MovMemToReg( B, X64_RDX, X64_RDI, Br * 16 ) ) return 0;
+
+    /* 5) rax = rax - 1   (zero-based array index; a negative key wraps to a
+       huge unsigned that the JBE bounds check below immediately rejects). */
+    if ( !X64Emit_SubRaxImm8( B, ( int8_t )1 ) ) return 0;
+
+    /* 6) unsigned bounds: cmp dword [rdx + 12], eax ; jbe slow.
+       alimit is unsigned int at offsetof(Table, alimit)==12; jbe (unsigned
+       "below or equal") jumps to slow when alimit <= (k-1), i.e. the key is
+       out of the array part. */
+    if ( !X64Emit_CmpMem32Reg( B, X64_RDX,
+                               ( int32_t )offsetof( Table, alimit ),
+                               X64_RAX ) ) return 0;
+    if ( !X64Emit_JbeRel8( B, 0 ) ) return 0; jbe_bnd = B->used - 1;
+
+    /* 7) rdx = array base at [rdx + 16] */
+    if ( !X64Emit_MovMemToReg( B, X64_RDX, X64_RDX,
+                               ( int32_t )offsetof( Table, array ) ) ) return 0;
+
+    /* 8) rax *= 16 (TValue size). shl rax, 4 is 4 bytes; imul or lea+shl
+       would cost more. The zero-based index is guaranteed non-negative by
+       the unsigned bounds check that just passed (alimit > (k-1) implies
+       (k-1) fits in 32 bits, and we sign-extended a Lua_Integer that would
+       have failed the JBE anyway if it were negative). */
+    if ( !X64Emit_ShlRaxImm8( B, ( int8_t )4 ) ) return 0;
+
+    /* 9) rdx = rdx + rax   (== &array[k-1]).  Using LEA over a SIB inside
+       every subsequent memory op keeps those ops in their small disp0/disp8
+       encoders -- see the "SIB vs LEA" note in the doc comment above. */
+    if ( !X64Emit_LeaRegBaseIndex( B, X64_RDX, X64_RDX, X64_RAX ) ) return 0;
+
+    /* 10) isempty check: test byte [rdx + 8], 0x0F ; jz slow.
+       Same polarity as lower_geti_inline -- a zero low nibble means
+       LUA_TNIL variant (VNIL / VEMPTY / VABSTKEY), so ZF=1 is the "empty"
+       case that falls through to slow. */
+    if ( !X64Emit_TestMem8Imm8( B, X64_RDX, 8, ( int8_t )0x0F ) ) return 0;
+    if ( !X64Emit_JeRel8( B, 0 ) ) return 0; je_emp = B->used - 1;
+
+    /* 11) 16-byte TValue copy: xmm0 = [rdx] ; [rdi + A*16] = xmm0. */
+    if ( !X64Emit_MovupsLoadXmm( B, 0, X64_RDX, 0 ) ) return 0;
+    if ( !X64Emit_MovupsStoreXmm( B, 0, X64_RDI, A * 16 ) ) return 0;
+
+    /* 12) jump over the slow path. The slow body is roughly 29 bytes (three
+       arg moves + call + 11-byte reload), so rel8 fits comfortably. */
+    jmp_done = X64Emit_JmpRel8_Placeholder( B );
+    if ( jmp_done == ( size_t )-1 ) return 0;
+
+    /* 13) slow label + Rt_GetTableF frame call. reload_after=1 because
+       __index (called from luaV_finishget on empty-slot or hash-miss) is
+       arbitrary Lua and can relocate the stack. */
+    slow = B->used;
+    if ( !X64Emit_PatchRel8( B, jne_tbl, slow ) ) return 0;
+    if ( !X64Emit_PatchRel8( B, jne_key, slow ) ) return 0;
+    if ( !X64Emit_PatchRel8( B, jbe_bnd, slow ) ) return 0;
+    if ( !X64Emit_PatchRel8( B, je_emp,  slow ) ) return 0;
+    if ( !LcCg_EmitHelperCallFrame(
+            B, "Rt_GetTableF",
+            ( int32_t )LC_RTF_PACK( in->a, in->b, in->c, 0 ),
+            /*reload*/1 ) ) return 0;
+
+    /* 14) done label: fast-path JMP lands here. */
+    done = B->used;
+    return X64Emit_PatchRel8( B, jmp_done, done );
+}
+
+/*!
+ * @brief
  *  LC_OP_GLOBAL_GET (OP_GETTABUP on _ENV): R[A] = UpVal[B][K[C]].
  *  Ported from v1 Lower_GetTabUp (codegen.c ~1328): set RDX=A,R8=B,R9=C, call
  *  Rt_GetTabUp, then EmitReloadRdiAndCache (a metamethod can grow the stack).
@@ -1841,7 +1965,21 @@ static int lower_inst( LcBranchCtx *Br, LcFunc *f, LcInst *in ) {
                                return lower_geti_inline( B, in );
                            return lower_table_frame( B, in, "Rt_GetIF",
                                                      "Rt_GetI",     /*signed_c*/0 );
-        case OP_GETTABLE:  return lower_table_frame( B, in, "Rt_GetTableF",
+        case OP_GETTABLE:
+                           /* -O2+: emit the runtime-checked array-fast-path
+                              prefix in front of the Rt_GetTableF frame call
+                              for OP_GETTABLE (register-indexed table read).
+                              Unlike OP_GETI, C here is a register holding
+                              an arbitrary key -- we check the key's tag at
+                              runtime and only take the fast probe when it
+                              is a Lua integer. LC_RTF_FITS is required so
+                              the slow half's frame form applies (same pack
+                              layout as -O0/-O1). -O0/-O1 keep the plain
+                              call unchanged, byte-identity preserved. */
+                           if ( Fn->cg->opt_level >= 2
+                                && LC_RTF_FITS( in->a, in->b, in->c ) )
+                               return lower_gettable_inline( B, in );
+                           return lower_table_frame( B, in, "Rt_GetTableF",
                                                      "Rt_GetTable", /*signed_c*/0 );
         case OP_SETFIELD:  return lower_table_frame( B, in, "Rt_SetFieldF",
                                                      "Rt_SetField", /*signed_c*/1 );
