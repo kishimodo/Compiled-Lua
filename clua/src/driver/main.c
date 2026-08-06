@@ -17,6 +17,7 @@
 #include "../ir/ir.h"
 #include "../opt/passes.h"
 #include "../codegen/codegen.h"
+#include "../codegen/lc_cache.h"
 #include "../codegen/protoblob_emit.h"
 #include "../link/coff_write.h"
 #include "../link/pe_link_v2.h"
@@ -476,6 +477,29 @@ int lc_drive( const LcDriverOptions *opt ) {
     m->jobs      = opt->jobs;        /* -j N; 0 = env CLUA_JOBS or CPU count */
     m->emit_line_info = opt->debug_line_info ? 1 : 0; /* -g: .clualn per fn */
 
+    /* Persistent per-function compilation cache. Default on; --no-cache or
+       CLUA_NO_CACHE=1 disables. --cache-dir=<path> overrides the default
+       (%LOCALAPPDATA%\clua\cache). If dir resolution fails, caching is
+       silently off; correctness never depends on it. */
+    char cache_dir_buf[ 1024 ];
+    {
+      const char *env_no = getenv( "CLUA_NO_CACHE" );
+      int env_disables = ( env_no != NULL && env_no[ 0 ] != '\0' &&
+                           env_no[ 0 ] != '0' );
+      int cache_on = ( !opt->no_cache && !env_disables );
+      m->cache_dir   = NULL;
+      m->cache_read  = 0;
+      m->cache_write = 0;
+      if ( cache_on ) {
+        if ( LcCache_ResolveDir( opt->cache_dir,
+                                 cache_dir_buf, sizeof( cache_dir_buf ) ) ) {
+          m->cache_dir   = cache_dir_buf;
+          m->cache_read  = 1;
+          m->cache_write = 1;
+        }
+      }
+    }
+
     /* Tag each REQUIRED module's main-chunk LcFunc with its require-name so the
     ** ProtoInit emitter registers it in package.preload at startup (the entry,
     ** module 0, is run directly and is NOT a preload module). This makes
@@ -868,6 +892,15 @@ int main( int argc, char **argv ) {
             opt.jobs = n;
         } else if ( strcmp( a, "--emit-only" ) == 0 ) {
             opt.emit_only = true;
+        } else if ( strcmp( a, "--no-cache" ) == 0 ) {
+            /* Disable the persistent per-function compilation cache for this
+               invocation (both read and write). Equivalent to setting
+               CLUA_NO_CACHE=1 in the env. */
+            opt.no_cache = true;
+        } else if ( strncmp( a, "--cache-dir=", 12 ) == 0 ) {
+            /* Override the default cache location. Silently disables the
+               cache if the path can't be created (see lc_drive). */
+            opt.cache_dir = a + 12;
         } else if ( strcmp( a, "-v" ) == 0 || strcmp( a, "--verbose" ) == 0 ) {
             /* Print per-phase wall-clock on stderr after the build. Zero
             ** overhead when unset -- every QPC read in lc_drive is guarded

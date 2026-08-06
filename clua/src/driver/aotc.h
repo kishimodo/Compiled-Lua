@@ -122,6 +122,12 @@ typedef struct LcDriverOptions {
   bool         debug_line_info; /* -g / --debug: emit a .clualn (native-off ->
                                 Lua source line) section for post-mortem
                                 tooling. Off by default; adds bytes.         */
+  bool         no_cache;     /* --no-cache / CLUA_NO_CACHE=1: disable the per-
+                                function compilation cache (both read + write)
+                                for this invocation. Default is caching on.   */
+  const char  *cache_dir;    /* --cache-dir=<path>: override the default cache
+                                dir (%LOCALAPPDATA%\clua\cache or
+                                $XDG_CACHE_HOME/clua). NULL = use the default. */
 } LcDriverOptions;
 
 /* Returns process exit code. */

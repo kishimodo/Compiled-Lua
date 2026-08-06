@@ -104,11 +104,19 @@ typedef struct LcCodeModule {
 /* Compile the optimized module. Each LcFunc -> one LcCompiledFunc. */
 /* Per-compilation codegen configuration: written once from the module before any
    function is generated, then READ-ONLY, so it is shareable by const pointer
-   across future per-function workers. */
+   across future per-function workers.
+
+   `cache_dir` / `cache_read` / `cache_write` drive the per-function persistent
+   cache in lc_cache.c: on a rebuild, functions whose IR + Proto + opt_level +
+   compiler version hash to a key already stored in the cache dir load their
+   .text + relocs from disk and skip the emitter. The cache is byte-identity-
+   preserving by construction (every codegen input goes into the key). */
 typedef struct LcCgCtx {
-    int opt_level;       /* 0 = faithful boxed baseline; >=1 the M1 typed fastpaths */
-    int emit_line_info;  /* -g / --debug: populate LcCompiledFunc.linfo per LcInst.
-                            Off by default; adds bytes to the object AND to the exe. */
+    int         opt_level;      /* 0 = faithful boxed baseline; >=1 M1 typed */
+    int         emit_line_info; /* -g / --debug: populate LcCompiledFunc.linfo */
+    const char *cache_dir;      /* resolved cache dir path; NULL = disabled  */
+    int         cache_read;     /* 1 = attempt to load a hit before emitting */
+    int         cache_write;    /* 1 = store the freshly emitted func        */
 } LcCgCtx;
 
 LcCodeModule *lc_codegen(LcModule *m);

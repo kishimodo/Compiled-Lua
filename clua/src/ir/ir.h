@@ -281,12 +281,13 @@ struct LcModule {
   int        jobs;             /* explicit -j from the driver; 0 = codegen    */
                                /* falls back to CLUA_JOBS then the CPU count. */
                                /* Codegen honours 1 as "sequential path".     */
-  int        emit_line_info;   /* -g / --debug: codegen records a per-instruction
-                                  (native_offset, lua_line) table into each
-                                  LcCompiledFunc.linfo, and the COFF writer
-                                  emits a per-function .clualn$M<i> section
-                                  carrying it. Off by default; byte-identity of
-                                  the output without -g depends on it staying 0. */
+  int        emit_line_info;   /* -g / --debug: codegen records per-instruction
+                                  (native_offset, lua_line) rows for .clualn.  */
+  /* Per-function persistent cache configuration (driver -> codegen). See
+     codegen/lc_cache.h. cache_dir == NULL disables caching. */
+  const char *cache_dir;       /* resolved cache directory; NULL = off         */
+  int         cache_read;      /* 1 = attempt load-from-cache before emitting  */
+  int         cache_write;     /* 1 = store fresh output back to cache         */
   LcArena   *arena;            /* owns every IR node; freed by lc_module_free */
 };
 

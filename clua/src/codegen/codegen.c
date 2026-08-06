@@ -13,6 +13,7 @@
 */
 #include "codegen.h"
 #include "codegen/x64_emit.h"
+#include "codegen/lc_cache.h"
 #include "common/rt_frame_abi.h"
 
 #include "lstate.h"        /* lua_State, CallInfo, StkIdRel layout */
@@ -2492,6 +2493,19 @@ int LcCg_CompileFunctionBody( LcModule *m, LcCodeModule *cm,
     LcLineRow *linfo = NULL;
     uint32_t   nlinfo = 0, capinfo = 0;
 
+    /* Per-function persistent cache. Compute the key up-front so it is
+       available for both the read attempt below and the write after
+       successful codegen. An empty key means caching is off. */
+    char cache_key[ LC_CACHE_KEY_HEXLEN ];
+    int  have_key = 0;
+    if ( cg != NULL && cg->cache_dir != NULL &&
+         ( cg->cache_read || cg->cache_write ) ) {
+        have_key = LcCache_ComputeKey( m, i, cg, cache_key );
+    }
+    if ( have_key && cg->cache_read ) {
+        if ( LcCache_TryLoad( cg->cache_dir, cache_key, i, cf ) ) return 1;
+    }
+
     if (!LcCodeBuf_Init(&buf, 256)) return 0;
 
     /* Dead-function fast path (set by lc_pass_dead_global at -O2+). Emit a
@@ -2676,6 +2690,14 @@ int LcCg_CompileFunctionBody( LcModule *m, LcCodeModule *cm,
     /* Null out the moved-from buffer so a stray free can't double-free. */
     buf.bytes = NULL; buf.relocs = NULL;
     buf.used = buf.cap = 0; buf.nrelocs = buf.relocap = 0;
+
+    /* Persist to the cache. A write failure is silent: the build still
+       succeeds, the cache just misses next time. Ordering: we write AFTER
+       ownership has transferred to cf, so a failed write cannot leave cf
+       in an inconsistent state. */
+    if ( have_key && cg->cache_write ) {
+        ( void )LcCache_Store( cg->cache_dir, cache_key, cf );
+    }
     return 1;
 }
 
@@ -2717,6 +2739,9 @@ LcCodeModule *lc_codegen(LcModule *m) {
   LcCgCtx cg;
   cg.opt_level = m->opt_level;        /* -O1+ enables the M1 arith fastpaths */
   cg.emit_line_info = m->emit_line_info; /* -g / --debug: record .clualn rows */
+  cg.cache_dir   = m->cache_dir;      /* per-function COFF cache directory   */
+  cg.cache_read  = m->cache_read;
+  cg.cache_write = m->cache_write;
   LcCodeModule *cm = (LcCodeModule *)calloc(1, sizeof(LcCodeModule));
   if (!cm) return NULL;
   cm->nfuncs = m->nfuncs;
@@ -2738,6 +2763,12 @@ LcCodeModule *lc_codegen(LcModule *m) {
         lc_codemodule_free( cm );
         return NULL;
       }
+      /* Enforce the cache size cap. Runs only when writes are enabled:
+         reading alone can't grow the cache, and skipping the walk in
+         read-only mode keeps the incremental-hit path free of disk I/O. */
+      if ( cg.cache_dir != NULL && cg.cache_write ) {
+        LcCache_Evict( cg.cache_dir );
+      }
       return cm;
     }
   }
@@ -2749,6 +2780,13 @@ LcCodeModule *lc_codegen(LcModule *m) {
       lc_codemodule_free(cm);
       return NULL;
     }
+  }
+
+  /* Enforce the cache size cap. Runs only when writes are enabled: reading
+     alone can't grow the cache, and skipping the walk in read-only mode
+     keeps the incremental-hit path free of disk I/O overhead. */
+  if ( cg.cache_dir != NULL && cg.cache_write ) {
+    LcCache_Evict( cg.cache_dir );
   }
 
   return cm;

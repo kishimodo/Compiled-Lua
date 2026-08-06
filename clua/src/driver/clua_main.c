@@ -118,6 +118,13 @@ static void usage( FILE *to ) {
         "                   debug section into the produced PE, one per\n"
         "                   compiled function. Consumed by\n"
         "                   tools\\decode-clualn.lua. Off by default.\n"
+        "  --no-cache       disable the persistent per-function compilation\n"
+        "                   cache (both read and write) for this invocation.\n"
+        "                   Equivalent to setting CLUA_NO_CACHE=1.\n"
+        "  --cache-dir=<path>\n"
+        "                   override the default cache directory. Default is\n"
+        "                   %LOCALAPPDATA%\\clua\\cache (or\n"
+        "                   $XDG_CACHE_HOME/clua when set).\n"
         "  --emit-def=<path> / --emit-implib=<path>\n"
         "                   for DLL builds, write a .DEF module-definition\n"
         "                   file at <path> listing the DLL's exports. Both\n"
@@ -149,7 +156,11 @@ static void usage( FILE *to ) {
         "                   function count. Set to 1 for the sequential path.\n"
         "  CLUA_GCC         gcc driver for --ld=gcc / --shared-rt / cold trees\n"
         "                   (default: x86_64-w64-mingw32-gcc on PATH). gcc is\n"
-        "                   OPTIONAL -- the default internal linker needs none.\n" );
+        "                   OPTIONAL -- the default internal linker needs none.\n"
+        "  CLUA_NO_CACHE    set to a non-empty non-zero value to disable the\n"
+        "                   persistent per-function compilation cache.\n"
+        "  XDG_CACHE_HOME / LOCALAPPDATA\n"
+        "                   root for the cache dir (<root>/clua/cache).\n" );
 }
 
 /* dir/app.lua -> "app.<ext>" in the CWD, heap-allocated. Extension picked by
@@ -270,6 +281,13 @@ static int parse_build_args( CluaArgs *a, int argc, char **argv, int from,
             a->opt.jobs = n;
         } else if ( strcmp( s, "--emit-only" ) == 0 ) {
             a->opt.emit_only = true;
+        } else if ( strcmp( s, "--no-cache" ) == 0 ) {
+            /* Disable the persistent per-function compilation cache for this
+               invocation. Same effect as setting CLUA_NO_CACHE=1. */
+            a->opt.no_cache = true;
+        } else if ( strncmp( s, "--cache-dir=", 12 ) == 0 ) {
+            /* Override the default cache directory. */
+            a->opt.cache_dir = s + 12;
         } else if ( strcmp( s, "-v" ) == 0 || strcmp( s, "--verbose" ) == 0 ) {
             /* Per-phase wall-clock on stderr after the build. Off by default;
             ** the driver only samples QPC when the flag is set. NOTE: `clua
