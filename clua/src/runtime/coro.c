@@ -296,11 +296,47 @@ static int LuaFn_IsYieldable( lua_State *L ) {
 /* coroutine.close(co) -> true | nil, msg */
 static int LuaFn_Close( lua_State *L ) {
     PCORO_T Co = CheckCoro( L, 1 );
+
+    /* RAISES rather than returning nil+message. Verified against a reference Lua
+    ** 5.4 built from lua-5.4/src: pcall(coroutine.close, running_co) yields
+    ** (false, "cannot close a running coroutine") there, where returning two
+    ** values made pcall report success and hand the caller a nil it had no reason
+    ** to check. */
     if ( Co->Status == STATUS_RUNNING || Co->Status == STATUS_NORMAL ) {
-        lua_pushnil( L );
-        lua_pushstring( L, "cannot close a running coroutine" );
-        return 2;
+        return luaL_error( L, "cannot close a running coroutine" );
     }
+
+    /* Run the coroutine's pending to-be-closed variables BEFORE destroying the
+    ** fiber. Without this every `<close>` handler in an abandoned coroutine was
+    ** silently skipped, so file handles, locks and FFI allocations held by
+    ** to-be-closed variables leaked -- and the leak was invisible because the
+    ** function still returned true.
+    **
+    ** lua_closethread also resets the thread's stack, which is what makes a
+    ** subsequent DeleteFiber safe: the fiber's Lua-side state is already torn down
+    ** in an ordered way rather than abandoned mid-frame.
+    **
+    ** Reference behaviour, checked against a Lua 5.4 built from lua-5.4/src:
+    **   a `<close>` handler runs and coroutine.close returns true
+    **   a handler that errors makes it return (false, err) -- not (true, nil)
+    ** Both were wrong here before. */
+    if ( Co->L != NULL ) {
+        int St = lua_closethread( Co->L, L );
+        if ( St != LUA_OK ) {
+            /* Hand the error object back as the second result. It is on the
+            ** coroutine's stack; move it across before the fiber goes away. */
+            if ( Co->Fiber != NULL ) { DeleteFiber( Co->Fiber ); Co->Fiber = NULL; }
+            Co->Status = STATUS_DEAD;
+            lua_pushboolean( L, 0 );
+            if ( lua_gettop( Co->L ) > 0 ) {
+                lua_xmove( Co->L, L, 1 );
+            } else {
+                lua_pushstring( L, "error in __close metamethod" );
+            }
+            return 2;
+        }
+    }
+
     if ( Co->Fiber != NULL ) {
         DeleteFiber( Co->Fiber );
         Co->Fiber = NULL;
@@ -370,6 +406,14 @@ static const luaL_Reg g_CoroFuncs[ ] = {
     { NULL,          NULL              }
 };
 
+/* The module body, so this library can be registered the same way every other
+** one is. luaL_requiref needs an open function that leaves the table on the
+** stack; luaL_newlib does exactly that. */
+static int Coro_OpenAsModule( lua_State *L ) {
+    luaL_newlib( L, g_CoroFuncs );
+    return 1;
+}
+
 void Coro_OpenLib( lua_State *L ) {
     Coro_InitProcess( );
 
@@ -379,6 +423,21 @@ void Coro_OpenLib( lua_State *L ) {
     }
     lua_pop( L, 1 );
 
-    luaL_newlib( L, g_CoroFuncs );
-    lua_setglobal( L, "coroutine" );
+    /* luaL_requiref, not luaL_newlib + lua_setglobal.
+    **
+    ** The old form set the GLOBAL but never registered the library in
+    ** package.loaded, so a compiled program disagreed with the reference
+    ** interpreter about whether the coroutine library exists:
+    **
+    **   compiled: package.loaded.coroutine -> nil
+    **   oracle:   package.loaded.coroutine -> table   (real Lua 5.4 agrees)
+    **
+    ** and `for k in pairs(package.loaded)` listed 9 entries against the oracle's
+    ** 10. The functions all worked -- only the bookkeeping was missing -- which is
+    ** why nothing caught it: no test iterates package.loaded or requires a stdlib
+    ** by name. luaL_requiref with glb=1 sets both, and is what lualib does for the
+    ** upstream coroutine library and what stdlib_anchors.c does for the other
+    ** seven. */
+    luaL_requiref( L, LUA_COLIBNAME, Coro_OpenAsModule, 1 );
+    lua_pop( L, 1 );
 }

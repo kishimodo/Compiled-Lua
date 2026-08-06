@@ -19,7 +19,11 @@ typedef struct LcPassConfig {
   int  opt_level;        /* -O0..-O3                                       */
   bool interprocedural;  /* enable the whole-program fixpoint (M2+)        */
   bool escape_analysis;  /* enable table escape/unbox (M3)                 */
-  bool verify_each;      /* run lc_module_verify after every pass (debug)  */
+  bool verify_each;      /* run lc_module_verify after every pass group.   */
+                         /* NOT debug-only: driver/main.c sets it true     */
+                         /* unconditionally, and verifies once more before */
+                         /* codegen so -O0 (which skips lc_optimize) is    */
+                         /* covered too. A failure is a hard error.        */
 } LcPassConfig;
 
 /* Run the whole pipeline. Returns false on an internal invariant failure. */

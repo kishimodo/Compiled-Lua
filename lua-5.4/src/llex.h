@@ -38,7 +38,15 @@ enum RESERVED {
   /* other terminal symbols */
   TK_IDIV, TK_CONCAT, TK_DOTS, TK_EQ, TK_GE, TK_LE, TK_NE,
   TK_SHL, TK_SHR,
-  TK_DBCOLON, TK_EOS,
+  TK_DBCOLON,
+  /* CLua: compound assignment. Placed here, between TK_DBCOLON and TK_EOS, so
+  ** they stay inside the "other terminal symbols" run that luaX_tokens[] mirrors.
+  ** That array is ORDER-SENSITIVE and parallel to this enum -- an off-by-one puts
+  ** the wrong text in every "near <token>" error message rather than failing to
+  ** build, so the two lists must be edited together. */
+  TK_ADDEQ, TK_SUBEQ, TK_MULEQ, TK_DIVEQ, TK_IDIVEQ, TK_MODEQ,
+  TK_POWEQ, TK_CONCATEQ, TK_BANDEQ, TK_BOREQ, TK_SHLEQ, TK_SHREQ,
+  TK_EOS,
   TK_FLT, TK_INT, TK_NAME, TK_STRING
 };
 

@@ -20,4 +20,17 @@
 #define LCLIB_UTF8   ( 1u << 5 )
 #define LCLIB_DEBUG  ( 1u << 6 )
 
+/*!
+ * @brief
+ *  Every optional library. The mask's escape hatch, not a convenience.
+ *
+ *  The per-library bits are set by NAMING the library, which is only sound
+ *  while a program cannot reach a library table it never named. Three shapes
+ *  break that -- `_G[k]`, `package.loaded[k]`, and `debug.getregistry()` --
+ *  and for those lc_module_used_libs() returns this instead of a guess. See
+ *  the soundness argument on that function; do not add a bit here without
+ *  extending that argument to cover it.
+ */
+#define LCLIB_ALL    ( ( 1u << 7 ) - 1u )
+
 #endif /* CLUA_STDLIB_LIBS_H */

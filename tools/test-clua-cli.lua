@@ -134,6 +134,38 @@ print(mt.hello)
   os.remove(src); os.remove(exe)
 end
 
+-- ---- 3a. failed links preserve an existing output -------------------------
+-- A linker can fail after opening/truncating its -o path. CLua must stage the
+-- new PE beside the destination and publish it only after a successful link.
+do
+  local src  = TEMP .. "\\clua_t_atomic.lua"
+  local exe  = TEMP .. "\\clua_t_atomic.exe"
+  local fake = TEMP .. "\\clua_t_failing_linker.cmd"
+  local sentinel = "known-good-output\r\n"
+  writefile(src, 'print("replacement")\n')
+  writefile(exe, sentinel)
+  writefile(fake, [[@echo off
+setlocal
+:next
+if "%~1"=="" exit /b 91
+if "%~1"=="-o" (
+  >"%~2" echo partial-link-output
+  exit /b 91
+)
+shift
+goto next
+]])
+  local code, out = run(('set "CLUA_GCC=%s" && "%s" build "%s" --ld=gcc -o "%s"')
+                        :format(fake, clua_abs, src, exe))
+  local f = io.open(exe, "rb")
+  local after = f and f:read("*a") or ""
+  if f then f:close() end
+  ok(code ~= 0 and after == sentinel,
+     "failed link preserves the previous output",
+     ("code=%s bytes=%q output=%s"):format(tostring(code), after, out:sub(1, 120)))
+  os.remove(src); os.remove(exe); os.remove(fake)
+end
+
 -- ---- 3b. --shared-rt: the OPT-IN shared runtime (clua-rt.dll) ----
 -- Static stays the default (section 3 above is untouched); --shared-rt links
 -- the exe against clua-rt.dll instead of the static archives. Checks: the

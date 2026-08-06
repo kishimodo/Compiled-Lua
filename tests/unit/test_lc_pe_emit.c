@@ -284,10 +284,56 @@ static void test_end_to_end_pe(void) {
     }
 }
 
+static void test_rejects_out_of_bounds_reloc(void) {
+    const char *k32 = "build/bin/sysroot/libkernel32.a";
+    FILE *probe = fopen( k32, "rb" );
+    if ( !probe ) {
+        printf("[~] SKIP lc_pe_emit/oob-reloc: no sysroot\n");
+        return;
+    }
+    fclose( probe );
+
+    {
+        uint8_t code[8] = { 0xE8,0,0,0,0, 0xC3,0x90,0x90 };
+        uint8_t buf[1024];
+        char objpath[512], exepath[512], err[512] = {0};
+        const char *tmp = getenv("TEMP"); if (!tmp) tmp = ".";
+        size_t len = build_min_coff( buf, code, sizeof code,
+                                     "mainCRTStartup", "ExitProcess", 6 );
+        const char *objs[1];
+        const char *arcs[1] = { k32 };
+        LcPeLinkInputs in;
+        int ok;
+
+        snprintf( objpath, sizeof objpath, "%s\\clua_test_pe_oob_%d.o", tmp, (int)getpid() );
+        snprintf( exepath, sizeof exepath, "%s\\clua_test_pe_oob_%d.exe", tmp, (int)getpid() );
+        {
+            FILE *of = fopen( objpath, "wb" );
+            CHECK_NOT_NULL( of );
+            if ( !of ) return;
+            fwrite( buf, 1, len, of );
+            fclose( of );
+        }
+
+        objs[0] = objpath;
+        memset( &in, 0, sizeof in );
+        in.objects = objs; in.nobjects = 1;
+        in.archives = arcs; in.narchives = 1;
+        in.entry = "mainCRTStartup";
+        in.out_path = exepath;
+        ok = LcPe_Link( &in, err, sizeof err );
+        CHECK_MSG( !ok, "out-of-bounds relocation was accepted" );
+        CHECK_MSG( strstr( err, "outside section data" ) != NULL, err );
+        remove( objpath );
+        remove( exepath );
+    }
+}
+
 int main(void) {
     TEST_BEGIN("lc_pe_emit");
     test_coff_reader();
     test_archive_reader();
     test_end_to_end_pe();
+    test_rejects_out_of_bounds_reloc();
     TEST_END();
 }

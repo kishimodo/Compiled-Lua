@@ -38,6 +38,43 @@ int X64Emit_MovImm64ToReg( LcCodeBuf *Buf, X64_GPR_T Dst, uint64_t Imm ) {
     return 1;
 }
 
+/* Materialise the SAME 64-bit value X64Emit_MovImm64ToReg would leave in Dst,
+   i.e. (uint64_t)(int64_t)Imm, in 2-7 bytes instead of 10:
+
+     Imm == 0 : XOR r32, r32          31 /r        2-3 bytes
+     Imm  > 0 : MOV r32, imm32        B8+rd id     5-6 bytes  (zero-extends)
+     Imm  < 0 : MOV r64, imm32        REX.W C7 /0 id  7 bytes (sign-extends)
+
+   The negative tier deliberately spends REX.W rather than the 1-byte-shorter
+   32-bit form, because `mov r32, imm32` ZERO-extends: for a negative value that
+   leaves a different 64-bit register than the imm64 form did. Sign-extending
+   keeps every tier bit-identical to what it replaces, which turns this from an
+   ABI argument ("the callee only reads 32 bits") into a value-identity one.
+
+   The only behavioural difference from a plain MOV is that the zero tier
+   clobbers EFLAGS. Callers must not use this where flags are live. */
+int X64Emit_MovImm32ToReg( LcCodeBuf *Buf, X64_GPR_T Dst, int32_t Imm ) {
+    if ( Imm == 0 ) {
+        /* THE HAZARD: reg and rm both name Dst, so a high register needs REX.R
+           *and* REX.B. 45 31 C0 = xor r8d,r8d (correct); 41 31 C0 = xor
+           r8d,eax (garbage); 31 C0 = xor eax,eax (leaves R8 untouched). */
+        if ( IsHi( Dst ) &&
+             !AppendByte( Buf, REX_BASE | REX_R | REX_B ) )              return 0;
+        if ( !AppendByte( Buf, 0x31 ) )                                  return 0;
+        return AppendByte( Buf, ModRm( 3, Lo3( Dst ), Lo3( Dst ) ) );
+    }
+    if ( Imm > 0 ) {
+        if ( IsHi( Dst ) && !AppendByte( Buf, REX_BASE | REX_B ) )       return 0;
+        if ( !AppendByte( Buf, 0xB8 | ( unsigned char )Lo3( Dst ) ) )    return 0;
+        return AppendBytes( Buf, &Imm, 4 );
+    }
+    if ( !AppendByte( Buf, REX_BASE | REX_W | ( IsHi( Dst ) ? REX_B : 0 ) ) )
+        return 0;
+    if ( !AppendByte( Buf, 0xC7 ) )                                      return 0;
+    if ( !AppendByte( Buf, ModRm( 3, 0, Lo3( Dst ) ) ) )                 return 0;
+    return AppendBytes( Buf, &Imm, 4 );
+}
+
 int X64Emit_MovRegToReg( LcCodeBuf *Buf, X64_GPR_T Dst, X64_GPR_T Src ) {
     unsigned char Rex = REX_BASE | REX_W
                       | ( IsHi( Src ) ? REX_R : 0 )
@@ -121,6 +158,12 @@ int X64Emit_MovMemToReg( LcCodeBuf *Buf, X64_GPR_T Dst,
                          X64_GPR_T Base, int32_t Disp ) {
     /* 0x8B /r  MOV r64, r/m64 */
     return EmitMemOp( Buf, 0x8B, Lo3( Dst ), IsHi( Dst ), Base, Disp, 1 );
+}
+
+int X64Emit_LeaRegMem( LcCodeBuf *Buf, X64_GPR_T Dst,
+                       X64_GPR_T Base, int32_t Disp ) {
+    /* 0x8D /r  LEA r64, [Base + Disp] */
+    return EmitMemOp( Buf, 0x8D, Lo3( Dst ), IsHi( Dst ), Base, Disp, 1 );
 }
 
 int X64Emit_MovRegToMem( LcCodeBuf *Buf, X64_GPR_T Base, int32_t Disp,
@@ -243,10 +286,31 @@ int X64Emit_PopReg( LcCodeBuf *Buf, X64_GPR_T Reg )
     return AppendByte( Buf, ( unsigned char )( 0x58 + Lo3( Reg ) ) );
 }
 
+/* SUB/ADD rsp, imm -- imm8 form when the value fits.
+**
+** `83 /n ib` SIGN-EXTENDS its imm8 to 64 bits under REX.W, so for every value in
+** [-128, 127] it leaves RSP bit-identical to what `81 /n id` leaves. Four bytes
+** instead of seven, with no difference in flags, latency or uop count -- the two
+** encodings are the same instruction, and Intel's own assemblers pick the short
+** form. This is a pure encoding win, not a tradeoff.
+**
+** Every stack adjustment the backend emits is in range: the frame reserve is 0x28
+** and the xmm spill area is 0x50. Three bytes come off the prologue and three off
+** the epilogue of every compiled function.
+**
+** The imm32 path stays for values out of range, so a future larger frame keeps
+** working rather than silently truncating -- the int8_t cast below would wrap
+** without the guard, which is the one way this could go wrong. */
 int X64Emit_SubRspImm( LcCodeBuf *Buf, int32_t Imm )
 {
-    /* 48 81 EC id   SUB rsp, imm32   (always use imm32 form for simplicity) */
     if ( !AppendByte( Buf, REX_BASE | REX_W ) )                  return 0;
+    if ( Imm >= -128 && Imm <= 127 ) {                /* 48 83 EC ib */
+        int8_t I8 = ( int8_t )Imm;
+        if ( !AppendByte( Buf, 0x83 ) )                          return 0;
+        if ( !AppendByte( Buf, ModRm( 3, 5, 4 ) ) )              return 0; /* /5, rm=rsp */
+        return AppendBytes( Buf, &I8, 1 );
+    }
+    /* 48 81 EC id   SUB rsp, imm32 */
     if ( !AppendByte( Buf, 0x81 ) )                              return 0;
     if ( !AppendByte( Buf, ModRm( 3, 5, 4 ) ) )                  return 0; /* /5, rm=rsp */
     return AppendBytes( Buf, &Imm, 4 );
@@ -254,8 +318,14 @@ int X64Emit_SubRspImm( LcCodeBuf *Buf, int32_t Imm )
 
 int X64Emit_AddRspImm( LcCodeBuf *Buf, int32_t Imm )
 {
-    /* 48 81 C4 id   ADD rsp, imm32 */
     if ( !AppendByte( Buf, REX_BASE | REX_W ) )                  return 0;
+    if ( Imm >= -128 && Imm <= 127 ) {                /* 48 83 C4 ib */
+        int8_t I8 = ( int8_t )Imm;
+        if ( !AppendByte( Buf, 0x83 ) )                          return 0;
+        if ( !AppendByte( Buf, ModRm( 3, 0, 4 ) ) )              return 0; /* /0, rm=rsp */
+        return AppendBytes( Buf, &I8, 1 );
+    }
+    /* 48 81 C4 id   ADD rsp, imm32 */
     if ( !AppendByte( Buf, 0x81 ) )                              return 0;
     if ( !AppendByte( Buf, ModRm( 3, 0, 4 ) ) )                  return 0; /* /0, rm=rsp */
     return AppendBytes( Buf, &Imm, 4 );

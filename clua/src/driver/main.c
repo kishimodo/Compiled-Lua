@@ -101,6 +101,16 @@ int lc_drive( const LcDriverOptions *opt ) {
     if ( opt == NULL || opt->input == NULL ) return 2;
     if ( opt->output == NULL && !opt->check_only ) return 2;
 
+    /* Backstop for programmatic callers that fill LcDriverOptions directly.
+    ** REJECT rather than clamp: clamping would compile at a level the caller did
+    ** not ask for, which is the behaviour being removed here. A memset-zeroed
+    ** options struct gives 0, so no existing caller breaks. */
+    if ( opt->opt_level < 0 || opt->opt_level > 3 ) {
+        fprintf( stderr, "clua: error: unsupported optimization level %d "
+                         "(supported: 0-3)\n", opt->opt_level );
+        return 2;
+    }
+
     if ( opt->emit_dll ) {
         fprintf( stderr, "aotc: --dll is not supported in M0 (exe only)\n" );
         return 2;
@@ -273,6 +283,20 @@ int lc_drive( const LcDriverOptions *opt ) {
         }
     }
 
+    /* Verify the IR that is about to be code-generated, at EVERY level. The
+    ** optimizer's own verify_each checks only run when lc_optimize runs, and it
+    ** is skipped entirely at -O0 -- which is precisely the configuration used to
+    ** isolate a suspected miscompile, so it is the last place that should go
+    ** unchecked. Cheap: one walk of the IR against the source Proto. */
+    {
+        char verr[256] = { 0 };
+        if ( !lc_module_verify( m, verr, sizeof verr ) ) {
+            fprintf( stderr, "aotc: internal error: malformed IR before codegen: %s\n",
+                     verr[0] ? verr : "(no detail)" );
+            goto cleanup;
+        }
+    }
+
     /* ---- 5. codegen ---- */
     cm = lc_codegen( m );
     if ( cm == NULL ) {
@@ -372,10 +396,15 @@ int main( int argc, char **argv ) {
         const char *a = argv[ i ];
         if ( strcmp( a, "-o" ) == 0 && i + 1 < argc ) {
             opt.output = argv[ ++i ];
-        } else if ( strncmp( a, "-O", 2 ) == 0 && a[2] != '\0' ) {
-            opt.opt_level = atoi( a + 2 );
-        } else if ( strcmp( a, "-O" ) == 0 ) {
-            opt.opt_level = 1;
+        } else if ( a[0] == '-' && a[1] == 'O' ) {
+            /* Deliberately an ERROR while other unknown args stay warnings
+            ** (see the tail of this loop): a wrong -O silently changes the
+            ** generated code, an unknown flag does not. */
+            if ( !lc_parse_opt_level( a, &opt.opt_level ) ) {
+                fprintf( stderr, "aotc: unsupported optimization level '%s' "
+                                 "(use -O0, -O1, -O2 or -O3)\n", a );
+                return 2;
+            }
         } else if ( strcmp( a, "--dll" ) == 0 ) {
             opt.emit_dll = true;
         } else if ( strcmp( a, "--shared-rt" ) == 0 ) {

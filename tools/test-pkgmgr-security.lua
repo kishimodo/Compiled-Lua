@@ -10,6 +10,7 @@ local function abscwd()
 end
 local ROOT  = abscwd()
 local CLUA = ROOT .. "\\build\\bin\\clua-interp.exe"
+local CLUA_BUILD = ROOT .. "\\build\\bin\\clua.exe"
 local PKG   = ROOT .. "\\rover\\src\\rover.lua"
 local MARK  = (os.getenv("TEMP") or ".") .. "\\clua-interp-pwned-marker.txt"
 
@@ -84,5 +85,51 @@ if p then p:close() end
 os.remove(driver)
 if not out:match("UNIT_OK") then fail("name_ok allowlist unit check failed: " .. (out:gsub("%s+", " "))) end
 
-print("[+] PASS test-pkgmgr-security (malicious names rejected; no command injection; allowlist correct)")
+-- 5) A checked-in rover.lock is untrusted input too. Its version field becomes
+-- a package-store path segment in both clua-interp and clua build. A traversal
+-- must be rejected rather than loading/compiling a Lua file outside the store.
+do
+  local box = (os.getenv("TEMP") or ".") .. "\\clua-lock-version-security"
+  local home, proj = box .. "\\home", box .. "\\project"
+  local marker = box .. "\\executed.txt"
+  local function put(path, content)
+    local dir = path:match("^(.*)\\[^\\]+$")
+    if dir then sh('mkdir "' .. dir .. '" >nul 2>&1') end
+    local f = assert(io.open(path, "wb")); f:write(content); f:close()
+  end
+  local function capture(cmd)
+    local p = io.popen("(" .. cmd .. ") 2>&1")
+    if not p then return -1, "" end
+    local text = p:read("*a") or ""
+    local ok, _, code = p:close()
+    return ok == true and 0 or (code or 1), text
+  end
+
+  sh('rmdir /S /Q "' .. box .. '" >nul 2>&1')
+  put(home .. "\\payload\\init.lua",
+      "local f=assert(io.open(" .. string.format("%q", marker) ..
+      ",'wb')); f:write('PWNED'); f:close(); return {}\n")
+  put(proj .. "\\rover.lock", [=[return {
+  ["evilpkg"] = { version = "..\..\payload", hash = "x" },
+}
+]=])
+  put(proj .. "\\app.lua", 'require("evilpkg")\nprint("unexpected")\n')
+
+  local prefix = 'set "CLUA_HOME=' .. home .. '" && cd /d "' .. proj .. '" && '
+  local irc, iout = capture(prefix .. '"' .. CLUA .. '" -i app.lua')
+  if irc == 0 or slurp(marker) then
+    sh('rmdir /S /Q "' .. box .. '" >nul 2>&1')
+    fail("clua-interp accepted a traversal version from rover.lock: " ..
+         (iout:gsub("%s+", " ")))
+  end
+  local brc, bout = capture(prefix .. '"' .. CLUA_BUILD .. '" build app.lua -o app.exe')
+  if brc == 0 or slurp(marker) then
+    sh('rmdir /S /Q "' .. box .. '" >nul 2>&1')
+    fail("clua build accepted a traversal version from rover.lock: " ..
+         (bout:gsub("%s+", " ")))
+  end
+  sh('rmdir /S /Q "' .. box .. '" >nul 2>&1')
+end
+
+print("[+] PASS test-pkgmgr-security (malicious names/lock versions rejected; no command injection; allowlists correct)")
 os.exit(0)

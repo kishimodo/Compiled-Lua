@@ -45,6 +45,28 @@ ok(type(lst) == "table", "list returns a table")
 ok(lst[NAME] == "in-list", "list includes a var we set -> got " .. tostring(lst and lst[NAME]))
 env.unset(NAME)
 
+-- Long values must round-trip. windows.ToWide/FromWide used fixed 2048-WCHAR /
+-- 4096-byte scratch buffers, so any entry longer than that made the conversion
+-- return 0, which surfaced as "WideCharToMultiByte failed". It was found only by
+-- accident: `build\run-tests.bat` prepends two toolchain directories, pushing
+-- this machine's PATH to 4,218 bytes so the `PATH=...` entry overflowed by 127,
+-- while under a plain shell the same PATH was 4,084 bytes and every run passed.
+--
+-- These cases construct the length themselves, so the coverage no longer depends
+-- on how long the ambient PATH happens to be. Sizes straddle both old buffers
+-- (2048 WCHARs and 4096 bytes); Windows allows 32,767 chars per variable.
+for _, len in ipairs({ 2100, 4200, 6000 }) do
+    local big = string.rep("q", len)
+    env.set(NAME, big)
+    local got = env.get(NAME)
+    ok(got == big, ("get round-trips a %d-char value -> got %s"):format(
+        len, got and ("length " .. #got) or "nil"))
+    local biglst = env.list()
+    ok(type(biglst) == "table" and biglst[NAME] == big,
+       ("list survives a %d-char value (the ToWide/FromWide buffer bug)"):format(len))
+    env.unset(NAME)
+end
+
 -- with(): override active inside fn, original restored after, returns forwarded
 env.set(NAME, "outer")
 local seen

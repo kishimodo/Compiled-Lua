@@ -15,6 +15,24 @@
 #include <stdlib.h>
 #include <string.h>
 
+static bool lc_module_reflects_globals(LcModule *m);
+
+/* TRUE iff any function in the module carries `s` as a string constant.
+   The three scans below all reduce to this; keeping one copy means a fix to
+   the traversal (a new Proto source, say) cannot land in two of them and be
+   forgotten in the third. */
+static bool module_has_string_const(LcModule *m, const char *s) {
+  for (uint32_t i = 0; i < m->nfuncs; i++) {
+    Proto *p = m->funcs[i] ? m->funcs[i]->source : NULL;
+    if (!p) continue;
+    for (int k = 0; k < p->sizek; k++) {
+      const TValue *kv = &p->k[k];
+      if (ttisstring(kv) && strcmp(getstr(tsvalue(kv)), s) == 0) return true;
+    }
+  }
+  return false;
+}
+
 /* TRUE iff any function in the module carries the string constant "debug".
    debug.setlocal/setupvalue can rewrite ANY local of any live frame at
    runtime, falsifying every static type proof -- so when the module so much
@@ -25,15 +43,7 @@
    evades it -- documented residual, the standard optimizing-compiler
    reflection caveat. */
 bool lc_module_uses_debug(LcModule *m) {
-  for (uint32_t i = 0; i < m->nfuncs; i++) {
-    Proto *p = m->funcs[i] ? m->funcs[i]->source : NULL;
-    if (!p) continue;
-    for (int k = 0; k < p->sizek; k++) {
-      const TValue *kv = &p->k[k];
-      if (ttisstring(kv) && strcmp(getstr(tsvalue(kv)), "debug") == 0) return true;
-    }
-  }
-  return false;
+  return module_has_string_const(m, "debug");
 }
 
 /* TRUE iff any function carries the string constant "ffi" or "bit": the
@@ -41,21 +51,40 @@ bool lc_module_uses_debug(LcModule *m) {
    exist (the v1 idiom is `local ffi = _G.ffi`, which the require scan cannot
    see). Conservative: any string mention links the ~25 KB FFI. */
 bool lc_module_uses_ffi(LcModule *m) {
-  for (uint32_t i = 0; i < m->nfuncs; i++) {
-    Proto *p = m->funcs[i] ? m->funcs[i]->source : NULL;
-    if (!p) continue;
-    for (int k = 0; k < p->sizek; k++) {
-      const TValue *kv = &p->k[k];
-      if (ttisstring(kv) &&
-          (strcmp(getstr(tsvalue(kv)), "ffi") == 0 ||
-           strcmp(getstr(tsvalue(kv)), "bit") == 0)) return true;
-    }
-  }
-  return false;
+  return module_has_string_const(m, "ffi") || module_has_string_const(m, "bit");
 }
 
+/* Which optional standard libraries this module can reach.
+**
+** SOUNDNESS. The per-library bits are set by NAMING a library, so the whole
+** scan rests on one claim: a program cannot reach a library table it never
+** named. That claim holds only because the world is closed -- no load(), no
+** computed require -- and even then exactly three shapes break it:
+**
+**   1. `_G[k]` / `_ENV[k]` / `pairs(_G)`. Once the global table is a value, any
+**      key reaches any library. Detected by lc_module_reflects_globals(), the
+**      same scan the -O1 proof gate uses, for the same reason.
+**   2. `package.loaded[k]`. package is always opened, and its loaded table maps
+**      every name that WAS linked -- so an unlinked os makes
+**      `package.loaded["o".."s"]` nil where the interpreter gives a table.
+**      Any mention of the constant "package" gives up.
+**   3. `debug.getregistry()[LUA_RIDX_LOADED]`, which is that same table by
+**      another road. Any mention of "debug" gives up.
+**
+** For those, return LCLIB_ALL rather than a guess: being wrong here is not a
+** slow program, it is a program that silently sees nil. Everything else --
+** plain global reads, local table indexing, method calls -- compiles to a
+** constant key and cannot manufacture a name, so the bits stand.
+**
+** Conservative in the safe direction throughout: an unused mention costs size,
+** a missed reach costs correctness, and only the first is recoverable. */
 unsigned lc_module_used_libs(LcModule *m) {
   unsigned mask = 0;
+
+  if (lc_module_reflects_globals(m) ||
+      module_has_string_const(m, "package") ||
+      module_has_string_const(m, "debug")) return LCLIB_ALL;
+
   for (uint32_t i = 0; i < m->nfuncs; i++) {
     Proto *p = m->funcs[i] ? m->funcs[i]->source : NULL;
     if (!p) continue;
@@ -137,10 +166,32 @@ static bool lc_module_reflects_globals(LcModule *m) {
 }
 
 
+/* Run the IR verifier if the caller asked for it, and report WHICH pass left the
+** IR malformed. Before this, LcPassConfig.verify_each was declared, set to true
+** by the driver, and never read -- a safety control that only appeared active.
+**
+** A verification failure is a hard error, not a warning: the IR is the input to
+** codegen, so continuing past a malformed module means emitting native code from
+** it. Better a failed compile with a located message than a binary nobody can
+** explain. */
+static bool opt_verify(LcModule *m, const LcPassConfig *cfg, const char *after) {
+  char err[256];
+  if (!cfg || !cfg->verify_each) return true;
+  if (lc_module_verify(m, err, sizeof err)) return true;
+  fprintf(stderr, "clua: internal error: IR verification failed after %s: %s\n",
+          after, err[0] ? err : "(no detail)");
+  return false;
+}
+
 bool lc_optimize(LcModule *m, const LcPassConfig *cfg) {
   if (!m || !cfg) return false;
 
+  /* Verify what we were HANDED before touching it: a failure here is the lifter's
+  ** or the front end's, not any pass's, and saying so saves the next bisect. */
+  if (!opt_verify(m, cfg, "lift (module entry to the optimizer)")) return false;
+
   lc_build_callgraph(m);
+  if (!opt_verify(m, cfg, "lc_build_callgraph")) return false;
 
   for (uint32_t i = 0; i < m->nfuncs; i++) {
     LcFunc *f = m->funcs[i];
@@ -158,7 +209,45 @@ bool lc_optimize(LcModule *m, const LcPassConfig *cfg) {
        hoists the global env as a value (either path can reach debug.setlocal
        and falsify a proof -- AOT-DEBUGREFLECT-001). The checked fastpaths,
        which re-verify tags at run time, are unaffected. */
-    bool no_proofs = lc_module_uses_debug(m) || lc_module_reflects_globals(m);
+    bool uses_debug   = lc_module_uses_debug(m);
+    bool reflects_env = !uses_debug && lc_module_reflects_globals(m);
+    bool no_proofs    = uses_debug || reflects_env;
+
+    /* Say so. This gate is a MEASURED 1.3-1.5x on arithmetic-heavy code and it
+    ** fires on shapes a user cannot reasonably guess:
+    **
+    **   * any module carrying the STRING "debug" anywhere -- a log-level name, a
+    **     field key, a message -- because the scan is over constants, not over
+    **     reachability (see lc_module_uses_debug's own caveat above);
+    **   * any chunk with more than 255 constants that also touches a global,
+    **     because lcode then spills the access to GETUPVAL _ENV + LOADK +
+    **     GETTABLE, which lc_module_reflects_globals cannot distinguish from real
+    **     reflection. Measured: the same 20M-iteration integer loop ran 103 ms
+    **     with one constant and 152 ms with 300 -- a 48% penalty for a
+    **     constant-count threshold unrelated to what the code does.
+    **
+    ** Silently losing a third to a half of arithmetic performance for either
+    ** reason is worse than a line on stderr, so this is on by default and goes to
+    ** stderr rather than stdout -- it must not perturb the differential suite's
+    ** stdout diffs. CLUA_QUIET_PROOFS=1 silences it for callers that compile in
+    ** bulk.
+    **
+    ** Narrowing the second case needs a real "does this instruction read register
+    ** A" dataflow query, which Lua 5.4's opcode tables do not expose; two
+    ** structural approximations were tried and both were wrong about the emitted
+    ** shape, so the guard stays conservative until the analysis is done properly.
+    ** See docs/benchmarks/session-2026-07-26-speed-and-size.md. */
+    if (no_proofs && getenv("CLUA_QUIET_PROOFS") == NULL) {
+      fprintf(stderr,
+              "clua: note: type proofs disabled for this module (%s), which "
+              "costs roughly 1.3-1.5x on arithmetic-heavy code\n",
+              uses_debug
+                ? "a function carries the string constant \"debug\""
+                : "a global is reached through _ENV in a register, which lcode "
+                  "emits once a chunk has more than 255 constants");
+      fprintf(stderr,
+              "clua: note: set CLUA_QUIET_PROOFS=1 to silence this\n");
+    }
     /* M2: interprocedural argument/return type propagation runs the local
        inference in three phases (baseline -> callee param entries -> callers
        with return summaries); the final phase leaves the same per-inst
@@ -172,6 +261,7 @@ bool lc_optimize(LcModule *m, const LcPassConfig *cfg) {
       lc_pass_raw_table(f);
     }
     lc_pass_inline_small(m);
+    if (!opt_verify(m, cfg, "the -O1 pass group")) return false;
   }
 
   if (cfg->opt_level >= 2 && cfg->interprocedural) {
@@ -179,12 +269,16 @@ bool lc_optimize(LcModule *m, const LcPassConfig *cfg) {
     lc_pass_monomorphize(m);
     lc_pass_ip_devirt(m);
     lc_pass_dead_global(m);
+    if (!opt_verify(m, cfg, "the -O2 interprocedural pass group")) return false;
   }
 
   if (cfg->opt_level >= 3 && cfg->escape_analysis) {
     lc_pass_escape(m);
     lc_pass_scalar_replace(m);
     for (uint32_t i = 0; i < m->nfuncs; i++) lc_pass_barrier_elide(m->funcs[i]);
+    /* scalar_replace REWRITES instructions (NEWTABLE becomes LOADNIL), so this
+    ** is the one -O group that actually mutates shape today. */
+    if (!opt_verify(m, cfg, "the -O3 escape/scalar-replacement group")) return false;
   }
 
   /* lowering prep — always */
@@ -192,6 +286,9 @@ bool lc_optimize(LcModule *m, const LcPassConfig *cfg) {
     lc_pass_lower(m->funcs[i]);
     lc_pass_safepoints(m->funcs[i]);
   }
+
+  /* The boundary that matters: whatever leaves here goes straight into codegen. */
+  if (!opt_verify(m, cfg, "lowering prep (final optimizer boundary)")) return false;
 
   return true;
 }

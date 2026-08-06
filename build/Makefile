@@ -23,6 +23,40 @@ CFLAGS      := -std=c99 -Wall -Wextra -Wno-unused-parameter -O2 -g
 CFLAGS      += -I$(SRC_DIR) -I$(LUA_DIR) -I$(ROOT)/build/gen
 CFLAGS      += -DCLUA_TARGET_WINDOWS_X64=1
 
+# --- compiler-generated header dependencies ---------------------------------
+# -MMD writes <object>.d beside each object listing every USER header it
+# included; -MP adds an empty rule per header so deleting or renaming one does
+# not wedge the build with "No rule to make target". The fragments are read back
+# at the END of this file.
+#
+# This retires the manual "wipe build/bin/obj/{ir,opt,codegen,link,driver} after
+# editing a backend header" step, which was not merely inconvenient: a stale
+# object could silently link an empty-output binary, so a broken build looked
+# like a passing one.
+#
+# -MM (not -M) is required, not just preferred: it excludes system headers,
+# which is what keeps absolute MinGW sysroot paths -- and therefore a
+# drive-letter colon, which make's parser splits on -- out of the fragments.
+# Every -I here is relative, so a fragment contains only relative paths.
+#
+# No -MT: gcc already names the rule's target after the -o path, verified with
+# this toolchain. Adding `-MT $@` would also force a recursive `=` assignment,
+# because with `:=` the `$@` expands empty at parse time and -MT silently eats
+# the following `-c` -- every compile still succeeds and no fragment is ever
+# read, which is the worst kind of no-op.
+#
+# Appended to the flag VARIABLES rather than to each recipe so that the ~230
+# generated package rules in build/gen/packages.mk, which use $(CFLAGS), are
+# covered too, along with any recipe added later.
+#
+# $(CFLAGS) also appears on LINK lines (e.g. compiler.exe, clua-interp.exe) and
+# on three compile-and-link-in-one-step lines (stub.exe, timeout-run.exe). Both
+# were checked: on a pure link nothing is preprocessed so no fragment is written
+# at all, and on a one-step build the fragment correctly names the executable as
+# its target. Neither produces a stray or malformed .d.
+DEPFLAGS    := -MMD -MP
+CFLAGS      += $(DEPFLAGS)
+
 .PHONY: all clean help
 all: help
 
@@ -94,6 +128,7 @@ EMBEDDED_LUA_CFLAGS := -std=c99 -Wall -Wextra -Wno-unused-parameter \
     -I$(SRC_DIR) -I$(LUA_DIR) -I$(ROOT)/build/gen \
     -DCLUA_TARGET_WINDOWS_X64=1 \
     -DLUA_USE_WINDOWS -DLUA_COMPAT_5_3
+EMBEDDED_LUA_CFLAGS += $(DEPFLAGS)
 
 LUA_EMB_OBJS := $(patsubst $(LUA_DIR)/%.c,$(BUILD_DIR)/lua-emb/%.o,$(LUA_CORE_SRCS) $(LUA_LIB_SRCS))
 
@@ -187,7 +222,13 @@ RUNTIME_SRCS := \
     $(SRC_DIR)/runtime/native_loader.c    \
     $(SRC_DIR)/runtime/protoinit_rt.c     \
     $(SRC_DIR)/runtime/ffi_anchor.c       \
-    $(SRC_DIR)/runtime/stdlib_anchors.c   \
+    $(SRC_DIR)/runtime/stdlib_anchor_string.c \
+    $(SRC_DIR)/runtime/stdlib_anchor_table.c  \
+    $(SRC_DIR)/runtime/stdlib_anchor_math.c   \
+    $(SRC_DIR)/runtime/stdlib_anchor_io.c     \
+    $(SRC_DIR)/runtime/stdlib_anchor_os.c     \
+    $(SRC_DIR)/runtime/stdlib_anchor_utf8.c   \
+    $(SRC_DIR)/runtime/stdlib_anchor_debug.c  \
     $(SRC_DIR)/jit/exec_mem.c             \
     $(SRC_DIR)/jit/runtime.c              \
     $(SRC_DIR)/jit/dispatch.c             \
@@ -223,6 +264,8 @@ EMBEDDED_RT_CFLAGS := -std=c99 -Wall -Wextra -Wno-unused-parameter \
     -fstack-protector-strong -fcf-protection=none \
     -I$(SRC_DIR) -I$(LUA_DIR) -I$(ROOT)/build/gen \
     -DCLUA_TARGET_WINDOWS_X64=1
+# Extended before AOT_RT_CFLAGS derives from it below, so both get tracking.
+EMBEDDED_RT_CFLAGS += $(DEPFLAGS)
 
 RUNTIME_EMB_OBJS := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/obj-emb/%.o,$(RUNTIME_SRCS))
 
@@ -248,7 +291,12 @@ $(BUILD_DIR)/runtime-embedded.a: $(RUNTIME_EMB_OBJS)
 # __thread, which would drag libgcc emutls + ~23 KB of winpthread into every
 # compiled exe. runtime-embedded.a (clua-interp.exe / v1 compiler.exe PEs, which
 # may see foreign threads via FFI callbacks) keeps real TLS.
-AOT_RT_SRCS := $(RUNTIME_SRCS)
+# mingw_stdio_shim.c is AOT-ONLY on purpose. It routes Lua's three __mingw_*
+# stdio references to the UCRT, which removes 38,816 bytes of static gdtoa/pformat
+# from every emitted PE. It must not join RUNTIME_SRCS: that list also builds
+# runtime.a, which clua-interp.exe links, and putting the oracle on the same
+# implementation would make the differential suite agree by moving both sides.
+AOT_RT_SRCS := $(RUNTIME_SRCS) $(SRC_DIR)/runtime/mingw_stdio_shim.c
 AOT_RT_CFLAGS := $(EMBEDDED_RT_CFLAGS) -DLUAC_AOT_RUNTIME=1
 RUNTIME_AOT_OBJS := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/obj-aot/%.o,$(AOT_RT_SRCS))
 
@@ -502,6 +550,7 @@ IMGUI_CXXFLAGS := -std=c++17 -O2 -fno-exceptions -fno-rtti                 \
                   -Wno-deprecated-declarations                              \
                   -DIMGUI_DISABLE_OBSOLETE_FUNCTIONS                        \
                   -I$(IMGUI_DIR) -I$(IMGUI_DIR)/backends -I$(CIMGUI_DIR)
+IMGUI_CXXFLAGS += $(DEPFLAGS)
 
 IMGUI_SRCS := \
     $(IMGUI_DIR)/imgui.cpp                            \
@@ -538,3 +587,47 @@ $(BUILD_DIR)/imgui.a: $(IMGUI_OBJS)
 
 .PHONY: imgui
 imgui: $(BUILD_DIR)/imgui.a
+
+# --- read back the generated header dependencies -----------------------------
+# Placed at the END, deliberately: make takes its default goal from the first
+# target it sees, INCLUDED FILES INCLUDED, and a fragment's first target is an
+# object file. Included above `all: help` (line 26), a bare
+# `make -f build/Makefile` would start building an object instead of printing
+# help -- and build.bat relies on that default.
+#
+# $(wildcard ...) rather than a glob inside the -include line: it is make's own
+# expansion (shell-agnostic, already load-bearing at LUAC_SRCS), and it hands
+# make only names of files that exist, so its remake-the-makefiles pass has
+# nothing to chase. Objects live at most four levels under $(BUILD_DIR)
+# (e.g. obj/runtime/packages/*.o), hence four patterns.
+-include $(wildcard $(BUILD_DIR)/*.d)
+-include $(wildcard $(BUILD_DIR)/*/*.d)
+-include $(wildcard $(BUILD_DIR)/*/*/*.d)
+-include $(wildcard $(BUILD_DIR)/*/*/*/*.d)
+
+# A .d and its .o are one unit. An .o with no .d is silently untracked again, so
+# never delete only one kind -- use this, or `clean`, which removes $(BUILD_DIR)
+# wholesale. This target exists because the partial wipe it replaces was
+# documented in CLAUDE.md and done by hand.
+#
+# It must cover EVERY directory this project compiles into, not just the backend
+# ones. -MMD writes a fragment only as a side effect of compiling, so an object
+# that was already up to date when tracking was introduced has none, and a
+# partial wipe that skips its directory leaves it untracked forever. Omitting
+# build/bin/lua, lua-emb and the three loose root objects is exactly how that
+# happens -- 342 objects were in that state until this list was completed.
+# tools/test-build-header-deps.lua asserts the coverage so it cannot drift again.
+#
+# $(BUILD_DIR)/sysroot is deliberately absent: crt2.o/crtbegin.o/crtend.o are
+# prebuilt CRT objects copied from the toolchain, not compiled here.
+.PHONY: clean-objs
+clean-objs:
+	-if exist "$(BUILD_DIR)\obj" rmdir /S /Q "$(BUILD_DIR)\obj"
+	-if exist "$(BUILD_DIR)\obj-emb" rmdir /S /Q "$(BUILD_DIR)\obj-emb"
+	-if exist "$(BUILD_DIR)\obj-aot" rmdir /S /Q "$(BUILD_DIR)\obj-aot"
+	-if exist "$(BUILD_DIR)\obj-aotc" rmdir /S /Q "$(BUILD_DIR)\obj-aotc"
+	-if exist "$(BUILD_DIR)\lua" rmdir /S /Q "$(BUILD_DIR)\lua"
+	-if exist "$(BUILD_DIR)\lua-emb" rmdir /S /Q "$(BUILD_DIR)\lua-emb"
+	-if exist "$(BUILD_DIR)\imgui" rmdir /S /Q "$(BUILD_DIR)\imgui"
+	-del /Q "$(BUILD_DIR)\*.o" 2>nul
+	-del /Q "$(BUILD_DIR)\*.d" 2>nul

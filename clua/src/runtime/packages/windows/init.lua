@@ -120,6 +120,44 @@ typedef struct _PROCESS_INFORMATION {
     DWORD  dwThreadId;
 } PROCESS_INFORMATION;
 
+/* SYSTEM_INFO's first member is a union of dwOemId with a
+** { wProcessorArchitecture, wReserved } pair. The pair form is declared here
+** because it is the one callers actually read and it is layout-identical to the
+** union -- the cdecl parser has no anonymous-union support, and introducing a
+** dependency on one for a field nobody uses would be gratuitous.
+** dwActiveProcessorMask is ULONG_PTR, i.e. 8 bytes on x64, so it is declared as a
+** pointer-sized field rather than DWORD; getting that wrong shifts every
+** subsequent member. Callers in the cpu and memory_info packages keep private
+** mirrors of this layout (SYSTEM_INFO_CPU / SYSTEM_INFO_MEM) and cast to
+** SYSTEM_INFO *; this typedef is what makes those signatures resolvable. */
+typedef struct _SYSTEM_INFO {
+    WORD   wProcessorArchitecture;
+    WORD   wReserved;
+    DWORD  dwPageSize;
+    LPVOID lpMinimumApplicationAddress;
+    LPVOID lpMaximumApplicationAddress;
+    void  *dwActiveProcessorMask;
+    DWORD  dwNumberOfProcessors;
+    DWORD  dwProcessorType;
+    DWORD  dwAllocationGranularity;
+    WORD   wProcessorLevel;
+    WORD   wProcessorRevision;
+} SYSTEM_INFO;
+
+/* GlobalMemoryStatusEx requires the caller to set dwLength to sizeof before the
+** call, so the field order and widths here are load-bearing. */
+typedef struct _MEMORYSTATUSEX {
+    DWORD     dwLength;
+    DWORD     dwMemoryLoad;
+    ULONGLONG ullTotalPhys;
+    ULONGLONG ullAvailPhys;
+    ULONGLONG ullTotalPageFile;
+    ULONGLONG ullAvailPageFile;
+    ULONGLONG ullTotalVirtual;
+    ULONGLONG ullAvailVirtual;
+    ULONGLONG ullAvailExtendedVirtual;
+} MEMORYSTATUSEX;
+
 typedef struct _MEMORY_BASIC_INFORMATION {
     PVOID  BaseAddress;
     PVOID  AllocationBase;
@@ -465,19 +503,44 @@ M.ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
 local _MultiByteToWideChar = ffi.C.MultiByteToWideChar
 local _WideCharToMultiByte = ffi.C.WideCharToMultiByte
 
+-- Both converters ask the API for the required size, then convert into an
+-- exactly sized buffer -- the standard Win32 two-call idiom.
+--
+-- They previously used fixed 2048-WCHAR / 4096-byte scratch buffers, and note 2
+-- above said the sizing call had to be avoided because it desynchronised the
+-- marshaller. That note is STALE: it blames "the JIT codegen path", and there is
+-- no JIT in this tree any more. The dance was re-tested directly (a 6,000-char
+-- round trip through both calls) and works, and `dotnet/init.lua:537-540` has
+-- been using the same idiom in production all along.
+--
+-- The fixed buffers were a real bug, not just a limit: any environment variable,
+-- registry value or path longer than the buffer made the conversion return 0,
+-- which these functions raise as "conversion failed". It was found because
+-- `env.list()` failed under `build\run-tests.bat`, whose PATH is 4,218 bytes --
+-- so the `PATH=...` entry overflowed `char[4096]` by 127 bytes. Under a plain
+-- shell the same PATH is 4,084 bytes and it passed, which is why this looked
+-- environment-dependent rather than broken. Windows allows a single environment
+-- variable up to 32,767 characters, so no fixed size would have been correct.
+--
+-- Exact sizing also allocates LESS than before for the common short string.
+
 -- Convert an ASCII / UTF-8 Lua string to a UTF-16LE buffer (null-terminated).
 -- Returns the cdata buffer and its length in WCHARs (including the null).
 function M.ToWide(S)
-    local Buf = ffi.new("unsigned short[2048]")
-    local N   = _MultiByteToWideChar(M.CP_UTF8, 0, S, -1, Buf, 2048)
+    local Need = _MultiByteToWideChar(M.CP_UTF8, 0, S, -1, nil, 0)
+    if Need <= 0 then error("MultiByteToWideChar failed") end
+    local Buf = ffi.new("unsigned short[?]", Need)
+    local N   = _MultiByteToWideChar(M.CP_UTF8, 0, S, -1, Buf, Need)
     if N <= 0 then error("MultiByteToWideChar failed") end
     return Buf, N
 end
 
 -- Convert a UTF-16LE cdata (null-terminated) to a Lua string.
 function M.FromWide(Buf)
-    local Out = ffi.new("char[4096]")
-    local N   = _WideCharToMultiByte(M.CP_UTF8, 0, Buf, -1, Out, 4096, nil, nil)
+    local Need = _WideCharToMultiByte(M.CP_UTF8, 0, Buf, -1, nil, 0, nil, nil)
+    if Need <= 0 then error("WideCharToMultiByte failed") end
+    local Out = ffi.new("char[?]", Need)
+    local N   = _WideCharToMultiByte(M.CP_UTF8, 0, Buf, -1, Out, Need, nil, nil)
     if N <= 0 then error("WideCharToMultiByte failed") end
     return ffi.string(Out, N - 1)
 end

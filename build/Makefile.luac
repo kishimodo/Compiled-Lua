@@ -25,6 +25,16 @@ CFLAGS      := -std=c99 -Wall -Wextra -Wno-unused-parameter -O2 -g
 CFLAGS      += -I$(SRC_DIR) -I$(LUA_DIR) -I$(ROOT)/build/gen
 CFLAGS      += -DCLUA_TARGET_WINDOWS_X64=1
 
+# Compiler-generated header dependencies; see the long note in build/Makefile.
+# This file must carry it too: driver/aotc.h defines LcDriverOptions and is
+# included by BOTH driver/main.c (compiled by the base Makefile) and the
+# standalone objects compiled here. Tracking only one of them would rebuild
+# obj/driver/main.o while obj-aotc/clua_main.o stayed stale, linking two
+# different views of the same struct -- silent, and exactly the class of failure
+# this change exists to remove.
+DEPFLAGS    := -MMD -MP
+CFLAGS      += $(DEPFLAGS)
+
 # Backend objects produced by the base Makefile's `luac-objs` target. We link
 # all of them EXCEPT the plain driver/main.o (its lc_drive is also compiled into
 # the standalone obj below, and it has no main()).
@@ -69,10 +79,19 @@ aotc: $(BUILD_DIR)/aotc.exe
 # the source in a cold tree). Flags must match the embedded archives' ABI
 # surface: include dirs + CLUA_TARGET_WINDOWS_X64 (+ LUA_COMPAT_5_3) govern
 # the Lua struct layouts.
+# The size flags below match build/Makefile's EMBEDDED_RT_CFLAGS. This object was
+# the only one of ours compiled with NO -O and no -ffunction-sections, which cost
+# 3 KB in every emitted PE and made it the exe's only real .pdata/.xdata producer
+# (372 + 364 bytes of unwind tables that AOT-generated functions never emit).
+# None of these flags touch the ABI surface -- the include dirs and the two -D
+# defines are what govern the Lua struct layouts, and they are unchanged.
 $(BUILD_DIR)/aot_entry.o: $(SRC_DIR)/runtime/aot_entry.c
 	$(CC) -std=c99 -I$(SRC_DIR) -I$(LUA_DIR) \
 	    -DCLUA_TARGET_WINDOWS_X64=1 -DLUA_COMPAT_5_3 \
-	    -c $< -o $@
+	    -Os -g0 -ffunction-sections -fno-asynchronous-unwind-tables \
+	    -fno-unwind-tables -fmerge-all-constants -fmerge-constants \
+	    -fstack-protector-strong -fcf-protection=none \
+	    $(DEPFLAGS) -c $< -o $@
 
 .PHONY: aot-entry
 aot-entry: $(BUILD_DIR)/aot_entry.o
@@ -154,3 +173,12 @@ dist: $(BUILD_DIR)/clua.exe $(BUILD_DIR)/rover.exe $(BUILD_DIR)/aot_entry.o
 .PHONY: release
 release: dist
 	powershell -NoProfile -ExecutionPolicy Bypass -File build/make-release.ps1 -VersionHeader "$(SRC_DIR)/common/version.h" -DistDir "$(ROOT)/dist" -OutDir "$(ROOT)"
+
+# --- read back the header dependencies for the objects THIS file compiles -----
+# At the END, for the same default-goal reason as in build/Makefile: a fragment's
+# first target is an object, and this file's default goal must stay `aotc`.
+# Scoped to the two places it compiles into: $(BUILD_DIR)/obj-aotc and the
+# aot_entry.o sitting directly in $(BUILD_DIR). The base Makefile reads back the
+# rest.
+-include $(wildcard $(BUILD_DIR)/*.d)
+-include $(wildcard $(BUILD_DIR)/obj-aotc/*.d)

@@ -3,14 +3,14 @@
 **
 ** The single binary a user interacts with (the rustc/go of CLua):
 **
-**   clua build <main.lua> [-o <out.exe>] [-O0|-O1|-O2] [-L <pkg>] [--keep-temps]
+**   clua build <main.lua> [-o <out.exe>] [-O0|-O1|-O2|-O3] [-L <pkg>] [--keep-temps]
 **   clua run   <main.lua> [build flags] [-- <program args...>]
 **   clua check <main.lua>
 **   clua version | help
 **   clua <main.lua>          (implicit `build`)
 **
 ** Differences from aotc.exe (the low-level driver kept for test infra):
-** -O1 is the default, the output name derives from the input
+** -O2 is the default (aotc defaults to -O0), the output name derives from the input
 ** (dir/app.lua -> app.exe in the CWD), and `run` compiles to %TEMP% and
 ** executes in place. Both front-ends share lc_drive() — same pipeline,
 ** same fidelity guarantees.
@@ -48,7 +48,18 @@ static void usage( FILE *to ) {
         "\n"
         "build options:\n"
         "  -o <out.exe>     output path (default: <input-basename>.exe)\n"
-        "  -O0|-O1|-O2|-O3  optimization level (default: -O2 = whole-program)\n"
+        "  -O0|-O1|-O2|-O3  optimization level (default: -O2). What each does today:\n"
+        "                     -O0  no optimizer passes; faithful boxed baseline\n"
+        "                     -O1  type inference + interprocedural type propagation,\n"
+        "                          plus the typed codegen fastpaths (tag-check\n"
+        "                          elision, integer FORLOOP, loop register\n"
+        "                          residency). Costs about 14 KB over -O0.\n"
+        "                     -O2  the SAME BYTES as -O1 today: the three passes this\n"
+        "                          level gates (monomorphize, ip_devirt, dead_global)\n"
+        "                          are not implemented yet.\n"
+        "                     -O3  -O2 plus scalar replacement of non-escaping\n"
+        "                          constant-key tables (real, but narrow).\n"
+        "                   -Os and -Oz do not exist: they are rejected, not ignored.\n"
         "  -L <pkg>         force-bundle a package\n"
         "  --keep-temps     keep the intermediate object file\n"
         "  --shared-rt      link against the shared runtime (clua-rt.dll)\n"
@@ -105,7 +116,10 @@ static int parse_build_args( CluaArgs *a, int argc, char **argv, int from,
     int i, nforce = 0;
 
     memset( a, 0, sizeof( *a ) );
-    a->opt.opt_level = 2;                       /* clua default: -O2, whole-program (M2 interprocedural) */
+    a->opt.opt_level = 2;                       /* clua default. NOTE: -O2 currently emits the SAME BYTES
+                                                ** as -O1 -- the M2 interprocedural passes are stubs. The
+                                                ** default is 2 for forward compatibility, and usage()
+                                                ** says so per level rather than implying work happens. */
     a->opt.ld_internal = -1;                    /* env (CLUA_LD) decides   */
 
     for ( i = from; i < argc; i++ ) {
@@ -115,10 +129,12 @@ static int parse_build_args( CluaArgs *a, int argc, char **argv, int from,
             break;
         } else if ( strcmp( s, "-o" ) == 0 && i + 1 < argc ) {
             a->opt.output = argv[ ++i ];
-        } else if ( strncmp( s, "-O", 2 ) == 0 && s[2] != '\0' ) {
-            a->opt.opt_level = atoi( s + 2 );
-        } else if ( strcmp( s, "-O" ) == 0 ) {
-            a->opt.opt_level = 1;
+        } else if ( s[0] == '-' && s[1] == 'O' ) {
+            if ( !lc_parse_opt_level( s, &a->opt.opt_level ) ) {
+                fprintf( stderr, "clua: unsupported optimization level '%s' "
+                                 "(use -O0, -O1, -O2 or -O3; see `clua help`)\n", s );
+                return 0;
+            }
         } else if ( strcmp( s, "--keep-temps" ) == 0 ) {
             a->opt.keep_temps = true;
         } else if ( strcmp( s, "--shared-rt" ) == 0 ) {

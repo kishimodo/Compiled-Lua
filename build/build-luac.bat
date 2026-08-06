@@ -24,7 +24,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-pushd %~dp0..
+pushd "%~dp0.."
 
 echo [*] building base products (lua, compiler front-end, backend objs, clua-interp, embedded)...
 make -f build/Makefile lua compiler luac-objs clua-interp embedded

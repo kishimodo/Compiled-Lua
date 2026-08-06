@@ -7,6 +7,102 @@ of truth -- `clua/src/common/version.h` -- and this file in step.
 
 ## [Unreleased]
 
+### Changed
+
+- **Compile time roughly halved.** The internal linker now indexes each archive's
+  symbol map and member table (lazily built, per archive) instead of walking them
+  linearly. A Rover build resolved 25,114 archive queries with **41 million string
+  compares**; that is now 21,537. Warm `-O1` medians: Rover 187 -> 86 ms,
+  `print("hello")` 153 -> 73 ms, and the win is a fixed per-link saving so a
+  three-line program benefits as much as Rover. Output is byte-identical.
+- **Emitted binaries about 9% smaller.** Helper-call arguments are loaded as
+  32-bit immediates (`xor`/`mov r32,imm32`/sign-extending `mov r64,imm32` chosen by
+  the value's sign) rather than 64-bit ones. Two figures, because they answer
+  different questions and must not be spliced: the change *itself* saves **73,216
+  bytes of Rover's `.text` (-12.0%)**, measured against a fixed source in a
+  single-tree A/B; across the whole release the **net** `.text` saving is **69,248
+  bytes (-11.4%)**, and whole-file Rover `-O1` falls 739,328 -> 670,720 (-9.28%).
+  The 3,968-byte difference is not a regression: Rover's own source grew by about
+  50 lines in the same period (the `tar` pin), so part of the codegen win is spent
+  carrying new code. Unconditional at every `-O` level, because it is not a
+  size/speed tradeoff. `print("hello")` does not change at all: its 137,216 bytes
+  are runtime and CRT, so the win scales with user code volume, not with the
+  compiler.
+- **Runtime speed of generated code is unchanged**, measured and stated rather
+  than assumed (`docs/benchmarks/session-2026-07-25-ab.md`). Neither change
+  targeted runtime.
+- **`-O` levels are now honest.** `-Ofast`, `-Os`, `-Oz`, `-O9` and `-O-1` were
+  silently accepted and mapped to `-O0` or "everything"; they are now rejected with
+  a message and a nonzero exit. `clua help` states per level what actually runs,
+  including plainly that **`-O2` emits the same bytes as `-O1`** because the three
+  passes it gates are unimplemented.
+
+### Added
+
+- Header dependency tracking (`-MMD -MP`) in both makefiles, retiring the
+  documented "wipe `build/bin/obj` before editing a header" step -- a trap that
+  could make a stale object produce a silently empty binary. This exposed that
+  342 of 618 objects, including the whole Lua core and the runtime archives, had
+  been stale; a full rebuild changed every emitted binary. Also adds
+  `make -f build/Makefile clean-objs`.
+- The optimizer's IR verifier is implemented and actually invoked.
+  `lc_module_verify` previously returned `true` unconditionally while
+  `LcPassConfig.verify_each` was set by the driver and never read. It now runs
+  after each mutating pass group and unconditionally before codegen at every `-O`
+  level.
+- Archive-resolution accounting under `CLUA_GC_DEBUG`, reported per link.
+- Benchmark harnesses: `tools/bench-runtime.lua`, `check-byte-identity.py`,
+  `count-imm-sites.py`, `bench-armap.c`.
+- Shared agent workspace: reviews, roadmaps, benchmarks and handoffs live in
+  `docs/` with paths derived from Git at run time (`tools/agent-coordination/`).
+
+### Fixed
+
+- **Rover pins `%SystemRoot%\System32\tar.exe`** instead of resolving `tar` from
+  `PATH`. A GNU tar earlier on `PATH` read the absolute archive argument as its
+  `hostname:file` remote syntax and failed the install. It also refuses to extract
+  at all when `$SystemRoot` carries shell metacharacters, rather than falling back
+  to a less trusted extractor for an untrusted archive.
+- Code generation keeps no mutable file-scope state (six objects -> zero), which
+  unblocks per-function parallel codegen. Emitted output is byte-identical.
+- **`windows.ToWide`/`FromWide` failed on any string longer than their fixed
+  scratch buffers** (2048 WCHARs / 4096 bytes): `MultiByteToWideChar` /
+  `WideCharToMultiByte` return 0 on insufficient buffer, which these helpers raise
+  as "conversion failed". Both now ask the API for the required size and convert
+  into an exactly sized buffer -- the standard Win32 two-call idiom, which also
+  allocates *less* than before for short strings. Windows allows 32,767 characters
+  per environment variable, so no fixed size was ever correct. A source comment
+  claimed the sizing call had to be avoided because it desynchronised the FFI
+  marshaller; that note blamed "the JIT codegen path" and is stale (there is no
+  JIT in the tree), and the same idiom was already in production in
+  `dotnet/init.lua`. Re-tested directly with a 6,000-character round trip.
+  Found because `test_env` failed only under `build\run-tests.bat`, whose
+  prepended toolchain directories push this machine's `PATH` to 4,218 bytes so the
+  `PATH=...` entry overflowed by 127 bytes; under a plain shell the same `PATH` is
+  4,084 bytes and every run passed, which is why this looked environment-dependent
+  rather than broken. `tests/packages/test_env.lua` now builds 2,100/4,200/6,000-
+  character values itself, so coverage no longer depends on the ambient `PATH`
+  length -- verified to fail against the old implementation in both helpers.
+
+### Internal
+
+- `docs/roadmaps/concurrency-size-stability.md` tracks per-deliverable status;
+  `docs/benchmarks/` records every measurement with its method, including one
+  **negative** result (unrooting `.pdata`/`.xdata` frees 128 bytes of `.text`, so
+  the resurrection hypothesis is refuted and the idea should not be re-proposed).
+- `docs/roadmaps/no-crt.md` plans CRT-free output (`--crt=none`), with the measured
+  dependency surface in `docs/benchmarks/no-crt-baseline.md`: of 552 external
+  symbols, **100** are a genuine libc dependency (93 UCRT imports plus 7 static
+  mingw). Two findings shape the plan -- `libmingwex.a` provides none of the
+  transcendentals, so an own libm is unavoidable and the oracle must be rebuilt
+  against the same libc; and the Lua core already avoids CRT `setjmp` via
+  `__builtin_setjmp`. Recorded up front: the CRT is **already** outside our
+  binaries (they import `api-ms-win-crt-*`), so `--crt=none` is a
+  self-containment and determinism feature and a net **size increase** -- the size
+  lever is `-ffunction-sections` on the runtime instead.
+- `docs/handoff/2026-07-26-ultracode-prompt.md` holds the kickoff prompt for the
+  platform + no-CRT arc, delegating detail to the roadmaps so it cannot go stale.
+
 ## [0.2.0-beta.6] - 2026-06-13
 
 ### Added

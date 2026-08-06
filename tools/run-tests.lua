@@ -66,8 +66,8 @@ end
 -- the same gcc as the unit tests): a kill-on-close Job Object enforces a hard
 -- wall-clock deadline on the whole child process tree, so one hung test
 -- cannot wedge the suite. Exit 124 = deadline fired (GNU timeout convention).
--- Override the budget with CLUA_TEST_TIMEOUT_MS; if the watchdog fails to
--- build we warn and run unguarded rather than refusing to test.
+-- Override the budget with CLUA_TEST_TIMEOUT_MS. A missing watchdog is fatal:
+-- silently running unguarded lets a hung child wedge the entire test job.
 local WATCHDOG    = TESTBIN .. "\\timeout-run.exe"
 local TIMEOUT_MS  = tonumber(os.getenv("CLUA_TEST_TIMEOUT_MS") or "") or 120000
 local have_watchdog = false
@@ -78,11 +78,12 @@ local function build_watchdog()
                           .. WATCHDOG .. '" tools/timeout-run.c 2>&1')
   have_watchdog = (rc == 0)
   if not have_watchdog then
-    print("  [!] watchdog build failed -- tests run without a timeout guard")
+    print("  [-] watchdog build failed -- refusing to run tests unguarded")
     for line in log:gmatch("[^\r\n]+") do
       if line:find("error") then print("      " .. line) end
     end
   end
+  return have_watchdog
 end
 
 -- Prepend the watchdog to a command line whose first token is an executable.
@@ -111,6 +112,43 @@ local function basename(path, ext)
   return (path:match("([^/\\]+)" .. ext .. "$"))
 end
 
+local REQUIRE_PASS_MARKER = {
+  unit = true, luaexe = true, package = true, suite = true,
+}
+
+-- Keep classification pure so its dangerous edge cases can be self-checked
+-- before any real child process is trusted.
+local function classify(layer, out, code)
+  out = out or ""
+  if code ~= 0 then return "fail", "nonzero exit " .. tostring(code) end
+  if out:find("%[%-%] FAIL") then return "fail", "failure marker" end
+  if REQUIRE_PASS_MARKER[layer] then
+    if out:find("%[%+%] PASS") then return "pass" end
+    if out:find("%[~%] SKIP") then return "skip" end
+    return "fail", "no [+] PASS marker"
+  end
+  if out:find("%[~%] SKIP") then return "skip" end
+  return "pass"
+end
+
+local function selfcheck_classifier()
+  local cases = {
+    { "suite",  "[~] SKIP optional setup\n",                  3,   "fail" },
+    { "suite",  "[~] SKIP optional setup\n",                  124, "fail" },
+    { "unit",   "",                                           0,   "fail" },
+    { "luaexe", "[+] PASS reached before crash\n",            5,   "fail" },
+    { "suite",  "[~] SKIP optional setup\n[+] PASS complete", 0,   "pass" },
+    { "package","[+] PASS complete\n",                        0,   "pass" },
+  }
+  for i, c in ipairs(cases) do
+    local got = classify(c[1], c[2], c[3])
+    if got ~= c[4] then
+      error(string.format("test classifier self-check %d: got %s, want %s",
+                          i, tostring(got), c[4]))
+    end
+  end
+end
+
 -- Classify a finished test by its output + exit code, update counters, print.
 -- XFAIL/XPASS markers (a test asserting CORRECT behavior of a known bug) are
 -- counted wherever they appear, independent of the test's overall result:
@@ -118,6 +156,7 @@ end
 --   [!] XPASS  -- the bug appears FIXED; remove the xfail marker (flagged, not fatal)
 local function record(layer, name, out, code, extra)
   out = out or ""
+  local result, classify_detail = classify(layer, out, code)
   local nx = select(2, out:gsub("%[x%] XFAIL", ""))
   local np = select(2, out:gsub("%[!%] XPASS", ""))
   xfail_n = xfail_n + nx
@@ -128,13 +167,17 @@ local function record(layer, name, out, code, extra)
   if code == 124 then
     extra = (extra and (extra .. " ") or "") .. string.format("(TIMEOUT after %dms)", TIMEOUT_MS)
   end
-  if out:find("%[%-%] FAIL") or (code ~= 0 and not out:find("%[~%] SKIP")) then
+  if result == "fail" then
     fail = fail + 1
     failed[#failed + 1] = layer .. ":" .. name
     print(string.format("  [-] FAIL  %-9s %s%s", layer, name, extra and (" " .. extra) or ""))
     local detail = out:match("%[%-%] FAIL[^\r\n]*")
-    if detail then print("            " .. detail) end
-  elseif out:find("%[~%] SKIP") then
+    if detail then
+      print("            " .. detail)
+    elseif classify_detail then
+      print("            " .. classify_detail)
+    end
+  elseif result == "skip" then
     skip = skip + 1
     local why = out:match("%[~%] SKIP[^\r\n]*") or ""
     print(string.format("  [~] SKIP  %-9s %s   %s", layer, name, why))
@@ -420,7 +463,13 @@ local function run_conformance()
       if reason then
         -- Expected-divergence file. A continuing divergence is the expected
         -- XFAIL; a match means the bug is gone -> XPASS (clean up the marker).
-        if matches then
+        if crc ~= 0 or not oracle_ok then
+          fail = fail + 1
+          failed[#failed + 1] = "conform:" .. name
+          local why = crc ~= 0 and "(aotc compile/link error)"
+                                   or "(interpreter oracle failed)"
+          print(string.format("  [-] FAIL  %-9s %s %s", "conform", name, why))
+        elseif matches then
           xpass_n = xpass_n + 1
           xpassed[#xpassed + 1] = "conform:" .. name
           print(string.format("  [!] XPASS conform   %s   (now matches; drop DIFF-XFAIL: %s)", name, reason))
@@ -492,12 +541,16 @@ end
 -- ---- drive -----------------------------------------------------------------
 
 print("CLua test runner -- auto-discovering all of tests/ + tools/ suites")
+selfcheck_classifier()
 header("Building core archive (build/bin/libcluatest.a)")
 if not build_archive() then
   print("\n[-] could not build the test archive; aborting.")
   os.exit(1)
 end
-build_watchdog()
+if not build_watchdog() then
+  print("\n[-] watchdog unavailable; aborting.")
+  os.exit(1)
+end
 run_unit()
 run_lua()
 run_packages()

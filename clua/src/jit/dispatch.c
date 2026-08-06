@@ -57,6 +57,27 @@ typedef struct _JIT_CACHE {
     size_t             Cap;
     int32_t           *Hash;        /* heap; (HashMask+1) pow2 slots, -1 = empty */
     size_t             HashMask;    /* HashSize - 1 (0 until first allocation)   */
+    /* Monomorphic memo for the immediately preceding successful lookup. Real code
+    ** calls the same function repeatedly -- a loop body, a recursive callee, a
+    ** hot method -- so one slot removes the hash and probe for the overwhelmingly
+    ** common case.
+    **
+    ** It lives HERE rather than in a file-scope static on purpose: worker threads
+    ** get their own heap-allocated cache, and a shared memo would let one thread
+    ** answer another thread's lookup from a cache it does not own.
+    **
+    ** Only successful lookups are memoised. A miss is never recorded, so a Proto
+    ** registered after a failed lookup is still found. And because the entry's
+    ** VALUE is stored rather than a pointer into Entries, growing that array does
+    ** not invalidate it.
+    **
+    ** Sound without an invalidation path only because the closed world never
+    ** frees a registered Proto -- the same invariant the cache itself already
+    ** rests on. docs/benchmarks/open-world-and-speed.md section 4 records that as
+    ** precisely the thing an open-world mode would break, and it applies here too:
+    ** whoever adds --open-world has to give this a removal path as well. */
+    Proto             *MemoP;
+    JIT_FUNC_T         MemoEntry;
 } JIT_CACHE_T;
 
 /* The default (main-thread) cache: a few pointers in .bss, not a 72 KB array.
@@ -76,7 +97,9 @@ void Jit_InitWorkerTls( void ) {
     }
 }
 
-static JIT_CACHE_T *CurrentCache( void ) {
+/* always_inline: -Os otherwise emits these as separate .text$ COMDATs and every
+** Lua-to-Lua call pays two extra call/ret pairs to reach the hash probe. */
+static __attribute__((always_inline)) inline JIT_CACHE_T *CurrentCache( void ) {
     if ( g_WorkerThreadsExist && g_TlsSlot != TLS_OUT_OF_INDEXES ) {
         JIT_CACHE_T *C = ( JIT_CACHE_T * )TlsGetValue( g_TlsSlot );
         if ( C != NULL ) return C;
@@ -143,7 +166,8 @@ static int CacheGrow( JIT_CACHE_T *C ) {
     return 1;
 }
 
-static PJIT_CACHE_ENTRY_T CacheFindIn( JIT_CACHE_T *C, Proto *P ) {
+static __attribute__((always_inline)) inline
+PJIT_CACHE_ENTRY_T CacheFindIn( JIT_CACHE_T *C, Proto *P ) {
     if ( C->Count == 0 || C->Hash == NULL ) { return NULL; }
     size_t Mask  = C->HashMask;
     size_t H     = HashProto( P ) & Mask;
@@ -157,8 +181,14 @@ static PJIT_CACHE_ENTRY_T CacheFindIn( JIT_CACHE_T *C, Proto *P ) {
 }
 
 JIT_FUNC_T Jit_LookupCached( Proto *P ) {
-    PJIT_CACHE_ENTRY_T E = CacheFindIn( CurrentCache( ), P );
-    return E != NULL ? E->Entry : NULL;
+    JIT_CACHE_T       *C = CurrentCache( );
+    PJIT_CACHE_ENTRY_T E;
+    if ( C->MemoP == P ) { return C->MemoEntry; }   /* see JIT_CACHE_T.MemoP */
+    E = CacheFindIn( C, P );
+    if ( E == NULL ) { return NULL; }               /* misses are NOT memoised */
+    C->MemoP     = P;
+    C->MemoEntry = E->Entry;
+    return E->Entry;
 }
 
 static int RegisterIn( JIT_CACHE_T *C, Proto *P, JIT_FUNC_T Entry, int FuncId ) {

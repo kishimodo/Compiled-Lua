@@ -16,7 +16,7 @@ set "COUNT=%~2"
 if "%START%"=="" set "START=1"
 if "%COUNT%"=="" set "COUNT=1000"
 
-pushd %~dp0..
+pushd "%~dp0.."
 if not exist build\bin\clua-interp.exe (
     echo [-] build\bin\clua-interp.exe not found -- run build\build-luac.bat first
     popd & exit /b 1

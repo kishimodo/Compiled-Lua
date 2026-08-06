@@ -1,5 +1,6 @@
 #include "jit/runtime.h"
 #include "jit/dispatch.h"
+#include "common/rt_frame_abi.h"
 
 #include "lua.h"
 #include "lauxlib.h"
@@ -61,6 +62,95 @@ int Rt_MulSlow( lua_State *L, int A, int B, int C ) {
     return 0;
 }
 
+/* Native recursion guard.
+**
+** AOT code makes a REAL native call for every Lua-level call (the `Jitted( L )`
+** dispatch below), so Lua recursion consumes native stack. The interpreter runs
+** every callee inside one C frame, so its depth is bounded only by LUAI_MAXSTACK
+** and it raises a catchable "stack overflow"; we are bounded by the thread's
+** stack and, without this guard, the process simply DIES with
+** STATUS_STACK_OVERFLOW (0xC00000FD) -- no message, not catchable by pcall.
+**
+** Measured before this guard, with the 2 MB SizeOfStackReserve pe_emit.c writes:
+** a compiled binary died between recursion depth 9,000 and 15,000, where the
+** interpreter reached 200,000 and returned `<chunk>:1: stack overflow`. The
+** existing differential test tests/differential/pcall_err.lua:85-95 recurses only
+** 500 levels specifically to stay under it.
+**
+** The limit is deliberately well below the true capacity (~12,000 frames at 2 MB,
+** measured at roughly 170 bytes per Rt_Call + AOT frame pair): a helper called
+** from the deepest frame, an FFI thunk, or the error handler itself still needs
+** room to run, and luaG_runerror allocates while formatting. Raising the reserve
+** raises the true capacity but never removes the need for the guard.
+**
+** The check is STATELESS -- it measures the remaining stack directly rather than
+** counting depth. A depth counter would have to be decremented after the
+** dispatch returns, and an error inside the callee leaves via luaD_throw's
+** longjmp, skipping the decrement; the count would ratchet upward until every
+** call failed. Measuring the stack has no such failure mode, and it is
+** automatically correct across coroutine switches (each coroutine is a fiber
+** with its own stack, and Windows updates the thread's stack bounds on switch).
+**
+** VirtualQuery on the address of a local gives AllocationBase = the base of the
+** whole stack RESERVATION, which is the real bottom (StackLimit in the TEB is
+** only the committed low-water mark, and GetCurrentThreadStackLimits is gated
+** behind _WIN32_WINNT >= 0x0602, which this tree does not set). VirtualQuery has
+** no version gate.
+**
+** It is not cheap, though, and this sits on the very call path we are trying to
+** make faster -- so it is SAMPLED. Depth changes by at most one frame per call,
+** so checking every Nth call is safe only while the margin exceeds N frames'
+** worth of stack. Getting that relation wrong is a live crash, and the first
+** version of this guard did: it sampled every 1024 calls against a 256 KB margin
+** on an ESTIMATED 170 bytes per frame. The measured figure is 292 bytes
+** (16 MB reserve / 57,344 frames reached), so 1024 calls span 299 KB and could
+** step straight past the margin -- which showed up as the SECOND unbounded
+** recursion in a program crashing while the first was caught cleanly, because
+** the phase counter's alignment differs between descents.
+**
+** So: sample every 512 calls against a 1 MB margin. That is 1 MB / 292 B = 3,590
+** frames of headroom against a 512-frame worst-case overshoot (150 KB), i.e. 7x
+** safety. The per-frame cost is INVARIANT in the user program -- it is the fixed
+** AOT prologue (8 pushes + SUB RSP,0x28) plus Rt_Call's own frame, because Lua
+** registers live on the heap-allocated Lua stack addressed through RDI rather
+** than on the native stack, so a function with many locals does not widen it.
+**
+** Measured cost on the most call-dense kernel available (8M calls, min-of-7):
+** 272 ms with the check compiled out, 284 ms at a 512 interval, 289 ms at 128.
+** So the guard costs 12 ms (4.4%) here, and MOST of that is the per-call phase
+** increment and branch rather than the sampled VirtualQuery -- widening the
+** interval 4x only recovered 5 of the 17 ms. Real code pays proportionally less
+** because it is not pure calls. When the call path is rewritten (devirtualisation
+** and callee inlining) this belongs in the AOT prologue as a bare SP compare
+** against a cached limit, which removes even that.
+**
+** Reserving 1 MB of the 16 MB costs about 6% of reachable depth, leaving ~53,000
+** frames -- measured at 57,344 before the margin was taken out.
+**
+** The phase counter deliberately needs no unwind handling and no thread-safety:
+** it only selects sampling points, so a value that leaks after an error, or
+** races between threads, changes WHICH call is checked and nothing else.
+**
+** AOT-only: the hazard is one native frame per Lua call, which is the AOT
+** dispatch. The embedded build reaches callees through the interpreter and has
+** no windows.h here, so the check compiles out. */
+#if defined( LUAC_AOT_RUNTIME )
+#define RT_STACK_MARGIN   ( 1024u * 1024u )
+#define RT_STACK_SAMPLE   511u    /* power-of-two mask: check every 512th call */
+static unsigned g_StackProbePhase = 0;
+static int Rt_StackNearlyExhausted( void ) {
+    MEMORY_BASIC_INFORMATION Mbi;
+    volatile char Probe;
+    if ( VirtualQuery( ( LPCVOID )&Probe, &Mbi, sizeof Mbi ) == 0 ) return 0;
+    return ( ( uintptr_t )&Probe - ( uintptr_t )Mbi.AllocationBase )
+           < ( uintptr_t )RT_STACK_MARGIN;
+}
+#define RT_STACK_LOW() \
+    ( ( ++g_StackProbePhase & RT_STACK_SAMPLE ) == 0 && Rt_StackNearlyExhausted() )
+#else
+#define RT_STACK_LOW() 0
+#endif
+
 int Rt_Call( lua_State *L, int A, int NArgs, int NResults ) {
     StkId Base = L->ci->func.p + 1;
     StkId Func = Base + A;
@@ -109,8 +199,26 @@ int Rt_Call( lua_State *L, int A, int NArgs, int NResults ) {
                NOT our C local `Func`, so re-derive it from the (corrected)
                CallInfo afterwards. Without this, the nil-pad loop and the
                L->top assignment below write through a dangling pointer into the
-               freed old stack buffer when the callee frame doesn't fit. */
-            lua_checkstack( L, Cl->p->maxstacksize + 5 );
+               freed old stack buffer when the callee frame doesn't fit.
+
+               The no-growth arm is inlined verbatim from lua_checkstack
+               (lua-5.4/src/lapi.c:111-125), which on that path does exactly the
+               bounds test and the ci->top raise below. It is behaviour-preserving
+               rather than an approximation: lua_checkstack reads `ci = L->ci`,
+               and L->ci was set to Ci immediately above, so the CallInfo it
+               adjusts is the same one. Growth still goes through the real call,
+               which is what keeps the relocation comment above true. Worth
+               inlining because every Lua-to-Lua call pays it and the overwhelmingly
+               common case is that the stack is already large enough. */
+            {
+                int NeedN = Cl->p->maxstacksize + 5;
+                if ( L->stack_last.p - L->top.p > NeedN ) {
+                    if ( Ci->top.p < L->top.p + NeedN )
+                        Ci->top.p = L->top.p + NeedN;
+                } else {
+                    lua_checkstack( L, NeedN );
+                }
+            }
             Func = Ci->func.p;
             /* Nil-pad missing fixed arguments. Mirrors upstream
                luaD_precall's `for (; narg < nfixparams; narg++)
@@ -138,6 +246,16 @@ int Rt_Call( lua_State *L, int A, int NArgs, int NResults ) {
                all register slots are within the stack's live range. */
             if ( !Cl->p->is_vararg ) {
                 L->top.p = Ci->top.p;
+            }
+            /* Raise BEFORE dispatching, and restore the caller's CallInfo first
+            ** so the error is thrown from a consistent frame. The message is
+            ** byte-identical to the interpreter's (luaD_growstack raises plain
+            ** "stack overflow", which luaG_runerror prefixes with chunk:line),
+            ** so an unbounded recursion produces the same output under both
+            ** engines and the differential suite stays meaningful. */
+            if ( RT_STACK_LOW() ) {
+                L->ci = Ci->previous;
+                luaG_runerror( L, "stack overflow" );
             }
             Jitted( L );
 
@@ -235,13 +353,13 @@ int Rt_GetTabUp( lua_State *L, int A, int B, int C ) {
     const TValue *Slot = { 0 };
     StkId         Ra   = L->ci->func.p + 1 + A;
 
-    /* sync L->top so luaT_callTMres pushes above the live register window */
-    L->top.p = L->ci->top.p;
     /* key is always a short string constant in OP_GETTABUP */
     TString *KeyStr = tsvalue( Key );
     if ( luaV_fastget( L, Upval, KeyStr, Slot, luaH_getshortstr ) ) {
         setobj2s( L, Ra, Slot );
     } else {
+        /* Only the slow path needs L->top synced -- see Rt_GetI. */
+        L->top.p = L->ci->top.p;
         luaV_finishget( L, Upval, Key, Ra, Slot );
     }
     return 0;
@@ -513,11 +631,25 @@ int Rt_NewTable( lua_State *L, int A, int B, int C ) {
 int Rt_GetI( lua_State *L, int A, int B, int C ) {
     StkId         Base = L->ci->func.p + 1;
     const TValue *Slot = { 0 };
-    /* sync L->top so luaT_callTMres pushes above the live register window */
-    L->top.p = L->ci->top.p;
+    /* L->top is synced on the SLOW path only.
+    **
+    ** luaV_fastget and luaV_fastgeti (lua-5.4/src/lvm.h:85-101) are pure
+    ** raw-access macros -- a tag test and an array probe or one hash lookup. They
+    ** never call a metamethod, so they never need room above the live register
+    ** window. luaV_finishget does: it can reach luaT_callTMres, which pushes.
+    ** Likewise luaV_finishfastset (lvm.h:108-110) is only setobj2t plus
+    ** luaC_barrierback, so the fast side of the setters needs nothing either.
+    **
+    ** Hoisting the store out of the fast path removes one store from every table
+    ** access -- roughly 4,700 sites in rover. The same move is applied to all nine
+    ** table helpers below; each was edited and read individually rather than
+    ** batched, because a regex attempt at this silently relocated one store into
+    ** the WRONG function while keeping the total count unchanged, which no
+    ** count-based check would have caught. */
     if ( luaV_fastgeti( L, s2v( Base + B ), C, Slot ) ) {
         setobj2s( L, Base + A, Slot );
     } else {
+        L->top.p = L->ci->top.p;
         TValue Key;
         setivalue( &Key, ( lua_Integer )C );
         luaV_finishget( L, s2v( Base + B ), &Key, Base + A, Slot );
@@ -529,12 +661,12 @@ int Rt_GetField( lua_State *L, int A, int B, int C ) {
     StkId         Base = L->ci->func.p + 1;
     TValue       *Key  = &clLvalue( s2v( L->ci->func.p ) )->p->k[ C ];
     const TValue *Slot = { 0 };
-    /* sync L->top so luaT_callTMres pushes above the live register window */
-    L->top.p = L->ci->top.p;
     /* key is always a short string constant in OP_GETFIELD */
     if ( luaV_fastget( L, s2v( Base + B ), tsvalue( Key ), Slot, luaH_getshortstr ) ) {
         setobj2s( L, Base + A, Slot );
     } else {
+        /* Only the slow path needs L->top synced -- see Rt_GetI. */
+        L->top.p = L->ci->top.p;
         luaV_finishget( L, s2v( Base + B ), Key, Base + A, Slot );
     }
     return 0;
@@ -545,13 +677,13 @@ int Rt_GetTable( lua_State *L, int A, int B, int C ) {
     TValue       *Key  = s2v( Base + C );
     const TValue *Slot = { 0 };
     lua_Unsigned   N   = { 0 };
-    /* sync L->top so luaT_callTMres pushes above the live register window */
-    L->top.p = L->ci->top.p;
     if ( ttisinteger( Key )
          ? ( cast_void( N = ivalue( Key ) ), luaV_fastgeti( L, s2v( Base + B ), N, Slot ) )
          : luaV_fastget( L, s2v( Base + B ), Key, Slot, luaH_get ) ) {
         setobj2s( L, Base + A, Slot );
     } else {
+        /* Only the slow path needs L->top synced -- see Rt_GetI. */
+        L->top.p = L->ci->top.p;
         luaV_finishget( L, s2v( Base + B ), Key, Base + A, Slot );
     }
     return 0;
@@ -570,11 +702,11 @@ int Rt_SetI( lua_State *L, int A, int B, int Ck ) {
     const TValue *Slot = { 0 };
     DecodeCk( Ck, &C, &K );
     TValue *Val = K ? &clLvalue( s2v( L->ci->func.p ) )->p->k[ C ] : s2v( Base + C );
-    /* sync L->top so luaT_callTM pushes above the live register window */
-    L->top.p = L->ci->top.p;
     if ( luaV_fastgeti( L, s2v( Base + A ), B, Slot ) ) {
         luaV_finishfastset( L, s2v( Base + A ), Slot, Val );
     } else {
+        /* Only the slow path needs L->top synced -- see Rt_GetI. */
+        L->top.p = L->ci->top.p;
         TValue Key;
         setivalue( &Key, ( lua_Integer )B );
         luaV_finishset( L, s2v( Base + A ), &Key, Val, Slot );
@@ -590,13 +722,199 @@ int Rt_SetField( lua_State *L, int A, int B, int Ck ) {
     DecodeCk( Ck, &C, &K );
     TValue *Key = &clLvalue( s2v( L->ci->func.p ) )->p->k[ B ];
     TValue *Val = K ? &clLvalue( s2v( L->ci->func.p ) )->p->k[ C ] : s2v( Base + C );
-    /* sync L->top so luaT_callTM pushes above the live register window */
-    L->top.p = L->ci->top.p;
     /* key is always a short string constant in OP_SETFIELD */
     if ( luaV_fastget( L, s2v( Base + A ), tsvalue( Key ), Slot, luaH_getshortstr ) ) {
         luaV_finishfastset( L, s2v( Base + A ), Slot, Val );
     } else {
+        /* Only the slow path needs L->top synced -- see Rt_GetI. */
+        L->top.p = L->ci->top.p;
         luaV_finishset( L, s2v( Base + A ), Key, Val, Slot );
+    }
+    return 0;
+}
+
+/* --- frame-passing field helpers -------------------------------------------
+**
+** Same bodies as Rt_GetField / Rt_SetField, with `Base` arriving as an
+** argument instead of being rebuilt out of L. Everything downstream of that
+** follows: L->ci->func.p is Base - 1, so the Proto walk starts from a value
+** already in a register rather than from two loads.
+**
+** Kept as separate functions rather than folded into the originals because the
+** originals are still reachable -- codegen falls back to them when an operand
+** does not fit the packed word. See common/rt_frame_abi.h. */
+
+int Rt_GetFieldF( lua_State *L, StkId Base, int Packed ) {
+    const int     A    = LC_RTF_A( Packed );
+    const int     B    = LC_RTF_B( Packed );
+    StkId         Func = Base - 1;                 /* == L->ci->func.p */
+    TValue       *Key  = &clLvalue( s2v( Func ) )->p->k[ LC_RTF_C( Packed ) ];
+    const TValue *Slot = { 0 };
+    /* key is always a short string constant in OP_GETFIELD */
+    if ( luaV_fastget( L, s2v( Base + B ), tsvalue( Key ), Slot, luaH_getshortstr ) ) {
+        setobj2s( L, Base + A, Slot );
+    } else {
+        /* Only the slow path needs L->top synced -- see Rt_GetI. */
+        L->top.p = L->ci->top.p;
+        luaV_finishget( L, s2v( Base + B ), Key, Base + A, Slot );
+    }
+    return 0;
+}
+
+int Rt_SetFieldF( lua_State *L, StkId Base, int Packed ) {
+    const int     A    = LC_RTF_A( Packed );
+    const int     B    = LC_RTF_B( Packed );
+    const int     C    = LC_RTF_C( Packed );
+    StkId         Func = Base - 1;                 /* == L->ci->func.p */
+    TValue       *K    = clLvalue( s2v( Func ) )->p->k;
+    TValue       *Key  = &K[ B ];
+    TValue       *Val  = LC_RTF_K( Packed ) ? &K[ C ] : s2v( Base + C );
+    const TValue *Slot = { 0 };
+    /* key is always a short string constant in OP_SETFIELD */
+    if ( luaV_fastget( L, s2v( Base + A ), tsvalue( Key ), Slot, luaH_getshortstr ) ) {
+        luaV_finishfastset( L, s2v( Base + A ), Slot, Val );
+    } else {
+        /* Only the slow path needs L->top synced -- see Rt_GetI. */
+        L->top.p = L->ci->top.p;
+        luaV_finishset( L, s2v( Base + A ), Key, Val, Slot );
+    }
+    return 0;
+}
+
+int Rt_GetIF( lua_State *L, StkId Base, int Packed ) {
+    const int     A    = LC_RTF_A( Packed );
+    const int     B    = LC_RTF_B( Packed );
+    const int     C    = LC_RTF_C( Packed );
+    const TValue *Slot = { 0 };
+    if ( luaV_fastgeti( L, s2v( Base + B ), C, Slot ) ) {
+        setobj2s( L, Base + A, Slot );
+    } else {
+        /* Only the slow path needs L->top synced -- see Rt_GetI. */
+        L->top.p = L->ci->top.p;
+        TValue Key;
+        setivalue( &Key, ( lua_Integer )C );
+        luaV_finishget( L, s2v( Base + B ), &Key, Base + A, Slot );
+    }
+    return 0;
+}
+
+int Rt_SetIF( lua_State *L, StkId Base, int Packed ) {
+    const int     A    = LC_RTF_A( Packed );
+    const int     B    = LC_RTF_B( Packed );
+    const int     C    = LC_RTF_C( Packed );
+    StkId         Func = Base - 1;                 /* == L->ci->func.p */
+    TValue       *Val  = LC_RTF_K( Packed )
+                             ? &clLvalue( s2v( Func ) )->p->k[ C ]
+                             : s2v( Base + C );
+    const TValue *Slot = { 0 };
+    if ( luaV_fastgeti( L, s2v( Base + A ), B, Slot ) ) {
+        luaV_finishfastset( L, s2v( Base + A ), Slot, Val );
+    } else {
+        /* Only the slow path needs L->top synced -- see Rt_GetI. */
+        L->top.p = L->ci->top.p;
+        TValue Key;
+        setivalue( &Key, ( lua_Integer )B );
+        luaV_finishset( L, s2v( Base + A ), &Key, Val, Slot );
+    }
+    return 0;
+}
+
+int Rt_GetTableF( lua_State *L, StkId Base, int Packed ) {
+    const int     A    = LC_RTF_A( Packed );
+    const int     B    = LC_RTF_B( Packed );
+    TValue       *Key  = s2v( Base + LC_RTF_C( Packed ) );
+    const TValue *Slot = { 0 };
+    lua_Unsigned  N    = { 0 };
+    if ( ttisinteger( Key )
+         ? ( cast_void( N = ivalue( Key ) ), luaV_fastgeti( L, s2v( Base + B ), N, Slot ) )
+         : luaV_fastget( L, s2v( Base + B ), Key, Slot, luaH_get ) ) {
+        setobj2s( L, Base + A, Slot );
+    } else {
+        /* Only the slow path needs L->top synced -- see Rt_GetI. */
+        L->top.p = L->ci->top.p;
+        luaV_finishget( L, s2v( Base + B ), Key, Base + A, Slot );
+    }
+    return 0;
+}
+
+int Rt_SetTableF( lua_State *L, StkId Base, int Packed ) {
+    const int     A    = LC_RTF_A( Packed );
+    const int     C    = LC_RTF_C( Packed );
+    StkId         Func = Base - 1;                 /* == L->ci->func.p */
+    TValue       *Key  = s2v( Base + LC_RTF_B( Packed ) );
+    TValue       *Val  = LC_RTF_K( Packed )
+                             ? &clLvalue( s2v( Func ) )->p->k[ C ]
+                             : s2v( Base + C );
+    const TValue *Slot = { 0 };
+    lua_Unsigned  N    = { 0 };
+    if ( ttisinteger( Key )
+         ? ( cast_void( N = ivalue( Key ) ), luaV_fastgeti( L, s2v( Base + A ), N, Slot ) )
+         : luaV_fastget( L, s2v( Base + A ), Key, Slot, luaH_get ) ) {
+        luaV_finishfastset( L, s2v( Base + A ), Slot, Val );
+    } else {
+        /* Only the slow path needs L->top synced -- see Rt_GetI. */
+        L->top.p = L->ci->top.p;
+        luaV_finishset( L, s2v( Base + A ), Key, Val, Slot );
+    }
+    return 0;
+}
+
+int Rt_GetTabUpF( lua_State *L, StkId Base, int Packed ) {
+    StkId         Func  = Base - 1;                /* == L->ci->func.p */
+    LClosure     *Cl    = clLvalue( s2v( Func ) );
+    TValue       *Upval = Cl->upvals[ LC_RTF_B( Packed ) ]->v.p;
+    TValue       *Key   = &Cl->p->k[ LC_RTF_C( Packed ) ];
+    const TValue *Slot  = { 0 };
+    StkId         Ra    = Base + LC_RTF_A( Packed );
+    /* key is always a short string constant in OP_GETTABUP */
+    if ( luaV_fastget( L, Upval, tsvalue( Key ), Slot, luaH_getshortstr ) ) {
+        setobj2s( L, Ra, Slot );
+    } else {
+        /* Only the slow path needs L->top synced -- see Rt_GetI. */
+        L->top.p = L->ci->top.p;
+        luaV_finishget( L, Upval, Key, Ra, Slot );
+    }
+    return 0;
+}
+
+int Rt_SetTabUpF( lua_State *L, StkId Base, int Packed ) {
+    const int     C     = LC_RTF_C( Packed );
+    StkId         Func  = Base - 1;                /* == L->ci->func.p */
+    LClosure     *Cl    = clLvalue( s2v( Func ) );
+    TValue       *Upval = Cl->upvals[ LC_RTF_A( Packed ) ]->v.p;
+    TValue       *Key   = &Cl->p->k[ LC_RTF_B( Packed ) ];
+    TValue       *Val   = LC_RTF_K( Packed ) ? &Cl->p->k[ C ] : s2v( Base + C );
+    const TValue *Slot  = { 0 };
+    /* key is always a short string constant in OP_SETTABUP */
+    if ( luaV_fastget( L, Upval, tsvalue( Key ), Slot, luaH_getshortstr ) ) {
+        luaV_finishfastset( L, Upval, Slot, Val );
+    } else {
+        /* Only the slow path needs L->top synced -- see Rt_GetI. */
+        L->top.p = L->ci->top.p;
+        luaV_finishset( L, Upval, Key, Val, Slot );
+    }
+    return 0;
+}
+
+int Rt_SelfF( lua_State *L, StkId Base, int Packed ) {
+    const int     A    = LC_RTF_A( Packed );
+    const int     B    = LC_RTF_B( Packed );
+    const int     C    = LC_RTF_C( Packed );
+    StkId         Func = Base - 1;                 /* == L->ci->func.p */
+    LClosure     *Cl   = clLvalue( s2v( Func ) );
+    TValue       *Key  = LC_RTF_K( Packed ) ? &Cl->p->k[ C ] : s2v( Base + C );
+    const TValue *Slot = { 0 };
+    /* R[A+1] = R[B] FIRST, so a subsequent table-get cannot observe a stale
+       R[A+1] when the table is the same register as R[A] -- see Rt_Self. */
+    setobj2s( L, Base + A + 1, s2v( Base + B ) );
+    /* luaH_getstr, not getshortstr: OP_SELF's method name may be a LONG
+       string. Same reasoning as Rt_Self, which this mirrors exactly. */
+    if ( luaV_fastget( L, s2v( Base + B ), tsvalue( Key ), Slot, luaH_getstr ) ) {
+        setobj2s( L, Base + A, Slot );
+    } else {
+        /* Only the slow path needs L->top synced -- see Rt_GetI. */
+        L->top.p = L->ci->top.p;
+        luaV_finishget( L, s2v( Base + B ), Key, Base + A, Slot );
     }
     return 0;
 }
@@ -610,13 +928,13 @@ int Rt_SetTable( lua_State *L, int A, int B, int Ck ) {
     TValue       *Key = s2v( Base + B );
     TValue       *Val = K ? &clLvalue( s2v( L->ci->func.p ) )->p->k[ C ] : s2v( Base + C );
     lua_Unsigned   N  = { 0 };
-    /* sync L->top so luaT_callTM pushes above the live register window */
-    L->top.p = L->ci->top.p;
     if ( ttisinteger( Key )
          ? ( cast_void( N = ivalue( Key ) ), luaV_fastgeti( L, s2v( Base + A ), N, Slot ) )
          : luaV_fastget( L, s2v( Base + A ), Key, Slot, luaH_get ) ) {
         luaV_finishfastset( L, s2v( Base + A ), Slot, Val );
     } else {
+        /* Only the slow path needs L->top synced -- see Rt_GetI. */
+        L->top.p = L->ci->top.p;
         luaV_finishset( L, s2v( Base + A ), Key, Val, Slot );
     }
     return 0;
@@ -631,12 +949,12 @@ int Rt_SetTabUp( lua_State *L, int A, int B, int Ck ) {
     DecodeCk( Ck, &C, &K );
     TValue *Key = &Cl->p->k[ B ];
     TValue *Val = K ? &Cl->p->k[ C ] : s2v( L->ci->func.p + 1 + C );
-    /* sync L->top so luaT_callTM pushes above the live register window */
-    L->top.p = L->ci->top.p;
     /* key is always a short string constant in OP_SETTABUP */
     if ( luaV_fastget( L, Upval, tsvalue( Key ), Slot, luaH_getshortstr ) ) {
         luaV_finishfastset( L, Upval, Slot, Val );
     } else {
+        /* Only the slow path needs L->top synced -- see Rt_GetI. */
+        L->top.p = L->ci->top.p;
         luaV_finishset( L, Upval, Key, Val, Slot );
     }
     return 0;
@@ -1479,15 +1797,17 @@ int Rt_TForLoop( lua_State *L, int A ) {
     return 0;  /* loop done */
 }
 
-int Rt_Self( lua_State *L, int A, int B, int C ) {
+int Rt_Self( lua_State *L, int A, int B, int Ck ) {
     StkId         Base = L->ci->func.p + 1;
-    TValue       *Key  = &clLvalue( s2v( L->ci->func.p ) )->p->k[ C ];
+    LClosure     *Cl   = clLvalue( s2v( L->ci->func.p ) );
+    int           C, K;
+    TValue       *Key;
     const TValue *Slot = { 0 };
+    DecodeCk( Ck, &C, &K );
+    Key = K ? &Cl->p->k[ C ] : s2v( Base + C );
     /* setobj2s for R[A+1] = R[B] (do this FIRST so a subsequent table-get
        can't observe a stale R[A+1] if the table is the same as R[A]) */
     setobj2s( L, Base + A + 1, s2v( Base + B ) );
-    /* sync L->top so luaT_callTMres pushes above the live register window */
-    L->top.p = L->ci->top.p;
     /* R[A] = R[B][K[C]] -- use luaV_fastget's RETURN value, not just whether
        Slot is NULL. fastget can leave Slot pointing at an "empty" sentinel
        (LUA_VEMPTY, tt=32) when the key is absent from a real table -- we'd
@@ -1503,6 +1823,8 @@ int Rt_Self( lua_State *L, int A, int B, int C ) {
                        luaH_getstr ) ) {
         setobj2s( L, Base + A, Slot );
     } else {
+        /* Only the slow path needs L->top synced -- see Rt_GetI. */
+        L->top.p = L->ci->top.p;
         luaV_finishget( L, s2v( Base + B ), Key, Base + A, Slot );
     }
     return 0;

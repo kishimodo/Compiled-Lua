@@ -9,6 +9,27 @@
 #define LUAC_AOTC_H
 
 #include <stdbool.h>
+#include <stddef.h>   /* NULL, for lc_parse_opt_level below */
+
+/* Parse a `-O<n>` argument strictly. Returns false for anything not supported
+** instead of letting it become a level nobody asked for.
+**
+** Both drivers used `atoi( arg + 2 )`, which silently maps `-Ofast`, `-Os` and
+** `-Oz` to 0 -- so a user asking for a size-optimised build got the faithful
+** boxed baseline and no warning -- and maps `-O9` to "every level enabled" and
+** `-O-1` to a negative level. A wrong -O silently changes the generated code,
+** which is exactly the class of thing that must not be guessed at.
+**
+** Adding a level (`-Os`/`-Oz`, roadmap row 5) means extending BOTH this table
+** and the help text in clua_main.c. */
+static inline bool lc_parse_opt_level( const char *arg, int *out ) {
+  if ( arg == NULL || arg[0] != '-' || arg[1] != 'O' ) return false;
+  if ( arg[2] == '\0' ) { *out = 1; return true; }   /* bare -O == -O1 */
+  if ( arg[3] != '\0' ) return false;                /* -O2x, -Ofast   */
+  if ( arg[2] < '0' || arg[2] > '3' ) return false;  /* -O4, -Os, -Oz  */
+  *out = arg[2] - '0';
+  return true;
+}
 
 typedef struct LcDriverOptions {
   const char  *input;        /* root .lua file                              */

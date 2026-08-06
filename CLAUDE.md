@@ -1,12 +1,31 @@
 # CLua (LuaC) — working notes
 
+> **Shared agent workspace:** reviews live in [`docs/audits/`](docs/audits/),
+> live status in [`docs/roadmaps/`](docs/roadmaps/), measured numbers in
+> [`docs/benchmarks/`](docs/benchmarks/), and session handoffs in
+> [`docs/handoff/`](docs/handoff/). Read and update those, not a copy under
+> `.claude/` or `.codex/` and not a note outside the repository — every agent
+> reads the same files. The map and conventions are in
+> [`tools/agent-coordination/README.md`](tools/agent-coordination/README.md);
+> resolve any real path with
+> `python tools/agent-coordination/repo-paths.py --json`, which derives the
+> repository root and Git common directory itself, so no worktree name or
+> absolute path has to be remembered.
+>
+> **Joint sessions:** use a separate `claude/<task>` worktree
+> (`tools/agent-coordination/new-worktree.ps1 claude <task>`) and the optional
+> `clua-coordination` MCP mailbox. Read `AGENTS.md`. The mailbox is not needed
+> for ordinary solo sessions.
+>
 > **This is CLua, the standalone AOT-compiled Lua 5.4 language.** There is no
 > JIT anywhere in the tree. Read [`README.md`](README.md) for status and
 > [`PROMPT.md`](PROMPT.md) for the build spec (mission, locked decisions, IR,
 > optimizer, codegen, PE emission, FFI rules, testing, milestones).
 >
 > **The product is `clua.exe`** (subcommands `build`/`run`/`check`/`version`,
-> `-O2` default (whole-program), output name derived from the input; relocatable — finds its
+> `-O2` default — but `-O2` emits the same bytes as `-O1` today, and `clua help`
+> now says so per level; `-Os`/`-Oz` are rejected, not silently treated as `-O0`),
+> output name derived from the input; relocatable — finds its
 > runtime libs next to the exe or via `CLUA_HOME`), plus **`rover.exe`**, the
 > package manager, itself a CLua-compiled closed-world program built from
 > `rover/src/rover.lua` (project files: `rover.toml`/`rover.lock`;
@@ -67,10 +86,23 @@ gotcha prints harmless `'x86' is not recognized` noise). The user-facing
 layout: `make -f build/Makefile.luac dist` → `dist\` (clua.exe + rover.exe +
 lib\ + README).
 
-**Gotcha:** changes to `clua/src/ir/ir.h` (or any backend header, e.g.
-`clua/src/codegen/codegen.h`) require wiping the backend objects first
-(`build/bin/obj/{ir,opt,codegen,link,driver}`) — the Makefile does not track
-header dependencies, and stale `lift.o` produces silent empty-output binaries.
+**Header dependencies are tracked** (since the `-MMD -MP` change): editing
+`clua/src/ir/ir.h` or any other header rebuilds exactly the objects that included
+it, so the old "wipe `build/bin/obj/{ir,opt,codegen,link,driver}` first" step is
+no longer needed. Both makefiles append `$(DEPFLAGS)` to their compile-flag
+variables and read the generated `.d` fragments back at the end of the file.
+If you ever want a partial wipe anyway, use `make -f build/Makefile clean-objs`
+(objects *and* fragments) — never `del *.o` alone, which leaves an object
+untracked again.
+
+**Tracking only covers objects compiled since the change**, because `-MMD` writes
+a fragment as a side effect of compiling: an object that was already up to date
+gained none, and stays untracked until something recompiles it. After a fresh
+clone, or after pulling a change that introduces tracking, run `clean-objs` plus a
+full build once. `tools/test-build-header-deps.lua` asserts the whole tree is
+covered (617/617 today) and tells you that remedy when it is not — the earlier
+version of that test only checked the makefiles were configured, which is how 342
+untracked objects went unnoticed.
 
 **Gotcha:** `clua/src/runtime/aot_entry.c` is precompiled to `build/bin/aot_entry.o`
 by Makefile.luac (target `aot-entry`); the linker prefers that object and only

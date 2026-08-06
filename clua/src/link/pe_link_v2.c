@@ -70,6 +70,111 @@ static void set_errv( char *err, size_t errlen, const char *fmt, ... ) {
 
 #define LC_PATH_MAX 1024
 
+/* Link into a unique file beside the requested output, then replace the
+** destination only after the linker has closed a complete PE. Keeping the
+** staging file in the destination directory makes MoveFileEx an atomic,
+** same-volume publication step and preserves an older good binary when a
+** build is interrupted or the linker fails after opening its output. */
+static int MakeStagedOutput( const char *out_path, char staged[ MAX_PATH ],
+                             char *err, size_t errlen ) {
+    char  full[ LC_PATH_MAX ];
+    char *slash;
+    DWORD n;
+
+    n = GetFullPathNameA( out_path, ( DWORD )sizeof( full ), full, NULL );
+    if ( n == 0 || n >= sizeof( full ) ) {
+        set_errv( err, errlen,
+                  "cannot resolve output directory for '%s' (Win32 error %lu)",
+                  out_path, ( unsigned long )GetLastError( ) );
+        return 0;
+    }
+
+    slash = strrchr( full, '\\' );
+    if ( slash == NULL ) slash = strrchr( full, '/' );
+    if ( slash == NULL ) {
+        set_errv( err, errlen, "output path has no directory: %s", out_path );
+        return 0;
+    }
+    /* Preserve C:\ rather than turning the volume root into drive-relative C:. */
+    if ( slash == full + 2 && full[1] == ':' ) slash[1] = '\0';
+    else                                        *slash = '\0';
+
+    /* GetTempFileName appends "\\cluXXXX.tmp"; reserve that suffix and NUL,
+    ** not merely the caller-provided directory itself. */
+    if ( strlen( full ) >= MAX_PATH - 14 ) {
+        set_errv( err, errlen,
+                  "output directory is too long for the current Windows path "
+                  "backend: %s", full );
+        return 0;
+    }
+    if ( GetTempFileNameA( full, "clu", 0, staged ) == 0 ) {
+        set_errv( err, errlen,
+                  "cannot create staging file beside '%s' (Win32 error %lu)",
+                  out_path, ( unsigned long )GetLastError( ) );
+        return 0;
+    }
+    return 1;
+}
+
+static int PublishStagedOutput( const char *staged, const char *out_path,
+                                char *err, size_t errlen ) {
+    static const DWORD waits_ms[] = { 25, 75, 200, 500, 1000 };
+    HANDLE h;
+    DWORD  code = ERROR_SUCCESS;
+    int    attempt;
+
+    /* fclose() gets bytes out of the C runtime, but an explicit filesystem
+    ** flush is needed before the atomic rename is considered durable. */
+    h = CreateFileA( staged, GENERIC_WRITE,
+                     FILE_SHARE_READ | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+                     FILE_ATTRIBUTE_NORMAL, NULL );
+    if ( h == INVALID_HANDLE_VALUE ) {
+        code = GetLastError( );
+        set_errv( err, errlen,
+                  "cannot flush completed output '%s' (Win32 error %lu); "
+                  "the previous output was preserved",
+                  out_path, ( unsigned long )code );
+        DeleteFileA( staged );
+        return 0;
+    }
+    if ( !FlushFileBuffers( h ) ) code = GetLastError( );
+    CloseHandle( h );
+    if ( code != ERROR_SUCCESS ) {
+        set_errv( err, errlen,
+                  "cannot flush completed output '%s' (Win32 error %lu); "
+                  "the previous output was preserved",
+                  out_path, ( unsigned long )code );
+        DeleteFileA( staged );
+        return 0;
+    }
+
+    /* Antivirus, indexers, and sync clients can hold very short-lived file
+    ** handles. Retry only the errors that can plausibly be transient, with a
+    ** small fixed budget so a real permission problem still fails promptly. */
+    for ( attempt = 0; attempt <= ( int )( sizeof( waits_ms ) /
+                                           sizeof( waits_ms[0] ) ); attempt++ ) {
+        if ( MoveFileExA( staged, out_path,
+                          MOVEFILE_REPLACE_EXISTING |
+                          MOVEFILE_WRITE_THROUGH ) ) {
+            return 1;
+        }
+        code = GetLastError( );
+        if ( attempt == ( int )( sizeof( waits_ms ) / sizeof( waits_ms[0] ) )
+             || ( code != ERROR_SHARING_VIOLATION
+                  && code != ERROR_LOCK_VIOLATION
+                  && code != ERROR_ACCESS_DENIED ) ) {
+            break;
+        }
+        Sleep( waits_ms[ attempt ] );
+    }
+    set_errv( err, errlen,
+              "cannot publish completed output '%s' (Win32 error %lu); "
+              "the previous output was preserved",
+              out_path, ( unsigned long )code );
+    DeleteFileA( staged );
+    return 0;
+}
+
 typedef struct {
     char runtime_a[ LC_PATH_MAX ];    /* runtime-aot.a                        */
     char lualib_a[ LC_PATH_MAX ];     /* liblua54-embedded.a                  */
@@ -296,6 +401,7 @@ int LuacLink_LinkProgram( const char *userObj, const char *outExe,
                           int shared_rt, int ld_internal, int no_gc_sections,
                           char *err, size_t errlen ) {
     char        cmd[ 4096 ];
+    char        staged_out[ MAX_PATH ];
     char        entry_obj[ LC_PATH_MAX ];
     char        lvm_obj[ LC_PATH_MAX + 4 ];
     char        libundef[ 512 ];   /* -Wl,--undefined= for each used stdlib anchor */
@@ -382,9 +488,14 @@ int LuacLink_LinkProgram( const char *userObj, const char *outExe,
     ** Static link only (shared_rt stays on the gcc path; the DLL build needs
     ** the import-lib + auto-import pseudo-reloc machinery gcc provides). */
     if ( use_internal && !shared_rt ) {
-        return LinkInternal( &tc, userObj, outExe, entry_obj,
-                             no_interp, require_ffi, used_libs, no_gc_sections,
-                             err, errlen );
+        if ( !MakeStagedOutput( outExe, staged_out, err, errlen ) ) return 0;
+        if ( !LinkInternal( &tc, userObj, staged_out, entry_obj,
+                            no_interp, require_ffi, used_libs, no_gc_sections,
+                            err, errlen ) ) {
+            DeleteFileA( staged_out );
+            return 0;
+        }
+        return PublishStagedOutput( staged_out, outExe, err, errlen );
     }
 
     /* ---- the shared-runtime link (--shared-rt) ----
@@ -409,21 +520,23 @@ int LuacLink_LinkProgram( const char *userObj, const char *outExe,
            stdlib anchors do NOT trigger MinGW auto-import, so force-undef the
            used ones to pull their import thunks (otherwise &Clua_OpenStrlib is
            null and the library is never opened). */
+        if ( !MakeStagedOutput( outExe, staged_out, err, errlen ) ) return 0;
         snprintf( cmd, sizeof( cmd ),
                   "%s -o \"%s\" \"%s\" \"%s\" \"%s\" %s%s\"%s\" "
                   "-Wl,--subsystem,console -s -lm -lkernel32 -ladvapi32",
-                  GccCommand( ), outExe, userObj, entry_obj, tc.protoinit_o,
+                  GccCommand( ), staged_out, userObj, entry_obj, tc.protoinit_o,
                   require_ffi ? "-Wl,--undefined=Clua_OpenFfi " : "",
                   libundef,
                   tc.rt_implib );
         rc = run_cmd( cmd );
         if ( rc != 0 ) {
+            DeleteFileA( staged_out );
             set_errv( err, errlen,
                       "shared-rt link failed (gcc rc=%d; is MinGW-w64 gcc on "
                       "PATH, or set CLUA_GCC): %s", rc, cmd );
             return 0;
         }
-        return 1;
+        return PublishStagedOutput( staged_out, outExe, err, errlen );
     }
 
     /* Interpreter selection: a program whose closed-world scan proves it
@@ -448,21 +561,45 @@ int LuacLink_LinkProgram( const char *userObj, const char *outExe,
     ** unreferenced functions (both archives are -ffunction-sections; lib
     ** registration tables live in .rdata and keep every reachable lib
     ** function alive). */
+    if ( !MakeStagedOutput( outExe, staged_out, err, errlen ) ) return 0;
+    /* The three --undefined flags for the stdio shim are load-bearing on THIS
+    ** path and are not needed on the internal one.
+    **
+    ** runtime-aot.a is scanned before liblua54.a, and ld extracts an archive
+    ** member only to satisfy a symbol that is already undefined. At the moment
+    ** runtime-aot.a is scanned nothing has referenced __mingw_sprintf yet -- the
+    ** reference lives in liblua54.a's lobject.o, which has not been pulled. So
+    ** mingw_stdio_shim.o is skipped, and by the time lobject.o does create the
+    ** reference the only archive left to satisfy it is libmingwex, which drags in
+    ** ~38 KB of gdtoa/pformat. Forcing the symbols undefined up front makes the
+    ** shim member extract on the first scan.
+    **
+    ** The internal linker needs none of this because resolve_fixpoint re-scans
+    ** archives until the undefined set stops changing. Measured before this fix:
+    ** internal 146,944 vs gcc 187,904 for the same program -- a 40,960-byte
+    ** discrepancy that tools/test-clua-cli.lua caught as a size-parity failure.
+    ** Reordering the archives instead would not work: runtime-aot.a's helpers call
+    ** into the Lua core, so neither single ordering satisfies both directions. */
     snprintf( cmd, sizeof( cmd ),
-              "%s -o \"%s\" \"%s\" \"%s\" %s%s%s\"%s\" \"%s\" "
+              "%s -o \"%s\" \"%s\" \"%s\" %s%s%s"
+              "-Wl,--undefined=__mingw_sprintf "
+              "-Wl,--undefined=__mingw_fprintf "
+              "-Wl,--undefined=__mingw_strtod "
+              "\"%s\" \"%s\" "
               "-Wl,--subsystem,console -Wl,--gc-sections -s "
               "-lm -lkernel32 -ladvapi32",
-              GccCommand( ), outExe, userObj, entry_obj, lvm_obj,
+              GccCommand( ), staged_out, userObj, entry_obj, lvm_obj,
               require_ffi ? "-Wl,--undefined=Clua_OpenFfi " : "",
               libundef,
               tc.runtime_a, tc.lualib_a );
     rc = run_cmd( cmd );
     if ( rc != 0 ) {
+        DeleteFileA( staged_out );
         set_errv( err, errlen,
                   "link failed (gcc rc=%d; is MinGW-w64 gcc on PATH, or set "
                   "CLUA_GCC): %s", rc, cmd );
         return 0;
     }
 
-    return 1;
+    return PublishStagedOutput( staged_out, outExe, err, errlen );
 }

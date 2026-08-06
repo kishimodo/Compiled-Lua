@@ -304,7 +304,11 @@ dynamic path. There is **no deopt** and **no guard-and-fallback** — if we can'
 prove it, we don't specialize it. This is what keeps 100% fidelity.
 
 **Pipeline order:** analyses → M0 → M1 (local) → M2 (interprocedural) → M3
-(memory) → lowering-prep. Run `lc_module_verify` between passes in debug builds.
+(memory) → lowering-prep. `lc_module_verify` runs between pass groups in **every**
+build, not just debug ones (`cfg.verify_each` is set unconditionally in
+`driver/main.c`), plus once before codegen so `-O0` — which skips `lc_optimize`
+entirely — is covered as well. A verification failure is a hard error, never a
+warning.
 
 ### Analyses
 - `lc_analyze_dominators`, `lc_analyze_liveness` (per function)

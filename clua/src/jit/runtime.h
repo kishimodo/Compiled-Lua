@@ -8,6 +8,7 @@
 #define CLUA_JIT_RUNTIME_H
 
 #include "lua.h"
+#include "lobject.h"   /* StkId — the frame-passing helpers take the base directly */
 
 /*!
  * @brief
@@ -168,6 +169,31 @@ int Rt_SetField( lua_State *L, int A, int B, int Ck );  /* R[A][K[B]] = R[C] or 
 int Rt_GetTable( lua_State *L, int A, int B, int C );   /* R[A] = R[B][R[C]]                         */
 int Rt_SetTable( lua_State *L, int A, int B, int Ck );  /* R[A][R[B]] = R[C] or K[C]                 */
 int Rt_SetTabUp( lua_State *L, int A, int B, int Ck );  /* UpValue[A][K[B]] = R[C] or K[C]           */
+
+/*!
+ * @brief
+ *  Frame-passing variants of the field helpers: same semantics, but handed the
+ *  frame base the caller already has in RDI instead of re-deriving it from L.
+ *
+ *  The four above spend five dependent loads rebuilding `Base` and the Proto
+ *  constant array before touching the table. These spend three, and their call
+ *  sites are 8 bytes shorter. Operands arrive packed in one word; the layout,
+ *  the register assignment, and the reason any of this exists are in
+ *  common/rt_frame_abi.h.
+ *
+ *  Codegen picks these whenever the operands fit the packed fields and falls
+ *  back to the originals when they do not, so both must stay behaviourally
+ *  identical. tests/differential/ is what holds that.
+ */
+int Rt_GetFieldF( lua_State *L, StkId Base, int Packed );
+int Rt_SetFieldF( lua_State *L, StkId Base, int Packed );
+int Rt_GetIF    ( lua_State *L, StkId Base, int Packed );
+int Rt_SetIF    ( lua_State *L, StkId Base, int Packed );
+int Rt_GetTableF( lua_State *L, StkId Base, int Packed );
+int Rt_SetTableF( lua_State *L, StkId Base, int Packed );
+int Rt_GetTabUpF( lua_State *L, StkId Base, int Packed );
+int Rt_SetTabUpF( lua_State *L, StkId Base, int Packed );
+int Rt_SelfF    ( lua_State *L, StkId Base, int Packed );
 
 /*!
  * @brief

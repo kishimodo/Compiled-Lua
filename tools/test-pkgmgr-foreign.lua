@@ -40,10 +40,34 @@ local function cleanup()
 end
 local function fail(m) print("[-] FAIL test-pkgmgr-foreign: " .. m); cleanup(); os.exit(1) end
 
--- the foreign fetch path shells out to tar.exe (ships with Windows 10+)
+-- The foreign fetch path extracts with tar.exe. rover PINS
+-- %SystemRoot%\System32\tar.exe (the bsdtar shipped with Windows 10 1803+)
+-- instead of trusting PATH, so this test builds its fixture tarballs with the
+-- SAME binary, and case C7 proves a hostile `tar` earlier on PATH cannot reach
+-- the install.
+--
+-- SKIP is permitted for EXACTLY ONE reason: this Windows has no System32 tar at
+-- all. Any other tar problem is a FAIL. Widening this predicate would retire
+-- every assertion below while the tally stayed green -- and the old form did
+-- exactly that in reverse: it probed `tar --version`, which a shadowing GNU tar
+-- answers happily, so the test proceeded and then failed inside rover with a
+-- misleading "failed to extract the tarball".
+local TAR
 do
-  local c = select(1, run("tar --version"))
-  if c ~= 0 then print("[~] SKIP test-pkgmgr-foreign (no tar.exe on PATH)"); os.exit(0) end
+  local root = os.getenv("SystemRoot") or os.getenv("windir") or "C:\\Windows"
+  TAR = root .. "\\System32\\tar.exe"
+  local f = io.open(TAR, "rb")
+  if not f then
+    print("[~] SKIP test-pkgmgr-foreign (no " .. TAR .. " on this host)")
+    os.exit(0)
+  end
+  f:close()
+  local c, out = run('"' .. TAR .. '" --version')
+  if c ~= 0 then
+    print("[-] FAIL test-pkgmgr-foreign: " .. TAR .. " exists but --version "
+          .. "returned " .. tostring(c) .. ": " .. (out or ""))
+    os.exit(1)
+  end
 end
 
 -- rover commands against the ISOLATED store; cleared ROVER_REGISTRY so the
@@ -70,8 +94,19 @@ for _, k in ipairs({ "name_ok", "version_ok", "parse_semver", "semver_cmp",
   if type(M[k]) ~= "function" then print("FAILCASE:export-" .. k); os.exit(7) end
 end
 for _, k in ipairs({ "is_github_source", "parse_github_source", "github_pkg_name",
-                     "default_registry" }) do
+                     "default_registry", "tar_exe" }) do
   if type(M[k]) ~= "function" then print("FAILCASE:newexport-" .. k); os.exit(7) end
+end
+-- The extraction tar is pinned, not resolved from PATH: it must be the absolute
+-- System32 path, never a bare "tar".
+do
+  local got, err = M.tar_exe()
+  local root = os.getenv("SystemRoot") or os.getenv("windir") or "C:\\Windows"
+  local want = root:gsub("/", "\\") .. "\\System32\\tar.exe"
+  if got ~= want then print("FAILCASE:tar-exe-pin-" .. tostring(got)); os.exit(7) end
+  -- A healthy environment must produce no error, or the caller would refuse to
+  -- extract anything.
+  if err ~= nil then print("FAILCASE:tar-exe-spurious-error"); os.exit(7) end
 end
 local function ok(cond, label) if not cond then print("FAILCASE:" .. label); os.exit(7) end end
 local P = M.parse_github_source
@@ -157,7 +192,7 @@ do
     .. 'local M = {}\nM.version = "1.2.3"\n'
     .. 'function M.greet() return "widget!" end\nreturn M\n')
   spit(src .. "\\helper.lua", "return 42\n")
-  if not sh('cd /d "' .. WORK .. '" && tar -czf widget.tgz Widget-main') then
+  if not sh('cd /d "' .. WORK .. '" && "' .. TAR .. '" -czf widget.tgz Widget-main') then
     fail("could not build widget.tgz with tar")
   end
 end
@@ -246,7 +281,7 @@ do
   spit(src .. "\\package.lua",
        'return { name = "entry", version = "2.0.0", description = "entry test", entry = "src/main.lua" }\n')
   spit(src .. "\\src\\main.lua", 'local M = {}\nfunction M.go() return "entry!" end\nreturn M\n')
-  if not sh('cd /d "' .. WORK .. '" && tar -czf entry.tgz Entry-main') then fail("tar entry.tgz") end
+  if not sh('cd /d "' .. WORK .. '" && "' .. TAR .. '" -czf entry.tgz Entry-main') then fail("tar entry.tgz") end
   local c, out = rover("install github.com/Acme/Entry",
                        'set "ROVER_FOREIGN_TARBALL=' .. WORK .. '\\entry.tgz" && ', ROOT)
   if c ~= 0 then fail("entry-form install exited " .. c .. ": " .. out:gsub("%s+", " ")) end
@@ -266,7 +301,7 @@ do
   local src = WORK .. "\\noinit-main"
   sh('mkdir "' .. src .. '" >nul 2>&1')
   spit(src .. "\\readme.txt", "not a package\n")
-  if not sh('cd /d "' .. WORK .. '" && tar -czf noinit.tgz noinit-main') then fail("tar noinit.tgz") end
+  if not sh('cd /d "' .. WORK .. '" && "' .. TAR .. '" -czf noinit.tgz noinit-main') then fail("tar noinit.tgz") end
   local c, out = rover("install github.com/Acme/noinit",
                        'set "ROVER_FOREIGN_TARBALL=' .. WORK .. '\\noinit.tgz" && ', ROOT)
   if c == 0 then fail("install of a repo without init.lua must fail") end
@@ -275,8 +310,57 @@ do
   end
 end
 
+-- C7: PATH IMMUNITY. Put a hostile `tar` ahead of everything on PATH and
+-- install. rover must succeed and must never invoke it.
+--
+-- This case is the one that gives the System32 pin any value. With the pin in
+-- place but no hijack case, the suite passes identically whether the pin is
+-- present or reverted -- on every machine with a clean PATH, which is most of
+-- them. The regression would then only ever be caught by the next person who
+-- happens to have Git for Windows earlier on PATH.
+do
+  local src = WORK .. "\\Hijack-main"
+  sh('mkdir "' .. src .. '" >nul 2>&1')
+  spit(src .. "\\init.lua", 'local M = {}\nM.version = "0.1.0"\nreturn M\n')
+  if not sh('cd /d "' .. WORK .. '" && "' .. TAR .. '" -czf hijack.tgz Hijack-main') then
+    fail("tar hijack.tgz")
+  end
+
+  local FAKEBIN = WORK .. "\\fakebin"
+  local MARK    = WORK .. "\\fake-tar-was-invoked"
+  sh('mkdir "' .. FAKEBIN .. '" >nul 2>&1')
+  os.remove(MARK)
+  -- cmd searches PATH directory by directory and runs the first `tar` with a
+  -- PATHEXT extension, so a .bat shadows System32's tar.exe when its directory
+  -- comes first. The stand-in leaves positive evidence and then fails, so
+  -- "rover succeeded" and "the fake never ran" are two independent assertions.
+  if not spit(FAKEBIN .. "\\tar.bat",
+              "@echo off\r\n> \"" .. MARK .. "\" echo invoked\r\nexit /b 1\r\n") then
+    fail("cannot write the stand-in tar.bat")
+  end
+
+  -- Quote the `set` so cmd does not choke on a PATH containing parentheses
+  -- (Program Files (x86)), and prepend rather than replace so the toolchain
+  -- and powershell stay reachable.
+  local hijack = 'set "PATH=' .. FAKEBIN .. ';%PATH%" && '
+              .. 'set "ROVER_FOREIGN_TARBALL=' .. WORK .. '\\hijack.tgz" && '
+  local c, out = rover("install github.com/Acme/Hijack", hijack, ROOT)
+  if c ~= 0 then
+    fail("a hostile tar earlier on PATH broke the install (exit " .. tostring(c)
+         .. "): " .. out:gsub("%s+", " "))
+  end
+  if not out:find("installed", 1, true) then
+    fail("install with a hijacked PATH did not report success: "
+         .. out:gsub("%s+", " "))
+  end
+  if slurp(MARK) then
+    fail("rover executed the tar found on PATH instead of the pinned "
+         .. "System32 binary (marker " .. MARK .. " exists)")
+  end
+end
+
 cleanup()
 print("[+] PASS test-pkgmgr-foreign (github URL parsing + name derivation; registry "
    .. "precedence incl. official-URL fallback; offline foreign install/list/verify/add "
-   .. "with FOREIGN warnings; entry-form; no-init failure)")
+   .. "with FOREIGN warnings; entry-form; no-init failure; PATH-hijack immunity)")
 os.exit(0)

@@ -30,8 +30,29 @@ typedef enum _X64_GPR {
  * @brief
  *  REX.W = 1 MOV r64, imm64.  10 bytes total.
  *      48+B B8+r  imm64
+ *
+ *  Prefer X64Emit_MovImm32ToReg when the value fits in an int32: it leaves the
+ *  identical 64-bit value in 2-7 bytes.
  */
 int X64Emit_MovImm64ToReg( LcCodeBuf *Buf, X64_GPR_T Dst, uint64_t Imm );
+
+/*!
+ * @brief
+ *  Materialise an int32 as the SAME 64-bit register value X64Emit_MovImm64ToReg
+ *  would produce for (uint64_t)(int64_t)Imm, in 2-7 bytes instead of 10:
+ *
+ *      Imm == 0    XOR r32, r32           31 /r            2 bytes (3 if hi)
+ *      Imm  > 0    MOV r32, imm32         B8+rd id         5 bytes (6 if hi)
+ *      Imm  < 0    MOV r64, imm32 (sx)    REX.W C7 /0 id   7 bytes
+ *
+ *  The negative tier keeps REX.W on purpose: `mov r32, imm32` zero-extends, so
+ *  for a negative value it would leave a DIFFERENT 64-bit register than the
+ *  imm64 form. Sign-extending makes every tier value-identical, so callers need
+ *  no argument about how many bits the consumer reads.
+ *
+ *  @warning The zero tier clobbers EFLAGS. Do not use where flags are live.
+ */
+int X64Emit_MovImm32ToReg( LcCodeBuf *Buf, X64_GPR_T Dst, int32_t Imm );
 
 /*!
  * @brief
@@ -40,6 +61,16 @@ int X64Emit_MovImm64ToReg( LcCodeBuf *Buf, X64_GPR_T Dst, uint64_t Imm );
  */
 int X64Emit_MovMemToReg( LcCodeBuf *Buf, X64_GPR_T Dst,
                          X64_GPR_T Base, int32_t Disp );
+
+/*!
+ * @brief
+ *  REX.W = 1 LEA r64, [Base + Disp]  (8D /r). Address arithmetic only — no
+ *  memory access and no flag effects. Uses the same disp8/disp32 ModR/M
+ *  selection as the MOV forms, so a displacement in [-128,127] costs 3 bytes
+ *  less than the disp32 encoding.
+ */
+int X64Emit_LeaRegMem( LcCodeBuf *Buf, X64_GPR_T Dst,
+                       X64_GPR_T Base, int32_t Disp );
 
 /*!
  * @brief

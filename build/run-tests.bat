@@ -28,7 +28,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-pushd %~dp0..
+pushd "%~dp0.."
 
 echo [*] building products (compiler, clua-interp, embedded)...
 rem `embedded` = lua-embedded + runtime-embedded + packages-embedded. The package
@@ -45,7 +45,7 @@ if errorlevel 1 (
 
 rem aotc.exe + aot_entry.o: the compiled-vs-interpreter layers (lua behavioral,
 rem differential, conformance, fuzz smoke) aotc-compile each test into a PE.
-make -f build/Makefile.luac aotc aot-entry
+make -f build/Makefile.luac aotc aot-entry clua rover sysroot
 if errorlevel 1 (
     echo [-] aotc build failed
     set RC=1
