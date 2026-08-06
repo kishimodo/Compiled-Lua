@@ -59,6 +59,11 @@ int LuaCompile_File( const char *SourcePath, int Strip, PLUA_COMPILE_RESULT_T Re
 
     Rc = luaL_loadfile( L, SourcePath );
     if ( Rc != LUA_OK ) {
+        /* Lua encodes lex/parse errors as "<chunk>:<line>: <message>". We hand
+           the raw string back untouched so the caller (Diag_PrintCompileError
+           in resolve.c) can parse the line, slurp the source, and route the
+           whole thing through LcDiag_PrintError for a rustc/clang-style
+           snippet with a caret. Rewriting here would lose the original text. */
         Result->ErrMsg = DupErr( lua_tostring( L, -1 ) );
         lua_close( L );
         return 0;

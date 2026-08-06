@@ -10,7 +10,8 @@
 typedef struct _DIAG_OPTS {
     int Warnings;          /* run the lint pass at all (default 1; -w turns off) */
     int WarningsAsErrors;  /* --Werror: a lint finding fails the build           */
-    int Color;             /* emit ANSI color when the terminal supports it      */
+    int Color;             /* legacy; the current printer routes color through
+                              LcDiag_SetColorMode / LcDiag_ShouldColor.          */
 } DIAG_OPTS_T, *PDIAG_OPTS_T;
 
 /* Print a gcc/clang-style diagnostic for a Lua loader/compile error. RawLuaErr

@@ -7,6 +7,7 @@
 #include "compiler/resolve.h"
 #include "compiler/paths.h"
 #include "compiler/diag.h"
+#include "compiler/diag_pretty.h"
 #include "_lint_src.h"   /* g_LintSource: lint engine embedded at build time */
 
 #include <stdio.h>
@@ -89,6 +90,10 @@ typedef struct _CLI {
        Syntax errors always print gcc/clang-style regardless of these. */
     int               NoWarn;           /* -w / --no-warn: skip the advisory lint pass */
     int               WarningsAsErrors; /* --Werror: turn lint findings into build failures */
+    /* --color=<auto|always|never>: override the auto-detected color mode. auto
+       (the default) enables color only when stderr is a TTY that understands
+       ANSI, unless NO_COLOR is set or CLICOLOR_FORCE forces it. */
+    LC_DIAG_COLOR_MODE_T ColorMode;
 } CLI_T, *PCLI_T;
 
 
@@ -211,6 +216,18 @@ static int ParseArgv( int Argc, char **Argv, PCLI_T Cli ) {
         } else if ( strcmp( Argv[ I ], "--Werror" ) == 0 ||
                     strcmp( Argv[ I ], "--warnings-as-errors" ) == 0 ) {
             Cli->WarningsAsErrors = 1;
+        } else if ( strncmp( Argv[ I ], "--color=", 8 ) == 0 ) {
+            if ( !LcDiag_ParseColorMode( Argv[ I ] + 8, &Cli->ColorMode ) ) {
+                fprintf( stderr, "[-] unknown --color '%s' (expected: auto|always|never)\n",
+                         Argv[ I ] + 8 );
+                return 0;
+            }
+        } else if ( strcmp( Argv[ I ], "--color" ) == 0 && I + 1 < Argc ) {
+            if ( !LcDiag_ParseColorMode( Argv[ ++I ], &Cli->ColorMode ) ) {
+                fprintf( stderr, "[-] unknown --color '%s' (expected: auto|always|never)\n",
+                         Argv[ I ] );
+                return 0;
+            }
         } else if ( strcmp( Argv[ I ], "--encrypt" ) == 0 ) {
             Cli->Encrypt = 1;
         } else if ( strcmp( Argv[ I ], "--randomize" ) == 0 ) {
@@ -304,7 +321,7 @@ int main( int Argc, char **Argv ) {
                 "[-I include_dir]... [--runtime path] [--lualib path] "
                 "[--imgui path | --no-imgui] "
                 "[--subsystem console|windows] [--type|-t exe|dll|obj|lib|blob]\n"
-                "      diag:     [-w|--no-warn] [--Werror]\n"
+                "      diag:     [-w|--no-warn] [--Werror] [--color=auto|always|never]\n"
                 "      payload:  [--strip] [--encrypt] [--randomize] "
                 "[--rich-header-strip]\n"
                 "      link:     [--gc-sections] [--high-entropy-va] "
@@ -330,13 +347,16 @@ int main( int Argc, char **Argv ) {
     Opts.ForceLink      = ( Cli.ForceLinkCount > 0 ) ? Cli.ForceLink : NULL;
     Opts.ForceLinkCount = ( size_t )Cli.ForceLinkCount;
 
-    /* Diagnostics: rich gcc-style compile errors always; the advisory lint
-       pass (warnings/info) is on unless -w/--no-warn. Color when stderr is a
-       terminal and NO_COLOR is unset (https://no-color.org). */
+    /* Diagnostics: rich clang/rustc-style compile errors always; the advisory
+       lint pass (warnings/info) is on unless -w/--no-warn. Color goes through
+       LcDiag_SetColorMode -- the printer probes GetConsoleMode +
+       ENABLE_VIRTUAL_TERMINAL_PROCESSING itself, and honors NO_COLOR /
+       CLICOLOR_FORCE under --color=auto. */
+    LcDiag_SetColorMode( Cli.ColorMode );
     DIAG_OPTS_T Diag = { 0 };
     Diag.Warnings         = Cli.NoWarn ? 0 : 1;
     Diag.WarningsAsErrors = Cli.WarningsAsErrors;
-    Diag.Color            = _isatty( _fileno( stderr ) ) && ( getenv( "NO_COLOR" ) == NULL );
+    Diag.Color            = 0;    /* unused by the printer since diag_pretty landed */
     Opts.Diag             = &Diag;
 
     if ( !Resolve_Walk( Cli.SourcePath, &Opts, &Resolved ) ) {

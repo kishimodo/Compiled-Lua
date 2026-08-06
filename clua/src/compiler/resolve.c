@@ -1,5 +1,7 @@
 #include "compiler/resolve.h"
 #include "compiler/lua_compile.h"
+#include "compiler/diag.h"
+#include "compiler/diag_pretty.h"
 
 #include "lua.h"
 #include "lauxlib.h"
@@ -477,7 +479,10 @@ static int RequiresOfSource( const char        *Path,
     if ( L == NULL ) { return 0; }
     Rc = luaL_loadfile( L, Path );
     if ( Rc != LUA_OK ) {
-        fprintf( stderr, "[-] resolve: load %s :: %s\n", Path, lua_tostring( L, -1 ) );
+        /* Route the located error through the rustc/clang-style printer so the
+           scan-phase failures render the same way as the up-front compile
+           failure (file:line:col + snippet + caret). */
+        Diag_PrintCompileError( Path, lua_tostring( L, -1 ), 0, NULL );
         lua_close( L );
         return 0;
     }
@@ -678,7 +683,12 @@ int Resolve_Walk( const char *EntryPath, PRESOLVE_OPTS_T Opts, PRESOLVE_RESULT_T
 
         char Path[ 512 ] = { 0 };
         if ( !Paths_ModuleNameToFilePath( Name, Opts->PathsOpts, Path, sizeof( Path ) ) ) {
-            fprintf( stderr, "[-] resolve: cannot map module '%s' to path\n", Name );
+            char Buf[ 256 ];
+            snprintf( Buf, sizeof( Buf ),
+                      "cannot map module '%s' to a source path (searched include dirs, base path, package store)",
+                      Name );
+            LcDiag_PrintError( stderr, EntryPath ? EntryPath : "<source>",
+                               0, 0, "error", Buf, NULL );
             free( Name );
             StrList_Free( &Queue );
             StrList_Free( &Visited );

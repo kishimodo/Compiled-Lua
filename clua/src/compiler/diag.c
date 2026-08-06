@@ -1,4 +1,5 @@
 #include "compiler/diag.h"
+#include "compiler/diag_pretty.h"
 
 #include "lua.h"
 #include "lauxlib.h"
@@ -7,14 +8,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-/* ----- ANSI color (only when enabled; callers gate on isatty/NO_COLOR) ----- */
-static const char *C_RED( const DIAG_OPTS_T *O )   { return ( O && O->Color ) ? "\x1b[1;31m" : ""; }
-static const char *C_YEL( const DIAG_OPTS_T *O )   { return ( O && O->Color ) ? "\x1b[1;33m" : ""; }
-static const char *C_CYN( const DIAG_OPTS_T *O )   { return ( O && O->Color ) ? "\x1b[1;36m" : ""; }
-static const char *C_BOLD( const DIAG_OPTS_T *O )  { return ( O && O->Color ) ? "\x1b[1m"   : ""; }
-static const char *C_DIM( const DIAG_OPTS_T *O )   { return ( O && O->Color ) ? "\x1b[2m"   : ""; }
-static const char *C_RST( const DIAG_OPTS_T *O )   { return ( O && O->Color ) ? "\x1b[0m"   : ""; }
 
 char *Diag_SlurpFile( const char *Path, size_t *OutLen ) {
     FILE *F = fopen( Path, "rb" );
@@ -56,40 +49,28 @@ static int GetSourceLine( const char *Text, int Line, char *Out, size_t OutSize 
     }
 }
 
-/* Print one gcc/clang-style diagnostic line + the source snippet + caret.
- *   <file>:<line>:<col>: <sev>: <message>  [code]
- *      <line> | <source text>
- *             |      ^
- * Col/CaretLen <= 0 suppress the caret column (caret under first non-blank). */
+/* Route through the rustc/clang-style pretty printer. Col <= 0 means "unknown
+ * column" -- we point the caret at the first non-blank character of the source
+ * line so the reader still gets a location hint. When SourceText is NULL (file
+ * unreadable / missing) the snippet block is dropped entirely. */
 static void PrintDiag( const char *File, int Line, int Col,
-                       const char *SevColor, const char *Sev,
-                       const char *Message, const char *Code,
-                       const char *SourceText, const DIAG_OPTS_T *Opts ) {
+                       const char *Category,
+                       const char *Message,
+                       const char *SourceText ) {
     char LineBuf[ 1024 ];
-    int  Len = SourceText ? GetSourceLine( SourceText, Line, LineBuf, sizeof( LineBuf ) ) : -1;
-
-    fprintf( stderr, "%s%s:%d:%d:%s %s%s:%s %s",
-             C_BOLD( Opts ), File, Line, Col > 0 ? Col : 1, C_RST( Opts ),
-             SevColor, Sev, C_RST( Opts ), Message );
-    if ( Code && Code[ 0 ] ) { fprintf( stderr, " %s[%s]%s", C_DIM( Opts ), Code, C_RST( Opts ) ); }
-    fprintf( stderr, "\n" );
-
-    if ( Len >= 0 ) {
-        int Caret = Col;
-        if ( Caret < 1 ) {                       /* no column -> first non-blank */
-            int I = 0;
-            while ( I < Len && ( LineBuf[ I ] == ' ' || LineBuf[ I ] == '\t' ) ) { I++; }
-            Caret = I + 1;
-        }
-        if ( Caret > Len + 1 ) { Caret = Len + 1; }
-        fprintf( stderr, "  %s%5d |%s %s\n", C_DIM( Opts ), Line, C_RST( Opts ), LineBuf );
-        fprintf( stderr, "        %s|%s ", C_DIM( Opts ), C_RST( Opts ) );
-        {
-            int I;
-            for ( I = 1; I < Caret; I++ ) { fputc( LineBuf[ I - 1 ] == '\t' ? '\t' : ' ', stderr ); }
-            fprintf( stderr, "%s^%s\n", SevColor, C_RST( Opts ) );
-        }
+    int  Len = ( SourceText != NULL )
+             ? GetSourceLine( SourceText, Line, LineBuf, sizeof( LineBuf ) )
+             : -1;
+    int  Caret = Col;
+    if ( Len >= 0 && Caret < 1 ) {
+        int I = 0;
+        while ( I < Len && ( LineBuf[ I ] == ' ' || LineBuf[ I ] == '\t' ) ) { I++; }
+        Caret = I + 1;
     }
+    if ( Caret < 1 ) { Caret = 1; }
+    LcDiag_PrintError( stderr, File, Line, Caret,
+                       Category, Message,
+                       ( Len >= 0 ) ? LineBuf : NULL );
 }
 
 /* Parse a Lua loader error "<chunk>:<line>: <message>". Returns 1 with *OutLine
@@ -144,21 +125,24 @@ void Diag_PrintCompileError( const char *SourcePath, const char *RawLuaErr,
     const char *Msg = NULL;
     char *Src;
     size_t SrcLen = 0;
+    ( void )Opts;                             /* legacy plumb; color mode is now process-global */
 
     if ( !ParseLuaError( RawLuaErr, &Line, &Msg ) ) {
-        /* couldn't parse -- fall back to a plain located error */
-        fprintf( stderr, "%s%s:%s %s%serror:%s %s\n",
-                 C_BOLD( Opts ), SourcePath ? SourcePath : "<source>", C_RST( Opts ),
-                 C_RED( Opts ), "", C_RST( Opts ), RawLuaErr ? RawLuaErr : "(unknown error)" );
+        /* Couldn't parse -- fall back to the located header only (no snippet). */
+        LcDiag_PrintError( stderr,
+                           SourcePath ? SourcePath : "<source>",
+                           1, 1, "error",
+                           RawLuaErr ? RawLuaErr : "(unknown error)",
+                           NULL );
         return;
     }
-    Line -= PrefixLines;                  /* map @injected line back to user source */
+    Line -= PrefixLines;                      /* map @injected line back to user source */
     if ( Line < 1 ) { Line = 1; }
     Src = SourcePath ? Diag_SlurpFile( SourcePath, &SrcLen ) : NULL;
     {
         int Col = ColumnFromNear( Msg, Src, Line );
         PrintDiag( SourcePath ? SourcePath : "<source>", Line, Col,
-                   C_RED( Opts ), "error", Msg, NULL, Src, Opts );
+                   "error", Msg, Src );
     }
     free( Src );
 }
@@ -214,16 +198,22 @@ int Diag_RunLint( const char *SourcePath, const char *LintSource,
                 lua_getfield( L, -1, "message" ); if ( lua_isstring( L, -1 ) ) Message = lua_tostring( L, -1 ); lua_pop( L, 1 );
 
                 {
-                    /* display severity: --Werror promotes everything to error; else
-                       lint "error" findings are advisory -> shown as warnings so the
-                       label is truthful about whether the build fails. */
-                    int IsInfo     = ( strcmp( Sev, "info" ) == 0 );
-                    const char *DispSev;
-                    const char *DispColor;
-                    if ( Opts->WarningsAsErrors ) { DispSev = "error"; DispColor = C_RED( Opts ); }
-                    else if ( IsInfo )            { DispSev = "info";    DispColor = C_CYN( Opts ); }
-                    else                          { DispSev = "warning"; DispColor = C_YEL( Opts ); }
-                    PrintDiag( SourcePath, Line, Col, DispColor, DispSev, Message, Code, Src, Opts );
+                    /* Display category: --Werror promotes everything to error;
+                       else lint "error" findings are advisory -> shown as
+                       warnings so the label is truthful about whether the
+                       build fails. Bracket the code (E001/W001) into the
+                       message so the rustc-style header carries it. */
+                    int        IsInfo   = ( strcmp( Sev, "info" ) == 0 );
+                    const char *Cat     = Opts->WarningsAsErrors ? "error"
+                                        : IsInfo                 ? "note"
+                                                                 : "warning";
+                    char        Buf[ 512 ];
+                    const char *ShownMsg = Message;
+                    if ( Code && Code[ 0 ] ) {
+                        int W = snprintf( Buf, sizeof( Buf ), "[%s] %s", Code, Message );
+                        if ( W > 0 ) { ShownMsg = Buf; }
+                    }
+                    PrintDiag( SourcePath, Line, Col, Cat, ShownMsg, Src );
                     Findings++;
                 }
             }

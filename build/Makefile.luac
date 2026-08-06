@@ -56,7 +56,8 @@ FRONTEND_OBJS := \
     $(BUILD_DIR)/obj/compiler/resolve.o    \
     $(BUILD_DIR)/obj/compiler/lua_compile.o \
     $(BUILD_DIR)/obj/compiler/paths.o      \
-    $(BUILD_DIR)/obj/compiler/diag.o
+    $(BUILD_DIR)/obj/compiler/diag.o       \
+    $(BUILD_DIR)/obj/compiler/diag_pretty.o
 
 # Standalone driver main (with main()).
 AOTC_MAIN_OBJ := $(BUILD_DIR)/obj-aotc/main.o
