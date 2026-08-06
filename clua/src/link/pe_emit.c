@@ -130,6 +130,13 @@ typedef struct {
                                   ** if only weak-referenced elsewhere       */
     int         synth;            /* SYN_*                                   */
     int         syn_sec;          /* OS_* for SYN_SEC_*                      */
+    /* Cache filled during resolve_addrs so apply_relocations does not have to
+    ** scan every output section for SECREL/SECTION relocations. out_sec is an
+    ** OS_* enumerator or OS_COUNT if the symbol has no output section (abs,
+    ** weak-undef-fallback, unresolved). out_secbase is the RVA of that
+    ** section (0 when out_sec == OS_COUNT). */
+    uint32_t    out_sec;
+    uint32_t    out_secbase;
 } GSym;
 
 /* a synthesized import (dll, exported function). `func` is the name written
@@ -1609,7 +1616,31 @@ static void assign_rvas( Linker *L, uint32_t headers_size ) {
     (void)L;
 }
 
-/* the RVA of a synthesized linker symbol */
+/* Cache the (out_sec, out_secbase) pair on `g` for a resolved target_rva.
+** Uses the same predicate the old per-relocation SECREL/SECTION scan used
+** -- rva != 0 and rva <= target_rva < rva + virt_size -- so a target that
+** the scan would not have matched (e.g. a SEC_END marker sitting at the
+** exclusive upper bound, or a symbol resolved to RVA 0) leaves the cache
+** at OS_COUNT and the reloc still falls back to secbase=0 / idx=0. This
+** guarantees byte-identity with the pre-cache code path. */
+static void cache_gsym_section( Linker *L, GSym *g, uint32_t target_rva ) {
+    int oi;
+    for ( oi = 0; oi < OS_COUNT; oi++ ) {
+        OutSec *t = &L->out[oi];
+        if ( t->rva && target_rva >= t->rva &&
+             target_rva < t->rva + t->virt_size ) {
+            g->out_sec = ( uint32_t )oi;
+            g->out_secbase = t->rva;
+            return;
+        }
+    }
+    /* No matching section: leave out_sec / out_secbase at their init values
+    ** (OS_COUNT / 0), which reproduces the old fallback. */
+}
+
+/* the RVA of a synthesized linker symbol. Section-cache fields on g are
+** filled by resolve_addrs via cache_gsym_section, using the same predicate
+** the old SECREL/SECTION scan used. */
 static int synth_rva( Linker *L, const GSym *g, uint32_t *out ) {
     switch ( g->synth ) {
     case SYN_IMAGEBASE: *out = 0; return 1;
@@ -1653,6 +1684,16 @@ static int sym_rva( Linker *L, GSym *g, uint32_t *out, ImportLayout *il ) {
 /* resolve every symbol's final rva (cached in g->rva) */
 static int resolve_addrs( Linker *L, ImportLayout *il ) {
     int i;
+    /* Default the output-section cache to OS_COUNT for every symbol; the
+    ** cache_gsym_section pass below overwrites it for symbols that actually
+    ** land in a live output section. Anything left at OS_COUNT is either
+    ** genuinely undefined, an absolute, or a SEC_END-style edge case; SECREL
+    ** then falls back to secbase=0 and SECTION to idx=0, matching the
+    ** pre-cache per-relocation scan. */
+    for ( i = 0; i < L->nsyms; i++ ) {
+        L->syms[i].out_sec = OS_COUNT;
+        L->syms[i].out_secbase = 0;
+    }
     for ( i = 0; i < L->nsyms; i++ ) {
         GSym *g = &L->syms[i];
         uint32_t r;
@@ -1678,6 +1719,14 @@ static int resolve_addrs( Linker *L, ImportLayout *il ) {
             if ( d && d->defined ) g->rva = d->rva;
         }
     }
+    /* Cache each defined / weak-resolved symbol's output section using the
+    ** same predicate the old apply_relocations scan used, so SECREL /
+    ** SECTION relocations write byte-identical bytes. */
+    for ( i = 0; i < L->nsyms; i++ ) {
+        GSym *g = &L->syms[i];
+        if ( g->defined || ( g->weak && g->rva != 0 ) )
+            cache_gsym_section( L, g, g->rva );
+    }
     return 1;
 }
 
@@ -1686,10 +1735,20 @@ static int resolve_addrs( Linker *L, ImportLayout *il ) {
 ** IMAGE_SYM_ABSOLUTE symbol) vs an image-relative address. Returns 0 if
 ** genuinely unresolved. For local section symbols (STATIC class), the value is
 ** the section's placed RVA + the symbol Value. An absolute target must NOT get
-** image_base added and must NOT generate a base relocation. */
+** image_base added and must NOT generate a base relocation.
+**
+** out_sec / out_secbase are the output-section index (OS_* or OS_COUNT for
+** none) and that section's RVA. Both are read from the cache filled during
+** resolve_addrs on the global-name path, or derived from the Contrib for the
+** local-section path. The SECREL / SECTION cases in apply_relocations read
+** them instead of rescanning L->out[]. Callers that don't need them may pass
+** NULL. */
 static int reloc_target_rva( Linker *L, LcCoffObj *o, const LcCoffSymbol *sy,
-                             ImportLayout *il, uint32_t *out_rva, int *is_abs ) {
+                             ImportLayout *il, uint32_t *out_rva, int *is_abs,
+                             uint32_t *out_sec, uint32_t *out_secbase ) {
     if ( is_abs ) *is_abs = 0;
+    if ( out_sec ) *out_sec = OS_COUNT;
+    if ( out_secbase ) *out_secbase = 0;
     /* defined in THIS object's section? (covers local .text/.rdata refs and
     ** STATIC section symbols) */
     if ( sy->section >= 1 && ( uint32_t )sy->section <= o->nsections ) {
@@ -1697,7 +1756,17 @@ static int reloc_target_rva( Linker *L, LcCoffObj *o, const LcCoffSymbol *sy,
                              ( uint32_t )( sy->section - 1 ) );
         if ( ci >= 0 && !L->contribs[ci].dropped ) {
             Contrib *c = &L->contribs[ci];
-            *out_rva = L->out[ c->out ].rva + c->out_off + sy->value;
+            OutSec *t = &L->out[ c->out ];
+            *out_rva = t->rva + c->out_off + sy->value;
+            /* Same containment predicate as the old per-relocation scan, so
+            ** a local symbol sitting at its section's exclusive upper bound
+            ** stays uncached (SECREL falls back to secbase=0, matching the
+            ** pre-cache byte output). */
+            if ( t->rva && *out_rva >= t->rva &&
+                 *out_rva < t->rva + t->virt_size ) {
+                if ( out_sec ) *out_sec = ( uint32_t )c->out;
+                if ( out_secbase ) *out_secbase = t->rva;
+            }
             return 1;
         }
         /* a dropped COMDAT section: fall through to the global by name */
@@ -1707,6 +1776,8 @@ static int reloc_target_rva( Linker *L, LcCoffObj *o, const LcCoffSymbol *sy,
         GSym *g = gsym_find( L, sy->name );
         if ( g && ( g->defined || g->weak ) ) {
             *out_rva = g->rva;
+            if ( out_sec ) *out_sec = g->out_sec;
+            if ( out_secbase ) *out_secbase = g->out_secbase;
             /* a weak symbol that never got a real definition resolves to an
             ** absolute 0 (NULL) — ld semantics. So does an explicit absolute. */
             if ( is_abs && ( g->is_abs || ( g->weak && !g->defined ) ) ) *is_abs = 1;
@@ -1720,7 +1791,21 @@ static int reloc_target_rva( Linker *L, LcCoffObj *o, const LcCoffSymbol *sy,
 /* Apply all relocations of every contributed section into the OS raw buffers.
 ** Records base-relocation sites for ADDR64. */
 static int apply_relocations( Linker *L, ImportLayout *il ) {
-    int ci;
+    int ci, k;
+    /* Precompute OS_* -> 1-based section index for the SECTION relocation
+    ** case. Walks kSecOrder once, counting sections that will appear in the
+    ** image (same present||virt_size predicate the SECTION case used to run
+    ** per relocation). OS_* buckets that never emit stay at 0. */
+    uint16_t os_to_section_idx[ OS_COUNT ];
+    uint16_t n_present = 0;
+    memset( os_to_section_idx, 0, sizeof os_to_section_idx );
+    for ( k = 0; k < N_SECORDER; k++ ) {
+        int oi = kSecOrder[k];
+        OutSec *t = &L->out[oi];
+        if ( !( t->present || t->virt_size ) ) continue;
+        n_present++;
+        os_to_section_idx[oi] = n_present;
+    }
     for ( ci = 0; ci < L->ncontribs; ci++ ) {
         Contrib *c = &L->contribs[ci];
         LcCoffObj *o = c->obj;
@@ -1735,6 +1820,8 @@ static int apply_relocations( Linker *L, ImportLayout *il ) {
             uint64_t patch_off64;   /* offset within os->raw, before narrowing */
             uint32_t patch_off;
             uint32_t target_rva;
+            uint32_t target_sec = OS_COUNT;
+            uint32_t target_secbase = 0;
             int      tgt_abs = 0;   /* target is an absolute value (weak NULL) */
             size_t   patch_width;
             uint8_t *p;
@@ -1760,7 +1847,8 @@ static int apply_relocations( Linker *L, ImportLayout *il ) {
             patch_off = ( uint32_t )patch_off64;
             p = os->raw.p + patch_off;
 
-            if ( !reloc_target_rva( L, o, sy, il, &target_rva, &tgt_abs ) ) {
+            if ( !reloc_target_rva( L, o, sy, il, &target_rva, &tgt_abs,
+                                    &target_sec, &target_secbase ) ) {
                 snprintf( L->err, sizeof L->err,
                           "unresolved symbol '%s' (reloc type %u in %s)",
                           sy->name, rl->type, o->origin );
@@ -1831,30 +1919,23 @@ static int apply_relocations( Linker *L, ImportLayout *il ) {
                 break;
             }
             case LC_IMAGE_REL_AMD64_SECREL: {
-                /* offset of target within its output section */
-                uint32_t secbase = 0;
-                /* find the output section the target lands in */
-                int oi;
-                for ( oi = 0; oi < OS_COUNT; oi++ ) {
-                    OutSec *t = &L->out[oi];
-                    if ( t->rva && target_rva >= t->rva &&
-                         target_rva < t->rva + t->virt_size ) { secbase = t->rva; break; }
-                }
-                w32( p, target_rva - secbase );
+                /* Offset of target within its output section. target_secbase
+                ** was cached by resolve_addrs (global-name path) or filled
+                ** from the Contrib (local-section path); it is 0 for targets
+                ** that have no output section (absolute, weak-NULL, dropped
+                ** COMDAT fallback), matching the pre-cache behaviour of the
+                ** scan that would find no match. */
+                w32( p, target_rva - target_secbase );
                 break;
             }
             case LC_IMAGE_REL_AMD64_SECTION: {
-                /* 1-based index of the output section containing the target */
-                uint16_t idx = 0, n = 0;
-                int oi, k;
-                for ( k = 0; k < N_SECORDER; k++ ) {
-                    OutSec *t = &L->out[ kSecOrder[k] ];
-                    if ( !( t->present || t->virt_size ) ) continue;
-                    n++;
-                    oi = kSecOrder[k];
-                    if ( t->rva && target_rva >= t->rva && target_rva < t->rva + t->virt_size ) { idx = n; }
-                    (void)oi;
-                }
+                /* 1-based index of the output section containing the target.
+                ** target_sec is the OS_* bucket the target landed in, or
+                ** OS_COUNT for no section; os_to_section_idx[] was precomputed
+                ** above from kSecOrder + the same present||virt_size predicate
+                ** the old per-relocation scan used. */
+                uint16_t idx = ( target_sec < OS_COUNT )
+                             ? os_to_section_idx[ target_sec ] : 0;
                 w16( p, idx );
                 break;
             }
