@@ -210,6 +210,83 @@ phase (2) from the runtime section above.
   run between two hellos.
 - write the design note for phase (4) native compile. do not implement.
 
+## every compiler output type
+
+the user asked for full dll support and every output type any compiler
+would have. today clua produces one thing: an exe. this is the plan for
+the rest, ordered by real usefulness for the shape of programs people
+actually write in lua.
+
+- dll. shared library output. the compiler already knows how to emit a pe
+  and to link against dlls; the missing pieces are the export directory,
+  a `dllmain` shim, and the driver plumbing. plan:
+  - `clua build foo.lua --output=dll -o foo.dll` (also accept `-shared`).
+  - a source-level export marker so the user can choose which functions
+    become c-visible entrypoints. two forms, both sound in closed-world
+    lua: (a) a special table `_exports = { name1 = fn1, name2 = fn2 }`
+    written at module scope; the compiler notices it and emits an export
+    for each entry, and (b) a doc comment `-- @export name` above a
+    function statement. (a) is the primary path; (b) is convenience.
+  - a `dllmain` shim in `runtime/aot_entry_dll.c` that calls
+    `Rt_ModuleInit` on `dll_process_attach` and `Rt_ModuleFini` on
+    detach. the shim carries no lua-visible side effects.
+  - the pe emitter grows an export-table branch: `image_directory_entry_export`
+    filled with the sorted name table + ordinal table + rva table. the
+    file characteristics get `image_file_dll`; the subsystem stays
+    windows console (or gets a `--subsystem` flag if a windows-gui build
+    ever wants it).
+  - exports get c-visible names (e.g. `luac_export_foo`), plus a
+    `.def`-style alias table on disk so a c consumer can just
+    `#include "foo.h"` and link against the import lib.
+  - an accompanying `.lib` (import library) generated with dlltool from
+    the `.def`, so consumers can `link foo.lib` in msvc or `-lfoo` in
+    gcc. this is the same shape microsoft ships every dll under.
+- static archive. `--output=lib`, `-o foo.lib` (or `.a` under gcc
+  conventions). less useful for lua than for c: a lua static archive
+  cannot be self-contained the way a c one can (still needs a runtime),
+  and combining two lua static archives collides on shared symbols. mark
+  this "designed, not built" for the arc; it can wait for a real user
+  request.
+- coff object. `--output=obj`, `-o foo.obj`. aotc already writes a coff
+  object internally on the way to the exe; expose it directly. useful
+  for people linking clua-generated code into a larger c or c++ program
+  via the platform linker. tests: emit foo.obj, link it against a small
+  c driver, run the result and diff against the interpreter.
+- assembly dump. `--emit=asm`, or `--dump=asm`, output goes to the `-o`
+  path or stdout when `-o -`. text form of the emitted x64, with a
+  header per lua function and comments showing the source line. reuses
+  the same encoders in reverse: given a byte pattern, print its mnemonic
+  and operands. this is a debug aid, not a build target; do not try to
+  round-trip.
+- ir dump. `--emit=ir`, prints the `lcmodule` after every pass in a
+  human-readable form. for compiler development only; the format is
+  loose and not stable.
+- bytecode dump. `--emit=bytecode`. the raw lua 5.4 bytecode from the
+  front-end, before lifting. useful for confirming what the parser saw.
+  cheap to add since the lua vm already has `luac -l` semantics we can
+  copy.
+
+driver flag design:
+- `--output=<kind>` where `<kind>` is one of `exe`, `dll`, `lib`, `obj`.
+  default `exe`. the file suffix on `-o` is a hint but not authoritative;
+  `--output=dll -o mylib` still produces a real dll named `mylib`.
+- `--emit=<what>` where `<what>` is `bin` (default), `asm`, `ir`,
+  `bytecode`. distinct from `--output` because emit is diagnostic; you
+  can `--emit=asm --output=exe` to write the exe and print asm to
+  stderr.
+- `--subsystem=<name>` for `console` (default) or `windows`. only makes
+  sense for exe output; ignored otherwise.
+
+what this does not do:
+- no cross-compilation. windows x64 only, same as today.
+- no linux `.so` output. same as today.
+- no mach-o output. same as today.
+- no com dll registration hooks. that is a per-user concern; users who
+  want it can call the appropriate self-registration api from their
+  export.
+- no .pdb output. debugging happens through the differential oracle
+  today; `.pdb` would be a whole subsystem on its own.
+
 ## humanise every markdown file
 
 the user constraint: lowercase, human punctuation, only things
