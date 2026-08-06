@@ -115,6 +115,7 @@ static const char *C_ResetSeq   ( int C ) { return C ? "\x1b[0m"    : ""; }
 static const char *C_BoldRedSeq ( int C ) { return C ? "\x1b[1;31m" : ""; }
 static const char *C_BoldYelSeq ( int C ) { return C ? "\x1b[1;33m" : ""; }
 static const char *C_BoldCynSeq ( int C ) { return C ? "\x1b[1;36m" : ""; }
+static const char *C_BoldGrnSeq ( int C ) { return C ? "\x1b[1;32m" : ""; }
 static const char *C_BoldBluSeq ( int C ) { return C ? "\x1b[1;34m" : ""; }
 static const char *C_BoldWhtSeq ( int C ) { return C ? "\x1b[1;37m" : ""; }
 
@@ -212,5 +213,335 @@ void LcDiag_PrintError( FILE       *Out,
         }
         fprintf( Out, "%s^%s\n", CaretColor, Reset );
     }
+    fflush( Out );
+}
+
+/* ==== multi-span report ==================================================
+ *
+ * LcDiag_Report groups spans by file, reads each file once (cached), and
+ * prints a rustc/zig-style block per group with 2 lines of context above and
+ * below the primary line. Notes are grouped, help/hint appear at the end.
+ *
+ * The caller owns all pointers; we do not free anything they gave us.
+ * Internal caches are freed before return.
+ * ======================================================================= */
+
+/* Severity -> textual label used in the header. */
+static const char *SeverityLabel( LcSeverity S ) {
+    switch ( S ) {
+        case LCSEV_ERROR:   return "error";
+        case LCSEV_WARNING: return "warning";
+        case LCSEV_NOTE:    return "note";
+        case LCSEV_HELP:    return "help";
+        case LCSEV_HINT:    return "hint";
+    }
+    return "error";
+}
+
+/* Severity -> bold ANSI color per the spec (red / yellow / cyan / green / blue). */
+static const char *SeverityColor( LcSeverity S, int C ) {
+    switch ( S ) {
+        case LCSEV_ERROR:   return C_BoldRedSeq( C );
+        case LCSEV_WARNING: return C_BoldYelSeq( C );
+        case LCSEV_NOTE:    return C_BoldCynSeq( C );
+        case LCSEV_HELP:    return C_BoldGrnSeq( C );
+        case LCSEV_HINT:    return C_BoldBluSeq( C );
+    }
+    return C_BoldRedSeq( C );
+}
+
+/* File slurp cache. A single Report typically references 1-3 files; a
+ * linear array is smaller and cache-friendlier than a hash. Path pointers
+ * come from the caller and outlive the Report call, so we key by pointer
+ * equality first, then by string content -- that catches the common case
+ * (same span array reuses the same const string) without a strcmp per
+ * lookup. */
+typedef struct {
+    const char *path;
+    char       *text;   /* malloc'd, owned by the cache. NULL if unreadable. */
+    int         nlines; /* newline count + 1 */
+} FileCacheEntry;
+
+typedef struct {
+    FileCacheEntry *ents;
+    int             n;
+    int             cap;
+} FileCache;
+
+static char *SlurpFile( const char *Path ) {
+    FILE  *F;
+    long   N;
+    char  *Buf;
+    size_t Got;
+    if ( Path == NULL ) { return NULL; }
+    F = fopen( Path, "rb" );
+    if ( F == NULL ) { return NULL; }
+    if ( fseek( F, 0, SEEK_END ) != 0 ) { fclose( F ); return NULL; }
+    N = ftell( F );
+    if ( N < 0 )                       { fclose( F ); return NULL; }
+    if ( fseek( F, 0, SEEK_SET ) != 0 ) { fclose( F ); return NULL; }
+    Buf = ( char * )malloc( ( size_t )N + 1 );
+    if ( Buf == NULL )                 { fclose( F ); return NULL; }
+    Got = fread( Buf, 1, ( size_t )N, F );
+    fclose( F );
+    if ( Got != ( size_t )N )          { free( Buf ); return NULL; }
+    Buf[ N ] = '\0';
+    return Buf;
+}
+
+/* Count 1-based lines. A trailing `\n` does NOT start a new line -- so
+ * "a\nb\n" has 2 lines, not 3. That matches what a user sees in the editor
+ * and prevents the snippet from printing a phantom empty line below the
+ * last real line. */
+static int CountLines( const char *Text ) {
+    int         Count = 0;
+    const char *P     = Text;
+    if ( Text == NULL || *Text == '\0' ) { return 0; }
+    Count = 1;
+    for ( ; *P != '\0'; P++ ) {
+        if ( *P == '\n' && P[ 1 ] != '\0' ) { Count++; }
+    }
+    return Count;
+}
+
+/* Look up or slurp Path. Returns the cache entry (never NULL; text may be
+ * NULL if the file is unreadable). */
+static FileCacheEntry *FileCache_Get( FileCache *FC, const char *Path ) {
+    int I;
+    for ( I = 0; I < FC->n; I++ ) {
+        if ( FC->ents[ I ].path == Path ) { return &FC->ents[ I ]; }
+    }
+    for ( I = 0; I < FC->n; I++ ) {
+        if ( Path && FC->ents[ I ].path &&
+             strcmp( FC->ents[ I ].path, Path ) == 0 ) {
+            return &FC->ents[ I ];
+        }
+    }
+    if ( FC->n == FC->cap ) {
+        int NewCap = FC->cap ? FC->cap * 2 : 4;
+        FileCacheEntry *P = ( FileCacheEntry * )realloc(
+            FC->ents, ( size_t )NewCap * sizeof( *P ) );
+        if ( P == NULL ) { return NULL; }
+        FC->ents = P;
+        FC->cap  = NewCap;
+    }
+    FC->ents[ FC->n ].path   = Path;
+    FC->ents[ FC->n ].text   = SlurpFile( Path );
+    FC->ents[ FC->n ].nlines = CountLines( FC->ents[ FC->n ].text );
+    return &FC->ents[ FC->n++ ];
+}
+
+static void FileCache_Free( FileCache *FC ) {
+    int I;
+    for ( I = 0; I < FC->n; I++ ) { free( FC->ents[ I ].text ); }
+    free( FC->ents );
+    FC->ents = NULL;
+    FC->n = FC->cap = 0;
+}
+
+/* Copy 1-based line `Line` of Text into Out (without its newline). Returns the
+ * line length, or -1 if the line doesn't exist. Matches diag.c/GetSourceLine
+ * behavior (\r converted to space so it doesn't mangle the caret column). */
+static int LineOf( const char *Text, int Line, char *Out, size_t OutSize ) {
+    int         Cur = 1;
+    const char *P   = Text;
+    size_t      I   = 0;
+    if ( Text == NULL || Line < 1 || OutSize == 0 ) { return -1; }
+    while ( Cur < Line && *P != '\0' ) {
+        if ( *P == '\n' ) { Cur++; }
+        P++;
+    }
+    if ( Cur != Line ) { return -1; }
+    while ( P[ I ] != '\0' && P[ I ] != '\n' && I + 1 < OutSize ) {
+        Out[ I ] = ( P[ I ] == '\r' ) ? ' ' : P[ I ];
+        I++;
+    }
+    Out[ I ] = '\0';
+    return ( int )I;
+}
+
+/* Walk every span (top + notes) and return the widest line-number's digit
+ * count, so the whole report shares one gutter. Rustc does the same -- it
+ * keeps the "|" pipe column stable across snippet blocks. */
+static int MaxGutter( const LcDiagSpan *Spans, int NS,
+                      const LcDiagNote *Notes, int NN ) {
+    int MaxLine = 1;
+    int I, J;
+    for ( I = 0; I < NS; I++ ) {
+        int L = Spans[ I ].line;
+        if ( L + 2 > MaxLine ) { MaxLine = L + 2; }
+    }
+    for ( J = 0; J < NN; J++ ) {
+        for ( I = 0; I < Notes[ J ].nspans; I++ ) {
+            int L = Notes[ J ].spans[ I ].line;
+            if ( L + 2 > MaxLine ) { MaxLine = L + 2; }
+        }
+    }
+    return DigitsOf( MaxLine );
+}
+
+/* Print the caret row for one span: pad columns 1..(col_start-1) preserving
+ * tabs, then N carets for the highlighted range, then the label (if any).
+ * Primary spans use '^' in Sev's color, secondaries use '-' in blue. */
+static void PrintCaretRow( FILE *Out, int Gutter, const char *ArrowColor,
+                           const char *Reset, const char *SpanColor,
+                           const LcDiagSpan *S, const char *LineText ) {
+    int  Start = S->col_start > 0 ? S->col_start : 1;
+    int  End   = S->col_end   > 0 ? S->col_end   : Start;
+    int  LineLen = LineText ? ( int )strlen( LineText ) : 0;
+    char Glyph = S->is_primary ? '^' : '-';
+    int  I;
+
+    if ( Start > LineLen + 1 ) { Start = LineLen + 1; }
+    if ( End   < Start        ) { End   = Start;      }
+    if ( End   > LineLen + 1  ) { End   = LineLen + 1;}
+
+    fprintf( Out, "%*s %s|%s ", Gutter, "", ArrowColor, Reset );
+    for ( I = 1; I < Start; I++ ) {
+        char Ch = ( LineText && I - 1 < LineLen ) ? LineText[ I - 1 ] : ' ';
+        fputc( Ch == '\t' ? '\t' : ' ', Out );
+    }
+    fputs( SpanColor, Out );
+    for ( I = Start; I <= End; I++ ) { fputc( Glyph, Out ); }
+    fputs( Reset, Out );
+    if ( S->label != NULL && S->label[ 0 ] != '\0' ) {
+        fprintf( Out, "  %s%s%s", SpanColor, S->label, Reset );
+    }
+    fputc( '\n', Out );
+}
+
+/* Print one snippet block for a single span: 2 context lines above, the
+ * primary line, the caret row, 2 context lines below. Uses the file cache
+ * so multiple spans in the same file don't re-slurp. */
+static void PrintSnippetBlock( FILE *Out, int Gutter,
+                               const char *ArrowColor, const char *Reset,
+                               const char *SpanColor, const LcDiagSpan *S,
+                               FileCache *FC ) {
+    FileCacheEntry *E = FileCache_Get( FC, S->file );
+    char LineBuf[ 1024 ];
+    int  StartLine = S->line - 2;
+    int  EndLine   = S->line + 2;
+    int  L;
+
+    if ( E == NULL || E->text == NULL || S->line < 1 ) {
+        /* No source available -- still emit the empty pipe rows so the
+         * caret column is visually anchored, but with no snippet. */
+        fprintf( Out, "%*s %s|%s\n", Gutter, "", ArrowColor, Reset );
+        return;
+    }
+    if ( StartLine < 1        ) { StartLine = 1; }
+    if ( EndLine   > E->nlines ) { EndLine   = E->nlines; }
+
+    fprintf( Out, "%*s %s|%s\n", Gutter, "", ArrowColor, Reset );
+    for ( L = StartLine; L <= EndLine; L++ ) {
+        int Len = LineOf( E->text, L, LineBuf, sizeof( LineBuf ) );
+        if ( Len < 0 ) { continue; }
+        fprintf( Out, "%s%*d%s %s|%s %s\n",
+                 ArrowColor, Gutter, L, Reset,
+                 ArrowColor, Reset, LineBuf );
+        if ( L == S->line ) {
+            PrintCaretRow( Out, Gutter, ArrowColor, Reset, SpanColor,
+                           S, LineBuf );
+        }
+    }
+    fprintf( Out, "%*s %s|%s\n", Gutter, "", ArrowColor, Reset );
+}
+
+/* Print the arrow (`-->`) row. When col info is missing we degrade like the
+ * legacy printer: `file:line`, or bare `file`. */
+static void PrintArrow( FILE *Out, int Gutter, const char *ArrowColor,
+                        const char *Reset, const LcDiagSpan *S ) {
+    const char *File = ( S->file && S->file[ 0 ] ) ? S->file : "<source>";
+    if ( S->line > 0 && S->col_start > 0 ) {
+        fprintf( Out, "%*s%s-->%s %s:%d:%d\n",
+                 Gutter, "", ArrowColor, Reset, File, S->line, S->col_start );
+    } else if ( S->line > 0 ) {
+        fprintf( Out, "%*s%s-->%s %s:%d\n",
+                 Gutter, "", ArrowColor, Reset, File, S->line );
+    } else {
+        fprintf( Out, "%*s%s-->%s %s\n",
+                 Gutter, "", ArrowColor, Reset, File );
+    }
+}
+
+/* Print the header line: `<sev>[<code>]: <msg>` with the sev + optional
+ * bracketed code painted in the severity color, message uncolored. */
+static void PrintHeader( FILE *Out, int Color, LcSeverity Sev,
+                         const char *Code, const char *Msg ) {
+    const char *SevColor = SeverityColor( Sev, Color );
+    const char *Reset    = C_ResetSeq   ( Color );
+    const char *Label    = SeverityLabel( Sev );
+    const char *ShownMsg = Msg ? Msg : "(no message)";
+    if ( Code && Code[ 0 ] ) {
+        fprintf( Out, "%s%s[%s]%s: %s\n", SevColor, Label, Code, Reset, ShownMsg );
+    } else {
+        fprintf( Out, "%s%s%s: %s\n", SevColor, Label, Reset, ShownMsg );
+    }
+}
+
+/* Emit one severity group (primary block, or a note). Handles the case where
+ * there is no span at all (a bare `help:` with just a message and no file). */
+static void PrintGroup( FILE *Out, int Color, int Gutter, LcSeverity Sev,
+                        const char *Code, const char *Msg,
+                        const LcDiagSpan *Spans, int NSpans,
+                        FileCache *FC ) {
+    const char *Reset      = C_ResetSeq   ( Color );
+    const char *ArrowColor = C_BoldBluSeq ( Color );
+    const char *SevColor   = SeverityColor( Sev, Color );
+    int         I;
+
+    PrintHeader( Out, Color, Sev, Code, Msg );
+    if ( NSpans <= 0 || Spans == NULL ) { return; }
+
+    /* Find the primary span for the arrow header; fall back to spans[0].
+     * Rustc points the arrow at the primary regardless of order in the
+     * span array. */
+    int Arrow = 0;
+    for ( I = 0; I < NSpans; I++ ) {
+        if ( Spans[ I ].is_primary ) { Arrow = I; break; }
+    }
+    PrintArrow( Out, Gutter, ArrowColor, Reset, &Spans[ Arrow ] );
+
+    /* One snippet block per span. In the common case (one primary + a few
+     * secondaries in different files) this is the right layout; when two
+     * spans point at adjacent lines in the same file the reader still sees
+     * the overlap because we always emit 2 lines of context on each side. */
+    for ( I = 0; I < NSpans; I++ ) {
+        const char *SpanColor = Spans[ I ].is_primary ? SevColor : ArrowColor;
+        PrintSnippetBlock( Out, Gutter, ArrowColor, Reset, SpanColor,
+                           &Spans[ I ], FC );
+    }
+}
+
+void LcDiag_Report( FILE             *Out,
+                    LcSeverity        Sev,
+                    const char       *Code,
+                    const char       *Msg,
+                    const LcDiagSpan *Spans,
+                    int               NSpans,
+                    const LcDiagNote *Notes,
+                    int               NNotes,
+                    const char       *Help ) {
+    if ( Out == NULL ) { return; }
+    int       Color  = LcDiag_ShouldColor( Out );
+    int       Gutter = MaxGutter( Spans, NSpans, Notes, NNotes );
+    FileCache FC     = { NULL, 0, 0 };
+    int       I;
+
+    PrintGroup( Out, Color, Gutter, Sev, Code, Msg, Spans, NSpans, &FC );
+
+    for ( I = 0; I < NNotes; I++ ) {
+        PrintGroup( Out, Color, Gutter, Notes[ I ].sev, NULL,
+                    Notes[ I ].msg, Notes[ I ].spans, Notes[ I ].nspans,
+                    &FC );
+    }
+
+    if ( Help != NULL && Help[ 0 ] != '\0' ) {
+        const char *Reset    = C_ResetSeq   ( Color );
+        const char *HelpCol  = SeverityColor( LCSEV_HELP, Color );
+        fprintf( Out, "%s%s%s: %s\n", HelpCol, "help", Reset, Help );
+    }
+
+    FileCache_Free( &FC );
     fflush( Out );
 }

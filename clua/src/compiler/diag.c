@@ -49,10 +49,33 @@ static int GetSourceLine( const char *Text, int Line, char *Out, size_t OutSize 
     }
 }
 
-/* Route through the rustc/clang-style pretty printer. Col <= 0 means "unknown
- * column" -- we point the caret at the first non-blank character of the source
- * line so the reader still gets a location hint. When SourceText is NULL (file
- * unreadable / missing) the snippet block is dropped entirely. */
+/* Map a legacy `Category` string (possibly bracketed like "warning[Wunused]")
+ * to (severity, code). The lint driver already bracketed the code into the
+ * message text ("[W001] unused local") for the historical single-span
+ * printer -- we don't undo that here, so callers get one location + the
+ * bracketed code in the message, matching the old byte layout of the
+ * fields the tests check. */
+static LcSeverity SeverityFromCategory( const char *Category ) {
+    if ( Category == NULL ) { return LCSEV_ERROR; }
+    if ( strncmp( Category, "warning", 7 ) == 0 &&
+         ( Category[ 7 ] == '\0' || Category[ 7 ] == '[' ) ) {
+        return LCSEV_WARNING;
+    }
+    if ( strncmp( Category, "note", 4 ) == 0 &&
+         ( Category[ 4 ] == '\0' || Category[ 4 ] == '[' ) ) {
+        return LCSEV_NOTE;
+    }
+    if ( strncmp( Category, "help", 4 ) == 0 ) { return LCSEV_HELP; }
+    if ( strncmp( Category, "hint", 4 ) == 0 ) { return LCSEV_HINT; }
+    return LCSEV_ERROR;
+}
+
+/* Route through the rustc/clang-style pretty printer with 2-lines-of-context.
+ * Col <= 0 means "unknown column" -- we point the caret at the first
+ * non-blank character of the source line so the reader still gets a location
+ * hint. When SourceText is NULL (file unreadable / missing) we fall back to
+ * the legacy single-line shim so unlocatable errors still get a header +
+ * arrow row. */
 static void PrintDiag( const char *File, int Line, int Col,
                        const char *Category,
                        const char *Message,
@@ -68,9 +91,32 @@ static void PrintDiag( const char *File, int Line, int Col,
         Caret = I + 1;
     }
     if ( Caret < 1 ) { Caret = 1; }
-    LcDiag_PrintError( stderr, File, Line, Caret,
-                       Category, Message,
-                       ( Len >= 0 ) ? LineBuf : NULL );
+
+    /* No source text or file -> keep the legacy shim (used by the "couldn't
+     * parse the error" fallback and by tests that pass NULL). Its stderr
+     * layout is asserted byte-for-byte elsewhere. */
+    if ( SourceText == NULL || Len < 0 || File == NULL ) {
+        LcDiag_PrintError( stderr, File, Line, Caret,
+                           Category, Message,
+                           ( Len >= 0 ) ? LineBuf : NULL );
+        return;
+    }
+
+    /* Have a source file -- upgrade to LcDiag_Report so the snippet carries
+     * 2 lines of context on each side. Span end == start (single-column
+     * caret) matches the legacy shim's single '^' glyph. */
+    {
+        LcSeverity Sev  = SeverityFromCategory( Category );
+        LcDiagSpan Span;
+        Span.file        = File;
+        Span.line        = Line;
+        Span.col_start   = Caret;
+        Span.col_end     = Caret;
+        Span.label       = NULL;
+        Span.is_primary  = 1;
+        LcDiag_Report( stderr, Sev, NULL, Message,
+                       &Span, 1, NULL, 0, NULL );
+    }
 }
 
 /* Parse a Lua loader error "<chunk>:<line>: <message>". Returns 1 with *OutLine
