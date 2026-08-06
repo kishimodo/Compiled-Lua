@@ -7,6 +7,8 @@ of truth -- `clua/src/common/version.h` -- and this file in step.
 
 ## [Unreleased]
 
+## [0.3.0-beta.1] - 2026-08-06
+
 ### Changed
 
 - **`local a,b=2,3 local c=a+b print(c)` shrinks 21.7%**, from 141,824 to 111,104
