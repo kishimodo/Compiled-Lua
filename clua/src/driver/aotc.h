@@ -48,6 +48,11 @@ typedef struct LcDriverOptions {
   bool         no_gc_sections; /* --no-gc-sections-internal: disable the
                                 built-in linker's dead-code elimination
                                 (debug escape; default off = gc enabled)    */
+  int          jobs;         /* -j <N>: parallel per-function codegen workers.
+                                0 = decide from env CLUA_JOBS then CPU count,
+                                1 = sequential (no threads), N>1 = pool of N.
+                                Byte-identity across values of jobs is a hard
+                                gate (tools/test-parallel-codegen.lua).       */
   const char **force_pkgs;   /* -L forced packages                          */
   int          nforce_pkgs;
 } LcDriverOptions;

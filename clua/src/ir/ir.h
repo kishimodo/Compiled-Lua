@@ -271,6 +271,9 @@ struct LcModule {
   int        opt_level;        /* -O level (driver sets it); codegen uses it */
                                /* to choose M1 typed fastpaths over boxed     */
                                /* helpers. 0 = faithful boxed baseline.       */
+  int        jobs;             /* explicit -j from the driver; 0 = codegen    */
+                               /* falls back to CLUA_JOBS then the CPU count. */
+                               /* Codegen honours 1 as "sequential path".     */
   LcArena   *arena;            /* owns every IR node; freed by lc_module_free */
 };
 

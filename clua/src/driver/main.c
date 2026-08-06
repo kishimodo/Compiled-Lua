@@ -248,6 +248,7 @@ int lc_drive( const LcDriverOptions *opt ) {
         goto cleanup;
     }
     m->opt_level = opt->opt_level;   /* codegen picks M1 fastpaths at -O1+ */
+    m->jobs      = opt->jobs;        /* -j N; 0 = env CLUA_JOBS or CPU count */
 
     /* Tag each REQUIRED module's main-chunk LcFunc with its require-name so the
     ** ProtoInit emitter registers it in package.preload at startup (the entry,
@@ -415,6 +416,14 @@ int main( int argc, char **argv ) {
             opt.ld_internal = 0;
         } else if ( strcmp( a, "--no-gc-sections-internal" ) == 0 ) {
             opt.no_gc_sections = true;
+        } else if ( strcmp( a, "-j" ) == 0 && i + 1 < argc ) {
+            /* -j N: parallel per-function codegen. -j 1 collapses to the
+               sequential path; -j 0 means "let the env / cpu count decide".
+               Negative or nonsense values become 1 (sequential) so a typo
+               fails safely rather than crashing the compiler. */
+            int n = atoi( argv[ ++i ] );
+            if ( n < 0 ) n = 1;
+            opt.jobs = n;
         } else if ( ( strcmp( a, "-L" ) == 0 || strcmp( a, "--link" ) == 0 )
                     && i + 1 < argc ) {
             if ( nforce < 63 ) {

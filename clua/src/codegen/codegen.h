@@ -96,6 +96,33 @@ typedef struct LcCgCtx {
 LcCodeModule *lc_codegen(LcModule *m);
 void          lc_codemodule_free(LcCodeModule *cm);
 
+/* Parallel per-function codegen (clua/src/codegen/parallel.c).
+**
+** jobs == 1 (or nfuncs <= 1) is the sequential path, byte-identical to what
+** lc_codegen does today. jobs > 1 spins up a small win32 thread pool and each
+** worker pulls one function at a time off an atomic counter. The IR is
+** read-only during codegen and every write target (cm->funcs[i]) is disjoint,
+** so no cross-thread synchronisation is needed inside the per-function loop
+** body -- the invariant that makes that sound is enforced by
+** tools/test-codegen-no-globals.lua (zero mutable file-scope state in
+** clua/src/codegen/).
+**
+** The per-function loop body itself lives in codegen.c as
+** LcCg_CompileFunctionBody so this file (a) does not have to include the
+** private lowering helpers and (b) so a future refactor that changes the body
+** does not have to touch parallel.c. */
+struct LcModule;
+int LcCg_CompileFunctionBody( struct LcModule *m, LcCodeModule *cm,
+                              const LcCgCtx *cg, uint32_t i );
+
+/* Run per-function codegen across `jobs` worker threads. Returns 1 on
+** success, 0 on any failure (any function failing aborts the whole run and
+** frees no threads-owned state -- the caller frees cm). A pool timeout is a
+** fatal 0 return; write it defensively so a wedged worker does not silently
+** produce a half-populated module. */
+int LcCg_RunParallel( struct LcModule *m, LcCodeModule *cm,
+                      const LcCgCtx *cg, int jobs );
+
 /* ------------------------------------------------------------------ */
 /* Frame scaffolding (ported from the removed v1 JIT codegen).               */
 /*                                                                     */

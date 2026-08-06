@@ -24,6 +24,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <windows.h>        /* SYSTEM_INFO / GetSystemInfo for -j default    */
 
 /* CI offsets — replicated from the removed v1 JIT codegen (OFFSET_OF_CI / _FUNC).
    .func is a StkIdRel union whose live pointer .p is at offset 0 of the union. */
@@ -2155,39 +2156,37 @@ static int res_emit_spills( const LcCgFnCtx *Fn, LcCodeBuf *B ) {
     return 1;
 }
 
-LcCodeModule *lc_codegen(LcModule *m) {
-  if (!m) return NULL;
-  /* Per-compilation configuration: set once here, then read-only for the whole
-     run, so a future worker can share it by const pointer. */
-  LcCgCtx cg;
-  cg.opt_level = m->opt_level;        /* -O1+ enables the M1 arith fastpaths */
-  LcCodeModule *cm = (LcCodeModule *)calloc(1, sizeof(LcCodeModule));
-  if (!cm) return NULL;
-  cm->nfuncs = m->nfuncs;
-  cm->rodata = NULL;        /* epsilon: no .rdata — constants come from the    */
-  cm->rodata_len = 0;       /* runtime Proto via ci (see lower_const).         */
-  if (cm->nfuncs == 0) return cm;
+/* Extracted from lc_codegen so it can also be driven by the parallel worker
+   pool in parallel.c. All state used here is either
+   - shared read-only across workers (m, cg -- IR is frozen at codegen entry,
+     LcCgCtx is const), or
+   - disjoint per worker (cm->funcs[i] with a unique i per pull, and every
+     other object stack-allocated inside this body). The invariant enforced by
+     tools/test-codegen-no-globals.lua (zero mutable file-scope state in
+     clua/src/codegen/) is what makes this safe to call from multiple threads;
+     do not introduce a `static` in here that a second thread could observe.
 
-  cm->funcs = (LcCompiledFunc *)calloc(cm->nfuncs, sizeof(LcCompiledFunc));
-  if (!cm->funcs) { free(cm); return NULL; }
-
-  for (uint32_t i = 0; i < m->nfuncs; i++) {
+   Returns 1 on success (populated cm->funcs[i]), 0 on any failure; on failure
+   nothing is written to cm->funcs[i] (leaving zeroed calloc contents so
+   lc_codemodule_free is safe). */
+int LcCg_CompileFunctionBody( LcModule *m, LcCodeModule *cm,
+                              const LcCgCtx *cg, uint32_t i ) {
     LcFunc *f = m->funcs[i];
     LcCompiledFunc *cf = &cm->funcs[i];
     LcCodeBuf buf;
     int ok = 1;
     int saw_return = 0;
 
-    if (!LcCodeBuf_Init(&buf, 256)) { lc_codemodule_free(cm); return NULL; }
+    if (!LcCodeBuf_Init(&buf, 256)) return 0;
 
     /* Per-function branch context (bc_pc -> code-offset map + deferred rel32
        patch queue). Sized by the source Proto's instruction count. */
     int sizecode = (f && f->source) ? f->source->sizecode : 0;
-    /* Per-function codegen state, owned by this loop iteration. Nothing here is
-       file-scope any more, which is what a future per-function worker needs. */
+    /* Per-function codegen state, owned by this call. Nothing here is
+       file-scope any more, which is what the per-function worker needs. */
     LcCgFnCtx fnctx;
     LcCgFnCtx *Fn = &fnctx;
-    lc_cg_fn_init(Fn, &cg, sizecode);
+    lc_cg_fn_init(Fn, cg, sizecode);
     LcBranchCtx Br;
     memset(&Br, 0, sizeof(Br));
     Br.fn  = Fn;
@@ -2198,7 +2197,7 @@ LcCodeModule *lc_codegen(LcModule *m) {
       Br.seen   = (uint8_t *)calloc((size_t)sizecode, sizeof(uint8_t));
       if (!Br.pc_off || !Br.seen) {
         free(Br.pc_off); free(Br.seen);
-        LcCodeBuf_Free(&buf); lc_codemodule_free(cm); return NULL;
+        LcCodeBuf_Free(&buf); return 0;
       }
     }
 
@@ -2213,7 +2212,7 @@ LcCodeModule *lc_codegen(LcModule *m) {
     if (!LcCg_EmitPrologue(&buf, &Fn->frame)) {
       lc_cg_fn_dispose(Fn);
       free(Br.pc_off); free(Br.seen); free(Br.fwd);
-      LcCodeBuf_Free(&buf); lc_codemodule_free(cm); return NULL;
+      LcCodeBuf_Free(&buf); return 0;
     }
 
     for (uint32_t bi = 0; ok && f && bi < f->nblocks; bi++) {
@@ -2276,7 +2275,7 @@ LcCodeModule *lc_codegen(LcModule *m) {
 
     free(Br.pc_off); free(Br.seen); free(Br.fwd);
 
-    if (!ok) { LcCodeBuf_Free(&buf); lc_codemodule_free(cm); return NULL; }
+    if (!ok) { LcCodeBuf_Free(&buf); return 0; }
 
     /* Take ownership of the buffer's bytes + relocs (do NOT LcCodeBuf_Free). */
     cf->code      = buf.bytes;
@@ -2290,6 +2289,78 @@ LcCodeModule *lc_codegen(LcModule *m) {
     /* Null out the moved-from buffer so a stray free can't double-free. */
     buf.bytes = NULL; buf.relocs = NULL;
     buf.used = buf.cap = 0; buf.nrelocs = buf.relocap = 0;
+    return 1;
+}
+
+/* Job-count discovery: -j on the command line wins, then CLUA_JOBS env, then
+   the CPU count. Clamped to nfuncs -- more workers than functions is dead
+   overhead, and 1 (or below) collapses to the sequential path. Kept in
+   codegen.c so lc_codegen honours the env var without pulling the priority
+   logic into parallel.c. */
+static int lc_codegen_pick_jobs( const LcModule *m, uint32_t nfuncs ) {
+    int jobs;
+    const char *env;
+    SYSTEM_INFO si;
+
+    /* Explicit -j from the driver wins; a zero (default calloc) means the
+       caller wants the env / cpu count logic. A driver that passes 1
+       explicitly gets the sequential path (which is the point of -j 1). */
+    if ( m != NULL && m->jobs > 0 ) {
+        jobs = m->jobs;
+    } else {
+        env = getenv( "CLUA_JOBS" );
+        if ( env != NULL && env[0] != '\0' ) {
+            jobs = atoi( env );
+            if ( jobs < 1 ) jobs = 1;
+        } else {
+            GetSystemInfo( &si );
+            jobs = ( int )si.dwNumberOfProcessors;
+            if ( jobs < 1 ) jobs = 1;
+        }
+    }
+    if ( ( uint32_t )jobs > nfuncs ) jobs = ( int )nfuncs;
+    if ( jobs < 1 ) jobs = 1;
+    return jobs;
+}
+
+LcCodeModule *lc_codegen(LcModule *m) {
+  if (!m) return NULL;
+  /* Per-compilation configuration: set once here, then read-only for the whole
+     run, so a future worker can share it by const pointer. */
+  LcCgCtx cg;
+  cg.opt_level = m->opt_level;        /* -O1+ enables the M1 arith fastpaths */
+  LcCodeModule *cm = (LcCodeModule *)calloc(1, sizeof(LcCodeModule));
+  if (!cm) return NULL;
+  cm->nfuncs = m->nfuncs;
+  cm->rodata = NULL;        /* epsilon: no .rdata — constants come from the    */
+  cm->rodata_len = 0;       /* runtime Proto via ci (see lower_const).         */
+  if (cm->nfuncs == 0) return cm;
+
+  cm->funcs = (LcCompiledFunc *)calloc(cm->nfuncs, sizeof(LcCompiledFunc));
+  if (!cm->funcs) { free(cm); return NULL; }
+
+  /* Parallel path: env-selected job count, silently no-op'd to sequential if
+     jobs == 1 or only one function. Byte-identity requires the SAME bytes for
+     the same input regardless of the value of jobs; that is why every op that
+     touches shared state was moved off file scope in the codegen arc. */
+  {
+    int jobs = lc_codegen_pick_jobs( m, cm->nfuncs );
+    if ( jobs > 1 ) {
+      if ( !LcCg_RunParallel( m, cm, &cg, jobs ) ) {
+        lc_codemodule_free( cm );
+        return NULL;
+      }
+      return cm;
+    }
+  }
+
+  /* Sequential path -- byte-identical to what this file did before parallel
+     codegen landed, and the fallback when jobs collapses to 1. */
+  for (uint32_t i = 0; i < m->nfuncs; i++) {
+    if (!LcCg_CompileFunctionBody(m, cm, &cg, i)) {
+      lc_codemodule_free(cm);
+      return NULL;
+    }
   }
 
   return cm;

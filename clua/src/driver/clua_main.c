@@ -75,15 +75,21 @@ static void usage( FILE *to ) {
         "  --no-gc-sections-internal\n"
         "                   disable the built-in linker's dead-code sweep\n"
         "                   (debug; larger exe).\n"
+        "  -j <N>           parallel per-function codegen workers. -j 1 is\n"
+        "                   the sequential path (no threads). Omit -j to let\n"
+        "                   CLUA_JOBS decide, falling back to the CPU count.\n"
         "\n"
         "environment:\n"
         "  CLUA_HOME        CLua installation root (lib\\runtime-aot.a ...)\n"
         "  CLUA_LD          force the linker: 'internal' (built-in, no gcc) or\n"
         "                   'gcc'. Unset = internal when lib\\sysroot ships,\n"
         "                   else gcc.\n"
+        "  CLUA_JOBS        parallel codegen job count; overridden by -j.\n"
+        "                   Default is the CPU count clamped to the module's\n"
+        "                   function count. Set to 1 for the sequential path.\n"
         "  CLUA_GCC         gcc driver for --ld=gcc / --shared-rt / cold trees\n"
         "                   (default: x86_64-w64-mingw32-gcc on PATH). gcc is\n"
-        "                   OPTIONAL — the default internal linker needs none.\n" );
+        "                   OPTIONAL -- the default internal linker needs none.\n" );
 }
 
 /* dir/app.lua -> "app.exe" (in the CWD), heap-allocated. */
@@ -145,6 +151,12 @@ static int parse_build_args( CluaArgs *a, int argc, char **argv, int from,
             a->opt.ld_internal = 0;
         } else if ( strcmp( s, "--no-gc-sections-internal" ) == 0 ) {
             a->opt.no_gc_sections = true;
+        } else if ( strcmp( s, "-j" ) == 0 && i + 1 < argc ) {
+            /* -j N: parallel per-function codegen. -j 1 is the sequential
+               path; -j 0 means "decide from CLUA_JOBS or the CPU count". */
+            int n = atoi( argv[ ++i ] );
+            if ( n < 0 ) n = 1;
+            a->opt.jobs = n;
         } else if ( ( strcmp( s, "-L" ) == 0 || strcmp( s, "--link" ) == 0 )
                     && i + 1 < argc ) {
             if ( nforce < 63 ) {
