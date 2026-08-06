@@ -1,592 +1,648 @@
-# CLua — Bugs found by the new test suite (2026-06-07) — ALL FIXED
+# CLua, bugs found by the new test suite (2026-06-07), all fixed
 
-Building the fresh test suite surfaced five pre-existing bugs (three in the JIT,
-two in packages). Each was root-caused and fixed the same day; each now has a
-permanent regression test. Suite is green with **0 XFAIL**. This file is kept as
-the record.
+Building the fresh test suite surfaced five pre-existing bugs (three in the
+JIT, two in packages). Each was root-caused and fixed the same day; each now
+has a permanent regression test. Suite is green with 0 XFAIL. This file is
+kept as the record.
 
 ## JIT correctness
 
-### JIT-001 — `<close>` variable in scope at `return` dropped the return value — FIXED
+### JIT-001, `<close>` variable in scope at `return` dropped the return value, fixed
 `function f() local g <close> = setmetatable({},{__close=fn}); return 42 end`
-returned **nil** under the JIT (the interpreter returned `42`).
-**Root cause:** `Rt_Close` called `luaF_close(L, base, LUA_OK, …)`. With
-`LUA_OK`, `prepcallclosemth` → `luaD_seterrorobj` resets `L->top` to
-`level + 2` — right on top of the live result registers — and the `__close` call
-frame overwrites the result.
-**Fix:** mirror `lvm.c` `OP_RETURN` — raise `L->top` to the frame ceiling **and**
+returned nil under the JIT (the interpreter returned `42`).
+Root cause: `Rt_Close` called `luaF_close(L, base, LUA_OK, ...)`. With
+`LUA_OK`, `prepcallclosemth` -> `luaD_seterrorobj` resets `L->top` to
+`level + 2`, right on top of the live result registers, and the `__close`
+call frame overwrites the result.
+Fix: mirror `lvm.c` `OP_RETURN`, raise `L->top` to the frame ceiling and
 pass `CLOSEKTOP`. `src/jit/runtime.c` `Rt_Close`. Regression:
 `tests/lua/test_jit_regressions.lua`.
 
-### JIT-002 — NaN `>`/`>=` comparison returned the wrong boolean — FIXED
-`nan > 0` returned **true** (must be false).
-**Root cause:** `Lower_Gti`/`Lower_Gei` implemented `a > b` as `!(a <= b)` —
+### JIT-002, NaN `>`/`>=` comparison returned the wrong boolean, fixed
+`nan > 0` returned true (must be false).
+Root cause: `Lower_Gti`/`Lower_Gei` implemented `a > b` as `!(a <= b)`,
 correct for normal numbers, wrong for NaN.
-**Fix:** new `Rt_GtISlow`/`Rt_GeISlow` using operand-swapped `sB < R[A]` (the
-NaN-correct form). `src/jit/runtime.c` + `src/jit/codegen.c`.
+Fix: new `Rt_GtISlow`/`Rt_GeISlow` using operand-swapped `sB < R[A]` (the
+NaN-correct form). `src/jit/runtime.c` plus `src/jit/codegen.c`.
 
-### JIT-003 — deep tail recursion crashed the process — FIXED
-A tail-recursive loop grew the native C stack and crashed (`STACK_OVERFLOW`) at
-~25k–300k depth; the interpreter ran it in constant stack.
-**Root cause:** `Rt_TailCall` reused the Lua `CallInfo` but re-entered the JIT
+### JIT-003, deep tail recursion crashed the process, fixed
+A tail-recursive loop grew the native C stack and crashed
+(`STACK_OVERFLOW`) at ~25k to 300k depth; the interpreter ran it in
+constant stack.
+Root cause: `Rt_TailCall` reused the Lua `CallInfo` but re-entered the JIT
 as a nested C call per tail call.
-**Fix:** an iterative drive loop — top-level tail call marks its `CallInfo` with
-`CIST_JITTAILDRIVE` and loops; nested tail calls detect the bit and signal
-`g_TailRepeat` instead of recursing. `src/jit/runtime.c` `Rt_TailCall`.
-Regression: `tests/lua/test_jit_regressions.lua` + `tests/differential/tailcall.lua`.
+Fix: an iterative drive loop, top-level tail call marks its `CallInfo`
+with `CIST_JITTAILDRIVE` and loops; nested tail calls detect the bit and
+signal `g_TailRepeat` instead of recursing. `src/jit/runtime.c`
+`Rt_TailCall`. Regression: `tests/lua/test_jit_regressions.lua` plus
+`tests/differential/tailcall.lua`.
 
-## Package bugs
+## package bugs
 
-### CBOR-001 — float64 encode/decode corrupted non-dyadic values — FIXED
-`cbor.decode(cbor.encode(3.14))` returned **6.96**. **Root cause:** the manual
+### CBOR-001, float64 encode/decode corrupted non-dyadic values, fixed
+`cbor.decode(cbor.encode(3.14))` returned 6.96. Root cause: the manual
 IEEE-754 decode assembled the 52-bit mantissa with the wrong byte grouping.
-**Fix:** `string.pack(">d", n)` / `string.unpack(">d", s, p)`.
-`src/runtime/packages/cbor/init.lua`. Regression: `tests/packages/test_cbor.lua`.
+Fix: `string.pack(">d", n)` / `string.unpack(">d", s, p)`.
+`src/runtime/packages/cbor/init.lua`. Regression:
+`tests/packages/test_cbor.lua`.
 
-### AES-002 — AES-128 key import failed (`STATUS_INVALID_PARAMETER`) — FIXED
+### AES-002, AES-128 key import failed (`STATUS_INVALID_PARAMETER`), fixed
 A 16-byte key caused `BCryptGenerateSymmetricKey` to fail.
-**Root cause:** `import_key` passed a hand-built `BCRYPT_KEY_DATA_BLOB` (12-byte
-header + key); the API expects raw key bytes. The 28-byte total matched no valid
-AES key length. (24- and 32-byte keys worked by accident.)
-**Fix:** pass the raw key buffer + length. `src/runtime/packages/aes/init.lua`.
-Regression: `tests/packages/test_aes.lua` (AES-128/192/256 × GCM/CBC/CTR).
+Root cause: `import_key` passed a hand-built `BCRYPT_KEY_DATA_BLOB`
+(12-byte header + key); the API expects raw key bytes. The 28-byte total
+matched no valid AES key length. (24- and 32-byte keys worked by accident.)
+Fix: pass the raw key buffer plus length.
+`src/runtime/packages/aes/init.lua`. Regression:
+`tests/packages/test_aes.lua` (AES-128/192/256 by GCM/CBC/CTR).
 
-## Round 2 — audit-driven (2026-06-07) — ALL FIXED
+## round 2, audit-driven (2026-06-07), all fixed
 
-A 9-dimension codebase audit + a new Lua 5.4 conformance corpus surfaced more.
-All fixed; suite 116/0/0.
+A 9-dimension codebase audit plus a new Lua 5.4 conformance corpus surfaced
+more. All fixed; suite 116/0/0.
 
-- **JIT-decline crash (CRITICAL).** `luaV_execute` called `luaG_runerror` when
+- JIT-decline crash (critical). `luaV_execute` called `luaG_runerror` when
   codegen couldn't compile a Proto, aborting every shipped exe with a large
   function. Now falls through to `luaVM_Interpret`. (`lua-5.4/src/lvm.c`)
-- **Oversized-Proto segfault (CRITICAL).** `CodegenInternal` ignored
-  `BranchCtx_RecordPc`'s return code, corrupting forward branches; a 5000-op
-  function deterministically segfaulted. Now rejects oversized Protos up front
-  and falls back to the interpreter. (`src/jit/codegen.c`)
-- **Close-upvalue register staleness (CRITICAL, silent wrong output).** `Lower_Close`
-  didn't reload the register cache after `Rt_Close`, so a value a `__close` handler
-  wrote to a captured upvalue was read stale on the next line. Found by the
-  conformance differential. Now reloads. (`src/jit/codegen.c`)
-- **debug.sethook ignored under the JIT (HIGH).** Hooks (call/line/count) now route
-  any function entered while a hook is active to the hook-aware interpreter.
-  (`lvm.c` + `src/jit/runtime.c`)
-- **FORPREP error text wrong/double-substituted.** Now emits exactly
+- Oversized-Proto segfault (critical). `CodegenInternal` ignored
+  `BranchCtx_RecordPc`'s return code, corrupting forward branches; a
+  5000-op function deterministically segfaulted. Now rejects oversized
+  Protos up front and falls back to the interpreter. (`src/jit/codegen.c`)
+- Close-upvalue register staleness (critical, silent wrong output).
+  `Lower_Close` didn't reload the register cache after `Rt_Close`, so a
+  value a `__close` handler wrote to a captured upvalue was read stale on
+  the next line. Found by the conformance differential. Now reloads.
+  (`src/jit/codegen.c`)
+- debug.sethook ignored under the JIT (high). Hooks (call/line/count) now
+  route any function entered while a hook is active to the hook-aware
+  interpreter. (`lvm.c` plus `src/jit/runtime.c`)
+- FORPREP error text wrong/double-substituted. Now emits exactly
   `bad 'for' <what> (number expected, got <type>)`. (`src/jit/runtime.c`)
-- **msgpack float64 decode corrupted every value** (same class as CBOR-001) →
+- msgpack float64 decode corrupted every value (same class as CBOR-001):
   `string.unpack(">d")`.
-- **punycode all-ASCII delimiter** (RFC 3492) and **yaml plain float scalars**
+- punycode all-ASCII delimiter (RFC 3492) and yaml plain float scalars
   (bad pattern) fixed.
-- **Package manager: missing input validation** on package names used in
-  `io.popen` calls (names from a remote registry); fixed with a strict allowlist
-  `^[%w_%.%-]+$`. Also fixed: **install did not honor the lockfile** (non-reproducible
-  installs). Added Merkle integrity, transitive dep resolution, and registry
-  signature verification.
-- **CI was red on every run** (looped `make` over deleted targets) — fixed.
+- Package manager: missing input validation on package names used in
+  `io.popen` calls (names from a remote registry); fixed with a strict
+  allowlist `^[%w_%.%-]+$`. Also fixed: install did not honor the lockfile
+  (non-reproducible installs). Added Merkle integrity, transitive dep
+  resolution, and registry signature verification.
+- CI was red on every run (looped `make` over deleted targets), fixed.
 
-Deferred (documented, not a correctness issue): growing the JIT branch arrays
-dynamically (over-limit functions already fall back to the interpreter correctly).
+Deferred (documented, not a correctness issue): growing the JIT branch
+arrays dynamically (over-limit functions already fall back to the
+interpreter correctly).
 
-## Round 3 — whole-stack hardening (2026-06-09) — ALL FIXED
+## round 3, whole-stack hardening (2026-06-09), all fixed
 
 A 15-dimension audit (each finding adversarially verified) of the JIT, FFI,
-compiler, packages, package manager, and CI surfaced a further batch. All fixed,
-each with a regression test; suite 151 PASS / 0 FAIL / 0 XFAIL.
+compiler, packages, package manager, and CI surfaced a further batch. All
+fixed, each with a regression test; suite 151 PASS / 0 FAIL / 0 XFAIL.
 
-JIT (the `Lower_Close` register-cache bug had siblings — silent miscompile +
-use-after-free under the default executor):
-- **SET paths** (OP_SETTABLE/SETFIELD/SETI/SETTABUP) ran a `__newindex`
-  metamethod (which can relocate the Lua stack) without reloading RDI + the
-  register cache. Now each reloads, mirroring the GET twins. (`src/jit/codegen.c`)
-- **Comparison slow paths** (OP_EQ/LT/LE register form and EQI/LTI/LEI/GTI/GEI/
-  EQK immediate form) ran `__eq/__lt/__le` without reloading; the reload also
-  has to precede the conditional branch (the prior EQK reload sat *after* it, so
-  the taken edge stayed stale). New `EmitCompareSlowReloadAndBranch` stashes the
-  result in R11D, reloads, then tests + branches. (`src/jit/codegen.c`)
-- `Rt_EqKSlow` now uses `luaV_rawequalobj` (matching OP_EQK). (`src/jit/runtime.c`)
-  Repros: `tests/differential/{settable,compare}_meta_stale.lua` (proven to fail
-  without the fix — one returned a stale `table:`, the other crashed).
+JIT (the `Lower_Close` register-cache bug had siblings, silent miscompile
+plus use-after-free under the default executor):
+- SET paths (OP_SETTABLE/SETFIELD/SETI/SETTABUP) ran a `__newindex`
+  metamethod (which can relocate the Lua stack) without reloading RDI plus
+  the register cache. Now each reloads, mirroring the GET twins.
+  (`src/jit/codegen.c`)
+- Comparison slow paths (OP_EQ/LT/LE register form and
+  EQI/LTI/LEI/GTI/GEI/EQK immediate form) ran `__eq/__lt/__le` without
+  reloading; the reload also has to precede the conditional branch (the
+  prior EQK reload sat after it, so the taken edge stayed stale). New
+  `EmitCompareSlowReloadAndBranch` stashes the result in R11D, reloads,
+  then tests plus branches. (`src/jit/codegen.c`)
+- `Rt_EqKSlow` now uses `luaV_rawequalobj` (matching OP_EQK).
+  (`src/jit/runtime.c`)
+  Repros: `tests/differential/{settable,compare}_meta_stale.lua` (proven
+  to fail without the fix, one returned a stale `table:`, the other
+  crashed).
 
 Packages:
-- **zlib** pure-Lua inflate corrupted every overlapping back-reference (RLE runs)
-  — the read index advanced twice per byte (`"aaaa"->"aa"`). Anchored the read.
-- **mime** `parse_multipart` interpolated the boundary into a Lua pattern (broke
-  real boundaries with `- . + =`); `parse_content_type` split on `;` inside a
-  quoted value. Both fixed (plain scan / quote-aware scan).
-- **Zip-Slip / path traversal** in the `zip`, `zip_native`, `tar`, `cab`
-  extractors — entries with `..`, absolute, or drive-prefixed names could write
-  outside the destination. Each now refuses such entries.
-- **matrix.eigenvalues** returned wrong values for every 3×3 (a spurious sign
-  flip on the depressed-cubic constant). **units.parse** stole a bare number's
-  trailing digit as a bogus unit. **currency.format** leaked IEEE-754 garbage
-  for 18-dp currencies. **slug** separator was a pattern-injection. **lpeg**
-  pure-Lua fallback lacked the `/` capture operator and a fixed-length `B()`.
-  **glob_match** `**` never matched + anchored rules over-matched. **x509**
-  parse_time decoded UTC as local time. **formula** had a nonsense infix `%`.
-  **ini** dropped null list members. **xml** pretty-print corrupted mixed
-  content. **phone** false-rejected NANP +1-670. **stats** one-sided t-test was
-  wrong. **random.unbiased_range** rejection was non-functional (signed MASK64).
-  **email_validate** accepted trailing-dot domains. **quoted_printable** emitted
-  a literal trailing space. **zstd** one-shot FFI returns truncated size_t.
-- **pbkdf2 Argon2id** crashed for parallelism >= 2 (cross-lane reference-area
-  over-sized into uncomputed blocks). Fixed; verified against the RFC 9106
-  official (p=4) and PHC (p=1, m=65536) vectors.
-- **bignum** divmod/div/mod (BIGNUM-001) gave a wrong q/r for a negative divisor
-  needing the multi-limb path (signed arithmetic where magnitude was assumed).
-  Normalised both operands to magnitude in `udivmod`.
+- zlib pure-Lua inflate corrupted every overlapping back-reference (RLE
+  runs), the read index advanced twice per byte (`"aaaa"->"aa"`). Anchored
+  the read.
+- mime `parse_multipart` interpolated the boundary into a Lua pattern
+  (broke real boundaries with `- . + =`); `parse_content_type` split on
+  `;` inside a quoted value. Both fixed (plain scan / quote-aware scan).
+- Zip-Slip / path traversal in the `zip`, `zip_native`, `tar`, `cab`
+  extractors, entries with `..`, absolute, or drive-prefixed names could
+  write outside the destination. Each now refuses such entries.
+- matrix.eigenvalues returned wrong values for every 3x3 (a spurious sign
+  flip on the depressed-cubic constant). units.parse stole a bare
+  number's trailing digit as a bogus unit. currency.format leaked
+  IEEE-754 garbage for 18-dp currencies. slug separator was a
+  pattern-injection. lpeg pure-Lua fallback lacked the `/` capture
+  operator and a fixed-length `B()`. glob_match `**` never matched plus
+  anchored rules over-matched. x509 parse_time decoded UTC as local time.
+  formula had a nonsense infix `%`. ini dropped null list members. xml
+  pretty-print corrupted mixed content. phone false-rejected NANP +1-670.
+  stats one-sided t-test was wrong. random.unbiased_range rejection was
+  non-functional (signed MASK64). email_validate accepted trailing-dot
+  domains. quoted_printable emitted a literal trailing space. zstd
+  one-shot FFI returns truncated size_t.
+- pbkdf2 Argon2id crashed for parallelism >= 2 (cross-lane reference-area
+  over-sized into uncomputed blocks). Fixed; verified against the RFC
+  9106 official (p=4) and PHC (p=1, m=65536) vectors.
+- bignum divmod/div/mod (BIGNUM-001) gave a wrong q/r for a negative
+  divisor needing the multi-limb path (signed arithmetic where magnitude
+  was assumed). Normalised both operands to magnitude in `udivmod`.
 
-Package manager: `~1` tilde range, compound `>=a <b` ranges, x-ranges, and
-hyphen ranges were unsupported/wrong; a registry value was interpolated into the
-shell without metacharacter validation; a corrupt lockfile was silently
-re-resolved; the lock integrity check compared mismatched hash kinds; conflict
-reconciliation skipped the reconciled version's transitive deps. All fixed.
+Package manager: `~1` tilde range, compound `>=a <b` ranges, x-ranges,
+and hyphen ranges were unsupported/wrong; a registry value was
+interpolated into the shell without metacharacter validation; a corrupt
+lockfile was silently re-resolved; the lock integrity check compared
+mismatched hash kinds; conflict reconciliation skipped the reconciled
+version's transitive deps. All fixed.
 
 CI/release: the release zip shipped an empty `docs/` and promised deleted
-examples; release notes were always the generic fallback; both workflows installed
-an unused .NET SDK + winmd cache. Fixed.
+examples; release notes were always the generic fallback; both workflows
+installed an unused .NET SDK plus winmd cache. Fixed.
 
-Compiler + FFI: reviewed inline (the agent dimensions were policy-blocked) —
-marshal sign/width/LLP64 conversions, the ctype primitive table, the blob
-layout, and the require-literal scan (recurses nested Protos) are all correct;
-no defects found.
+Compiler plus FFI: reviewed inline (the agent dimensions were
+policy-blocked), marshal sign/width/LLP64 conversions, the ctype primitive
+table, the blob layout, and the require-literal scan (recurses nested
+Protos) are all correct; no defects found.
 
-### JIT-VARARG-001 — `...` forwarded right after a generic-for loop expanded extra values — FIXED
-Forwarding the varargs (`f(...)`, `return ...`, `select('#', ...)`) immediately
-after a **generic**-for loop (`for k in pairs(t)` / `ipairs`) in the same
-function produced TOO MANY values under the JIT:
+### JIT-VARARG-001, `...` forwarded right after a generic-for loop expanded extra values, fixed
+Forwarding the varargs (`f(...)`, `return ...`, `select('#', ...)`)
+immediately after a generic-for loop (`for k in pairs(t)` / `ipairs`) in
+the same function produced too many values under the JIT:
 
 ```lua
 local function f(...) local t={a=1,b=2,c=3}; for _ in pairs(t) do end; return select('#', ...) end
 f(1,9,4)   -- was JIT: 5   |   interpreter (-i): 3   |   now both 3
 ```
 
-**Root cause:** a generic-for creates a to-be-closed slot (its 4th control
-register), so the compiler sets the **k (close)** flag on the function's terminal
-`OP_TAILCALL`/`OP_RETURN`. `Lower_TailCall`/`Lower_Return` emit `Rt_Close` BEFORE
-the multret consumer, and `Rt_Close` raised `L->top` to the frame ceiling
-(`ci->top.p`) to give a `__close` metamethod scratch space (CLOSEKTOP) but never
-restored it. The following `Rt_TailCall`/`Rt_PrepReturn` then computed the
-multret (B==0) value count from the raised `L->top`, counting the dead for-loop
-register slots as extra trailing arguments (extra = `nloopvars + 1`). The
-interpreter captures the count BEFORE closing; the JIT closed first. A numeric
-for-loop has no TBC slot -> no k -> never triggered. **Fix:** `Rt_Close`
-save/restores the logical `L->top` around the raise+close (`savestack`/
-`restorestack`, so it also survives a stack relocation from a real `__close`),
-making the close `L->top`-neutral for the multret consumer while still giving
-`__close` its scratch and preserving the earlier `<close> + return v` fix.
-`src/jit/runtime.c` `Rt_Close`. Regression: `tests/lua/test_jit_vararg_genfor.lua`
-(incl. a combined `<close>` + pairs + multret case). The `expr` package was also
-reworked to an O(1) allow-set (faster, and it no longer relied on the buggy
-pattern).
+Root cause: a generic-for creates a to-be-closed slot (its 4th control
+register), so the compiler sets the k (close) flag on the function's
+terminal `OP_TAILCALL`/`OP_RETURN`. `Lower_TailCall`/`Lower_Return` emit
+`Rt_Close` before the multret consumer, and `Rt_Close` raised `L->top` to
+the frame ceiling (`ci->top.p`) to give a `__close` metamethod scratch
+space (CLOSEKTOP) but never restored it. The following
+`Rt_TailCall`/`Rt_PrepReturn` then computed the multret (B==0) value count
+from the raised `L->top`, counting the dead for-loop register slots as
+extra trailing arguments (extra = `nloopvars + 1`). The interpreter
+captures the count before closing; the JIT closed first. A numeric
+for-loop has no TBC slot -> no k -> never triggered. Fix: `Rt_Close`
+save/restores the logical `L->top` around the raise+close
+(`savestack`/`restorestack`, so it also survives a stack relocation from
+a real `__close`), making the close `L->top`-neutral for the multret
+consumer while still giving `__close` its scratch and preserving the
+earlier `<close> + return v` fix. `src/jit/runtime.c` `Rt_Close`.
+Regression: `tests/lua/test_jit_vararg_genfor.lua` (incl. a combined
+`<close>` plus pairs plus multret case). The `expr` package was also
+reworked to an O(1) allow-set (faster, and it no longer relied on the
+buggy pattern).
 
-## Round 4 — whole-codebase review (2026-06-09)
+## round 4, whole-codebase review (2026-06-09)
 
-A parallel multi-agent review of the JIT codegen/runtime and the FFI, each
-finding adversarially **verified against the interpreter before any fix** (one
-agent finding was a false positive, ruled out below). Nine real bugs fixed; suite
-185 → 191.
+A parallel multi-agent review of the JIT codegen/runtime and the FFI,
+each finding adversarially verified against the interpreter before any
+fix (one agent finding was a false positive, ruled out below). Nine real
+bugs fixed; suite 185 -> 191.
 
-### R4-001 — numeric-for loop-variable mutation leaked across iterations (JIT) — FIXED
-`for i=1,4 do t[#t+1]=i; i=i+100 end` produced `1,102,203,304` under the JIT vs
-`1,2,3,4` in the interpreter. Lua 5.4 makes the loop variable a fresh local each
-iteration, so reassigning it in the body must not affect iteration. The integer
-`Rt_ForLoop` advanced the VISIBLE control variable `R[A+3]` instead of the hidden
-internal index `R[A]` (which it never maintained); the float path was already
-correct. **Fix:** keep the internal index in `R[A]` like `lvm.c` and the float
-path (`Rt_ForPrep`/`Rt_ForLoop`, `src/jit/runtime.c`). Regression:
+### R4-001, numeric-for loop-variable mutation leaked across iterations (JIT), fixed
+`for i=1,4 do t[#t+1]=i; i=i+100 end` produced `1,102,203,304` under the
+JIT vs `1,2,3,4` in the interpreter. Lua 5.4 makes the loop variable a
+fresh local each iteration, so reassigning it in the body must not affect
+iteration. The integer `Rt_ForLoop` advanced the visible control variable
+`R[A+3]` instead of the hidden internal index `R[A]` (which it never
+maintained); the float path was already correct. Fix: keep the internal
+index in `R[A]` like `lvm.c` and the float path
+(`Rt_ForPrep`/`Rt_ForLoop`, `src/jit/runtime.c`). Regression:
 `tests/differential/forloop_var_mutation.lua`.
 
-### R4-002 — `Rt_Call` used a stale `Func` after a stack relocation (JIT) — FIXED
-`Rt_Call` captured `Func`, set `L->ci`, then `lua_checkstack` — which can grow and
-RELOCATE the stack (`correctstack` fixes `Ci->func.p` but not the C local). The
-nil-pad loop and `L->top` assignment then wrote through the dangling pointer into
-the freed buffer when a callee frame didn't fit. **Fix:** re-derive
-`Func = Ci->func.p` after `lua_checkstack` (`src/jit/runtime.c`).
+### R4-002, `Rt_Call` used a stale `Func` after a stack relocation (JIT), fixed
+`Rt_Call` captured `Func`, set `L->ci`, then `lua_checkstack`, which can
+grow and relocate the stack (`correctstack` fixes `Ci->func.p` but not
+the C local). The nil-pad loop and `L->top` assignment then wrote through
+the dangling pointer into the freed buffer when a callee frame didn't
+fit. Fix: re-derive `Func = Ci->func.p` after `lua_checkstack`
+(`src/jit/runtime.c`).
 
-### R4-003 — `Rt_Concat` stored the result through a stale `Base` (JIT) — FIXED
-A stack-growing `__concat` metamethod relocated the stack, leaving the `Base`
-captured before `luaV_concat` dangling for the result copy. **Fix:** re-derive
-`Base` after `luaV_concat` (the copy is then a safe self-copy, matching upstream
-`OP_CONCAT`). `src/jit/runtime.c`.
+### R4-003, `Rt_Concat` stored the result through a stale `Base` (JIT), fixed
+A stack-growing `__concat` metamethod relocated the stack, leaving the
+`Base` captured before `luaV_concat` dangling for the result copy. Fix:
+re-derive `Base` after `luaV_concat` (the copy is then a safe self-copy,
+matching upstream `OP_CONCAT`). `src/jit/runtime.c`.
 
-### R4-004 — `ffi.cast` to a narrow integer did not truncate to width — FIXED
+### R4-004, `ffi.cast` to a narrow integer did not truncate to width, fixed
 `ffi.cast("unsigned int", -1)` boxed `0xFFFFFFFFFFFFFFFF` and printed
-`18446744073709551615` instead of `4294967295`; `ffi.cast("int", 0x1FFFFFFFF)`
-gave `8589934591` not `-1`. The cast path stored the full 64-bit value into the
-cdata, while the primitive read path (`Cdata_Tostring`/`Cdata_Eq`) trusts
-`I64` is already width-correct (the struct-field write path via `WriteInt` was
-fine). **Fix:** new `Ffi_NarrowInt` truncates + sign/zero-extends at both cast
-sites (`src/ffi/ffi_lib.c`). Regression: `tests/lua/test_ffi_cast_width.lua`.
+`18446744073709551615` instead of `4294967295`; `ffi.cast("int",
+0x1FFFFFFFF)` gave `8589934591` not `-1`. The cast path stored the full
+64-bit value into the cdata, while the primitive read path
+(`Cdata_Tostring`/`Cdata_Eq`) trusts `I64` is already width-correct (the
+struct-field write path via `WriteInt` was fine). Fix: new
+`Ffi_NarrowInt` truncates plus sign/zero-extends at both cast sites
+(`src/ffi/ffi_lib.c`). Regression: `tests/lua/test_ffi_cast_width.lua`.
 
-### R4-005 — float→integer FFI write used `floor` not truncation-toward-zero — FIXED
-A `-2.7` assigned to an `int` field stored `-3`; a C cast (and LuaJIT) gives `-2`.
-**Fix:** `(int64_t)N` instead of `(int64_t)floor(N)` (`src/ffi/marshal.c`).
+### R4-005, float-to-integer FFI write used `floor` not truncation-toward-zero, fixed
+A `-2.7` assigned to an `int` field stored `-3`; a C cast (and LuaJIT)
+gives `-2`. Fix: `(int64_t)N` instead of `(int64_t)floor(N)`
+(`src/ffi/marshal.c`).
 
-### R4-006 — `OP_SELF` used `luaH_getshortstr` for method keys (JIT) — FIXED
-A method name > `LUAI_MAXSHORTLEN` (40 chars) interns as a LONG string; `Rt_Self`
-read its lazily-computed hash before it existed and scanned the wrong bucket
-(masked only by the `luaV_finishget` fallback, and an assert landmine). Upstream
-`OP_SELF` uses `luaH_getstr`. **Fix:** use `luaH_getstr` (`src/jit/runtime.c`).
-Regression: `tests/differential/self_method_dispatch.lua`.
+### R4-006, `OP_SELF` used `luaH_getshortstr` for method keys (JIT), fixed
+A method name > `LUAI_MAXSHORTLEN` (40 chars) interns as a long string;
+`Rt_Self` read its lazily-computed hash before it existed and scanned the
+wrong bucket (masked only by the `luaV_finishget` fallback, and an assert
+landmine). Upstream `OP_SELF` uses `luaH_getstr`. Fix: use
+`luaH_getstr` (`src/jit/runtime.c`). Regression:
+`tests/differential/self_method_dispatch.lua`.
 
-### R4-007 — FFI callbacks with > 4 args read the wrong stack slots — FIXED
-The callback stub read stack args (index ≥ 4) at `[rbp+0x10+(i-4)*8]` — inside the
-32-byte Win64 home/shadow space — instead of `[rbp+0x30+...]` (above it), so a
-callback with ≥ 5 args saw garbage for args 4+. **Fix:** offset `0x30`
-(`src/ffi/ffi_callback.c`). Regression: `tests/lua/test_ffi_callback_args.lua`
-(round-trips a 6-arg callback through the call thunk).
+### R4-007, FFI callbacks with > 4 args read the wrong stack slots, fixed
+The callback stub read stack args (index >= 4) at `[rbp+0x10+(i-4)*8]`
+(inside the 32-byte Win64 home/shadow space) instead of
+`[rbp+0x30+...]` (above it), so a callback with >= 5 args saw garbage
+for args 4+. Fix: offset `0x30` (`src/ffi/ffi_callback.c`). Regression:
+`tests/lua/test_ffi_callback_args.lua` (round-trips a 6-arg callback
+through the call thunk).
 
-### R4-008 — multi-dimensional C arrays nested dimensions in reverse — FIXED
-`int a[2][3]` parsed as array-3-of-array-2 (innermost-first wrapping), swapping
-the strides: `a[0][2]` aliased `a[1][0]` (total size unaffected, which hid it).
-**Fix:** `ParseArraySuffixes` collects a dimension run and nests it
-first-bracket-outermost, used by both the declarator and type-expression paths
-(`src/ffi/cdecl_parser.c`). Regression: `tests/lua/test_ffi_multidim_array.lua`.
+### R4-008, multi-dimensional C arrays nested dimensions in reverse, fixed
+`int a[2][3]` parsed as array-3-of-array-2 (innermost-first wrapping),
+swapping the strides: `a[0][2]` aliased `a[1][0]` (total size unaffected,
+which hid it). Fix: `ParseArraySuffixes` collects a dimension run and
+nests it first-bracket-outermost, used by both the declarator and
+type-expression paths (`src/ffi/cdecl_parser.c`). Regression:
+`tests/lua/test_ffi_multidim_array.lua`.
 
-### R4-009 — JIT recovery frame was process-global, not per-fiber — FIXED
-`g_CurrentJitFrame` (the VEH→Lua-error recovery `setjmp` target) is shared, and
-`Jit_TrampolineEntry` installs one only when it is NULL. A coroutine resumed from
-within the main fiber's JIT frame skipped its own frame, so a hardware fault in
-the coroutine's JIT code would `longjmp` into the resumer's frame — a `jmp_buf`
-captured on a different (suspended) fiber stack. **Fix:** `coroutine.resume`
-save/restores `g_CurrentJitFrame` around the fiber switch so each fiber owns its
-recovery frame (`src/runtime/coro.c`). The trigger (a JIT-region fault inside a
-coroutine) is hard to provoke from Lua; verified the swap does not disturb normal
-coroutines (`tests/differential/coroutines_jitframe.lua`).
+### R4-009, JIT recovery frame was process-global, not per-fiber, fixed
+`g_CurrentJitFrame` (the VEH-to-Lua-error recovery `setjmp` target) is
+shared, and `Jit_TrampolineEntry` installs one only when it is NULL. A
+coroutine resumed from within the main fiber's JIT frame skipped its own
+frame, so a hardware fault in the coroutine's JIT code would `longjmp`
+into the resumer's frame, a `jmp_buf` captured on a different (suspended)
+fiber stack. Fix: `coroutine.resume` save/restores `g_CurrentJitFrame`
+around the fiber switch so each fiber owns its recovery frame
+(`src/runtime/coro.c`). The trigger (a JIT-region fault inside a
+coroutine) is hard to provoke from Lua; verified the swap does not
+disturb normal coroutines (`tests/differential/coroutines_jitframe.lua`).
 
-### Ruled out / deferred (Round 4)
-- **NOT a bug — `OP_SETLIST` skips the RDI reload after `Rt_SetList`.** Claimed an
-  emergency GC during `luaH_resizearray` could relocate the stack. It cannot:
-  `lgc.c` shrinks the stack only when `!g->gcemergency` (line 644), and the
-  resize's allocation-failure GC is an emergency cycle. The existing comment is
-  correct; SETLIST runs no metamethod, unlike the SET ops that do reload.
-- **Deferred — immediate-comparison metamethods get an int for a float literal.**
-  `obj < 2.0` with a `__lt` passes integer `2` (the `isfloat` C-flag isn't
-  threaded into `Rt_*ISlow`). Real but astronomically narrow (custom order
-  metamethod compared to a float-valued literal); the fix touches five helper
-  signatures + codegen, so it's documented rather than fixed.
-- **Deferred (perf only) — `Rt_NewTable` doesn't decode the B hash-size field nor
-  fold the EXTRAARG high bits**, so tables are under-presized (they still grow on
-  demand; correctness is unaffected).
+### ruled out / deferred (round 4)
+- Not a bug, `OP_SETLIST` skips the RDI reload after `Rt_SetList`.
+  Claimed an emergency GC during `luaH_resizearray` could relocate the
+  stack. It cannot: `lgc.c` shrinks the stack only when `!g->gcemergency`
+  (line 644), and the resize's allocation-failure GC is an emergency
+  cycle. The existing comment is correct; SETLIST runs no metamethod,
+  unlike the SET ops that do reload.
+- Deferred, immediate-comparison metamethods get an int for a float
+  literal. `obj < 2.0` with a `__lt` passes integer `2` (the `isfloat`
+  C-flag isn't threaded into `Rt_*ISlow`). Real but astronomically narrow
+  (custom order metamethod compared to a float-valued literal); the fix
+  touches five helper signatures plus codegen, so it's documented rather
+  than fixed.
+- Deferred (perf only), `Rt_NewTable` doesn't decode the B hash-size
+  field nor fold the EXTRAARG high bits, so tables are under-presized
+  (they still grow on demand; correctness is unaffected).
 
-## Round 5 — test-infrastructure + package coverage (2026-06-09)
+## round 5, test-infrastructure plus package coverage (2026-06-09)
 
-Added a hard-deadline test watchdog (`tools/timeout-run.c`, a kill-on-close Job
-Object enforcing a per-test wall-clock limit), a seeded **differential fuzzer**
-(`tools/fuzz-differential.lua`, JIT vs interpreter, grammar weighted to the
-historical bug classes — 2500 seeds run clean), a package **interpreter-oracle**
-cross-check (`pkgdiff`: each package test also runs from source under JIT and -i
-with stdout diffed), and 44 new package tests. Also fixed the CI/release pipeline
-(`make test` now self-builds the embedded archives; release gained a test gate).
-The new coverage surfaced a batch of real bugs.
+Added a hard-deadline test watchdog (`tools/timeout-run.c`, a kill-on-close
+Job Object enforcing a per-test wall-clock limit), a seeded differential
+fuzzer (`tools/fuzz-differential.lua`, JIT vs interpreter, grammar weighted
+to the historical bug classes, 2500 seeds run clean), a package
+interpreter-oracle cross-check (`pkgdiff`: each package test also runs
+from source under JIT and -i with stdout diffed), and 44 new package
+tests. Also fixed the CI/release pipeline (`make test` now self-builds
+the embedded archives; release gained a test gate). The new coverage
+surfaced a batch of real bugs.
 
-### FIXED
-- **R5-001 (perf) — bignum multi-limb division was O(BASE) per numerator limb.**
-  `udivmod`'s qhat back-off decremented one at a time; with no Knuth
-  normalization a divisor with a small top limb (e.g. `987654321` → top limb 58)
-  overestimates qhat by up to ~16M, so the loop ran millions of multiplies per
-  limb. Replaced with a binary search over `[0, qhat]` (qhat stays an upper
-  bound, so it's exact). `isqrt` of a 30-digit number: **42 s → 0.001 s**;
-  `test_bignum`: 104 s → instant. The watchdog exposed it.
-  `src/runtime/packages/bignum/init.lua`.
-- **R5-002 (FFI) — forward-declared struct typedefs never completed.** `typedef
-  struct _X X; struct _X {…};` left `sizeof(X)` = 0 (the idiom every Windows
-  header uses). `Ctype_Register` now completes the stub IN PLACE instead of
-  repointing the registry slot, so the typedef and self-referential fields
-  observe the real layout. Fixed `ffi.sizeof("CRITICAL_SECTION")` (was 0 → 40),
-  which in turn fixed `mutex.mutex()`/`channel` (they did `malloc(0)` and
-  corrupted the heap). `src/ffi/ctype.c`, `src/ffi/cdecl_parser.c`.
-- **R5-003 (FFI) — `ffi.new("T[N]", v)` rejected a scalar initializer** ("kind 4
-  vs target kind 5") — it marshalled against the array type, not the element.
-  Now a non-aggregate initializer fills element [0] (`ffi.new("HANDLE[1]", h)`),
-  fixing event/semaphore construction and the `mem`/`network_info` DWORD paths.
-  `src/ffi/ffi_lib.c`.
-- **R5-004 — rtf colortbl off-by-one** (leading `;` double-counted; `\cfN` →
-  `colors[N]` instead of `colors[N+1]`). **R5-005 — lint** flagged function
-  params as undefined globals (`declare_params` never called) and crashed on a
-  nameless `local =`. **R5-006 — xpress** faulted on `compress("")` and
+### fixed
+- R5-001 (perf), bignum multi-limb division was O(BASE) per numerator
+  limb. `udivmod`'s qhat back-off decremented one at a time; with no
+  Knuth normalization a divisor with a small top limb (e.g. `987654321`
+  -> top limb 58) overestimates qhat by up to ~16M, so the loop ran
+  millions of multiplies per limb. Replaced with a binary search over
+  `[0, qhat]` (qhat stays an upper bound, so it's exact). `isqrt` of a
+  30-digit number: 42 s -> 0.001 s; `test_bignum`: 104 s -> instant. The
+  watchdog exposed it. `src/runtime/packages/bignum/init.lua`.
+- R5-002 (FFI), forward-declared struct typedefs never completed.
+  `typedef struct _X X; struct _X {...};` left `sizeof(X)` = 0 (the idiom
+  every Windows header uses). `Ctype_Register` now completes the stub in
+  place instead of repointing the registry slot, so the typedef and
+  self-referential fields observe the real layout. Fixed
+  `ffi.sizeof("CRITICAL_SECTION")` (was 0 -> 40), which in turn fixed
+  `mutex.mutex()`/`channel` (they did `malloc(0)` and corrupted the heap).
+  `src/ffi/ctype.c`, `src/ffi/cdecl_parser.c`.
+- R5-003 (FFI), `ffi.new("T[N]", v)` rejected a scalar initializer
+  ("kind 4 vs target kind 5"), it marshalled against the array type, not
+  the element. Now a non-aggregate initializer fills element [0]
+  (`ffi.new("HANDLE[1]", h)`), fixing event/semaphore construction and
+  the `mem`/`network_info` DWORD paths. `src/ffi/ffi_lib.c`.
+- R5-004, rtf colortbl off-by-one (leading `;` double-counted; `\cfN` ->
+  `colors[N]` instead of `colors[N+1]`). R5-005, lint flagged function
+  params as undefined globals (`declare_params` never called) and crashed
+  on a nameless `local =`. R5-006, xpress faulted on `compress("")` and
   under-sized `out_cap` for XPRESS_HUFF's 256-byte table on tiny inputs.
-- **R5-007 — tls_client** leaked the SChannel handshake token (now
-  `FreeContextBuffer`); **wmi.execute_method** silently dropped in-params (now
-  errors clearly instead of misleading the caller).
+- R5-007, tls_client leaked the SChannel handshake token (now
+  `FreeContextBuffer`); wmi.execute_method silently dropped in-params
+  (now errors clearly instead of misleading the caller).
 
-### Known bugs (documented, XFAIL/SKIP — not yet fixed)
-- **ATOMIC-INTERLOCKED-SYMS-001 — FIXED.** x64 `Interlocked*` are compiler
+### known bugs (documented, XFAIL/SKIP, not yet fixed)
+- ATOMIC-INTERLOCKED-SYMS-001, fixed. x64 `Interlocked*` are compiler
   intrinsics with no exported symbol, so `ffi.C.InterlockedXxx` could not
   resolve, leaving `atomic` (and `queue`/`semaphore`, which use it)
-  non-functional. **Fix:** `clua/src/ffi/ffi_atomics.c` supplies built-in
-  machine-code thunks for every Interlocked variant (GCC `__atomic` builtins
-  with `__ATOMIC_SEQ_CST` lower to the LOCK-prefixed `xchg`/`xadd`/`cmpxchg`/
-  `or`/`and` x64 forms — identical semantics to the Win32 intrinsics), and
-  `Ffi_AtomicsLookup` is wired into the FFI symbol resolver
-  (`clua/src/ffi/ffi_load.c`) so `ffi.C.Interlocked*` binds to them. Verified
-  end-to-end in AOT-compiled exes (atomic / queue / semaphore / event / mutex
-  / channel) and pinned at the product level by
-  `tests/differential/aot_concurrency.lua` (compiled-vs-interpreter at O0+O1).
-  Note: `pool`/`thread` now compile AOT too — see POOL-THREAD-AOT-001 below.
-- **CAB-FFI-001** — the FFI can't CALL a `ffi.cast`'d function pointer ("function
-  pointer not resolved"), which blocks every functional `cab` op (they drive a
-  cast `SetupIterateCabinetA`/FCI pointer). `cab` test SKIPs the round-trip.
-- **XPRESS-SMALL-001 — FIXED (2026-06-13).** XPRESS and LZNT1 cannot represent
+  non-functional. Fix: `clua/src/ffi/ffi_atomics.c` supplies built-in
+  machine-code thunks for every Interlocked variant (GCC `__atomic`
+  builtins with `__ATOMIC_SEQ_CST` lower to the LOCK-prefixed
+  `xchg`/`xadd`/`cmpxchg`/`or`/`and` x64 forms, identical semantics to
+  the Win32 intrinsics), and `Ffi_AtomicsLookup` is wired into the FFI
+  symbol resolver (`clua/src/ffi/ffi_load.c`) so `ffi.C.Interlocked*`
+  binds to them. Verified end-to-end in AOT-compiled exes (atomic /
+  queue / semaphore / event / mutex / channel) and pinned at the product
+  level by `tests/differential/aot_concurrency.lua`
+  (compiled-vs-interpreter at O0+O1). Note: `pool`/`thread` now compile
+  AOT too, see POOL-THREAD-AOT-001 below.
+- CAB-FFI-001, the FFI can't call a `ffi.cast`'d function pointer
+  ("function pointer not resolved"), which blocks every functional `cab`
+  op (they drive a cast `SetupIterateCabinetA`/FCI pointer). `cab` test
+  SKIPs the round-trip.
+- XPRESS-SMALL-001, fixed (2026-06-13). XPRESS and LZNT1 cannot represent
   an input below their minimum block (`RtlCompressBuffer` returns
-  `STATUS_BUFFER_TOO_SMALL`); it is a genuine format minimum, not an output-buffer
-  size. `xpress.compress`/`decompress` now store such inputs verbatim for those
-  two formats — the decision is a pure function of `(format, original_size)`, so
-  decompress recovers them with no marker and no ambiguity. XPRESS_HUFF is
-  unaffected (it already handled tiny inputs after R5-006).
+  `STATUS_BUFFER_TOO_SMALL`); it is a genuine format minimum, not an
+  output-buffer size. `xpress.compress`/`decompress` now store such
+  inputs verbatim for those two formats, the decision is a pure function
+  of `(format, original_size)`, so decompress recovers them with no
+  marker and no ambiguity. XPRESS_HUFF is unaffected (it already handled
+  tiny inputs after R5-006).
   `clua/src/runtime/packages/xpress/init.lua`; round-trip asserted in
   `tests/packages/test_xpress.lua` (1- and 3-byte inputs, both formats).
-- **NET-ROUTE-002 — FIXED (2026-06-13).** `network_info.routing_table()` decoded
-  garbage rows because `MIB_IPFORWARD_ROW2_NI` was not byte-exact with the
-  platform ABI: `SOCKADDR_INET_NI` was modelled as `{ u16; char[26] }` (align 2),
-  but the real union is 28 bytes / **align 4**, which shrank `IP_ADDRESS_PREFIX`
-  from 32 to 30 bytes; and the four route booleans were `BOOL` (int, 4 bytes)
-  where the API uses `BOOLEAN` (1 byte). Both errors moved the row stride, so
-  `Table[i>=1]` drifted into garbage (out-of-range prefix lengths, nil
-  destinations). The cdef now forces `SOCKADDR_INET_NI` to size 28 / align 4 and
-  uses `BYTE` for the booleans, making the struct (size 104) and every field
-  offset match. `clua/src/runtime/packages/network_info/init.lua`; the
-  prefix-range probe is asserted in `tests/packages/test_network_info.lua`.
-  (NET-FFINEW-001's `ULONG[1]` path was already fixed by R5-003; this was the
-  remaining routing-decode bug.)
-- **SECRET-WIPE-DEFAULTLEN-001 — FIXED (2026-06-13).** `secret.wipe(buf)` with no
-  explicit length no-op'd because `ffi.sizeof` returned 0 for a variable-length
-  array cdata (`unsigned char[?]`): it read the array *type*'s size (0), not the
-  instance. `LuaFn_Sizeof` now returns `ElemType->Size * Cd->FlexN` for a VLA
-  cdata, matching LuaJIT — so the documented `ffi.sizeof(buf)` default actually
-  zeroes the buffer, and every other VLA caller gets a correct size too.
-  `clua/src/ffi/ffi_lib.c`; asserted in `tests/packages/test_secret.lua`.
-- **PROP-STRLEN-001 — FIXED (2026-06-13).** `property.string` passed two
-  independent random indices to `string.sub`, yielding variable-length slices
-  that broke the `[min_len, max_len]` contract. It now picks one index and uses
-  `alphabet:sub(j, j)`. `clua/src/runtime/packages/property/init.lua`; asserted
-  in `tests/packages/test_property.lua`.
-- **POOL-THREAD-AOT-001 — FIXED (2026-06-13).** `pool` and `thread` referenced
+- NET-ROUTE-002, fixed (2026-06-13). `network_info.routing_table()`
+  decoded garbage rows because `MIB_IPFORWARD_ROW2_NI` was not byte-exact
+  with the platform ABI: `SOCKADDR_INET_NI` was modelled as
+  `{ u16; char[26] }` (align 2), but the real union is 28 bytes / align
+  4, which shrank `IP_ADDRESS_PREFIX` from 32 to 30 bytes; and the four
+  route booleans were `BOOL` (int, 4 bytes) where the API uses `BOOLEAN`
+  (1 byte). Both errors moved the row stride, so `Table[i>=1]` drifted
+  into garbage (out-of-range prefix lengths, nil destinations). The cdef
+  now forces `SOCKADDR_INET_NI` to size 28 / align 4 and uses `BYTE` for
+  the booleans, making the struct (size 104) and every field offset
+  match. `clua/src/runtime/packages/network_info/init.lua`; the
+  prefix-range probe is asserted in
+  `tests/packages/test_network_info.lua`. (NET-FFINEW-001's `ULONG[1]`
+  path was already fixed by R5-003; this was the remaining routing-decode
+  bug.)
+- SECRET-WIPE-DEFAULTLEN-001, fixed (2026-06-13). `secret.wipe(buf)` with
+  no explicit length no-op'd because `ffi.sizeof` returned 0 for a
+  variable-length array cdata (`unsigned char[?]`): it read the array
+  type's size (0), not the instance. `LuaFn_Sizeof` now returns
+  `ElemType->Size * Cd->FlexN` for a VLA cdata, matching LuaJIT, so the
+  documented `ffi.sizeof(buf)` default actually zeroes the buffer, and
+  every other VLA caller gets a correct size too. `clua/src/ffi/ffi_lib.c`;
+  asserted in `tests/packages/test_secret.lua`.
+- PROP-STRLEN-001, fixed (2026-06-13). `property.string` passed two
+  independent random indices to `string.sub`, yielding variable-length
+  slices that broke the `[min_len, max_len]` contract. It now picks one
+  index and uses `alphabet:sub(j, j)`.
+  `clua/src/runtime/packages/property/init.lua`; asserted in
+  `tests/packages/test_property.lua`.
+- POOL-THREAD-AOT-001, fixed (2026-06-13). `pool` and `thread` referenced
   `string.dump`/`load` to ship a worker function to another lua_State, a
-  closed-world violation that made any program requiring them fail to compile.
-  Real OS threading was never wired up (the native `_clua_thread_bootstrap` does
-  not exist anywhere), so both only ever ran cooperatively/inline — the
-  bytecode round-trip was dead code. They now run that actual behavior without
-  it: `thread.spawn` drives the worker on a coroutine (keeping the closure, so
-  upvalues survive), `pool` dispatches inline. Both compile AOT and match the
-  interpreter — pinned by `tests/differential/aot_pool_thread.lua` at O0+O1.
-  Native OS threads then landed (see below); `thread.spawn` now runs shippable
-  workers on real OS threads. `clua/src/runtime/packages/{pool,thread}/init.lua`.
+  closed-world violation that made any program requiring them fail to
+  compile. Real OS threading was never wired up (the native
+  `_clua_thread_bootstrap` does not exist anywhere), so both only ever
+  ran cooperatively/inline, the bytecode round-trip was dead code. They
+  now run that actual behavior without it: `thread.spawn` drives the
+  worker on a coroutine (keeping the closure, so upvalues survive),
+  `pool` dispatches inline. Both compile AOT and match the interpreter,
+  pinned by `tests/differential/aot_pool_thread.lua` at O0+O1. Native OS
+  threads then landed (see below); `thread.spawn` now runs shippable
+  workers on real OS threads.
+  `clua/src/runtime/packages/{pool,thread}/init.lua`.
 
-## Native OS threads (2026-06-13): thread.spawn runs on real OS threads
+## native OS threads (2026-06-13): thread.spawn runs on real OS threads
 
-`thread.spawn` now places a "shippable" worker function (one that captures no
-upvalues) on a real OS thread in its own `lua_State`, running at native speed.
-The function is shipped by its compile-time function-id (the protoblob index,
-stable across states) -- not as bytecode -- so it works in the closed world with
-no `string.dump`/`load`. Args/results cross via a small C serializer in `_clua`.
-A function with captured upvalues, or any non-AOT build, runs cooperatively
-instead; results are identical, pinned by `tests/differential/aot_native_thread.lua`
-at O0+O1. Making the AOT runtime reentrant (it was single-OS-thread by design)
-required a per-worker-thread dispatch cache (TLS), and thread-local JIT-recovery
-frame / tail-call flag / coroutine pointer -- via Win32 TLS, because `__thread`
-pulls gcc emutls (+ winpthread) that the lean internal linker can't resolve
-(`clua/src/jit/tls_slot.h`). Worker entry point: `Clua_ThreadBootstrap` /
-`_clua` in `clua/src/runtime/aot_entry.c`; registry: `Jit_RegisterCompiledId` /
-`Jit_ResolveFuncId` in `clua/src/jit/dispatch.c`.
+`thread.spawn` now places a "shippable" worker function (one that
+captures no upvalues) on a real OS thread in its own `lua_State`, running
+at native speed. The function is shipped by its compile-time function-id
+(the protoblob index, stable across states), not as bytecode, so it works
+in the closed world with no `string.dump`/`load`. Args/results cross via
+a small C serializer in `_clua`. A function with captured upvalues, or
+any non-AOT build, runs cooperatively instead; results are identical,
+pinned by `tests/differential/aot_native_thread.lua` at O0+O1. Making the
+AOT runtime reentrant (it was single-OS-thread by design) required a
+per-worker-thread dispatch cache (TLS), and thread-local JIT-recovery
+frame / tail-call flag / coroutine pointer, via Win32 TLS, because
+`__thread` pulls gcc emutls (plus winpthread) that the lean internal
+linker can't resolve (`clua/src/jit/tls_slot.h`). Worker entry point:
+`Clua_ThreadBootstrap` / `_clua` in `clua/src/runtime/aot_entry.c`;
+registry: `Jit_RegisterCompiledId` / `Jit_ResolveFuncId` in
+`clua/src/jit/dispatch.c`.
 
 Three concurrency bugs were found by a 300-worker stress test and fixed:
 
-- **THREAD-NATIVE-CRT-001** -- workers were created with `CreateThread`, which
-  does NOT initialize the CRT's per-thread state; Lua leans on the CRT
-  (malloc/free/errno/locale), so the heap corrupted intermittently under load.
-  Fixed by `_beginthreadex` (sets the state up; `_endthreadex` on return).
-- **THREAD-NATIVE-GCROOT-002** -- the worker built the proto tree but never
-  rooted the ENTRY proto, which holds the user's worker functions (BuildEntry
-  roots only required *modules*, via package.preload). A GC cycle then swept the
-  user functions, so `resolve_fn` returned a freed Proto -> corrupt CallInfo
-  (`L->ci->func.p == NULL`, the diagnostic was `Base == 0x10`). Fixed by rooting
-  a closure over the entry proto for the worker's life. (Same class as
-  AOT-MULTIMOD-001 below.)
-- **THREAD-NATIVE-REENTRANCY-003** -- the dispatch cache, JIT-recovery frame,
-  tail-call flag, and coroutine pointer were process-global; concurrent workers
-  raced on them. Fixed by making each per-thread (see above).
+- THREAD-NATIVE-CRT-001, workers were created with `CreateThread`, which
+  does not initialize the CRT's per-thread state; Lua leans on the CRT
+  (malloc/free/errno/locale), so the heap corrupted intermittently under
+  load. Fixed by `_beginthreadex` (sets the state up; `_endthreadex` on
+  return).
+- THREAD-NATIVE-GCROOT-002, the worker built the proto tree but never
+  rooted the entry proto, which holds the user's worker functions
+  (BuildEntry roots only required modules, via package.preload). A GC
+  cycle then swept the user functions, so `resolve_fn` returned a freed
+  Proto, corrupt CallInfo (`L->ci->func.p == NULL`, the diagnostic was
+  `Base == 0x10`). Fixed by rooting a closure over the entry proto for
+  the worker's life. (Same class as AOT-MULTIMOD-001 below.)
+- THREAD-NATIVE-REENTRANCY-003, the dispatch cache, JIT-recovery frame,
+  tail-call flag, and coroutine pointer were process-global; concurrent
+  workers raced on them. Fixed by making each per-thread (see above).
 
-Known limitations (documented, not bugs): native workers do NOT open the FFI
-(its callback dispatch is one shared `lua_State`), so a native worker must be
-ffi-free -- ffi-using functions should run cooperatively. Worker construction
-(fresh state + full proto rebuild) is serialized by a process lock; only the
-construction is serial, the work runs fully in parallel. `pool` still dispatches
-inline (a bounded native pool needs a cross-`lua_State` task channel).
+Known limitations (documented, not bugs): native workers do not open the
+FFI (its callback dispatch is one shared `lua_State`), so a native
+worker must be ffi-free; ffi-using functions should run cooperatively.
+Worker construction (fresh state plus full proto rebuild) is serialized
+by a process lock; only the construction is serial, the work runs fully
+in parallel. `pool` still dispatches inline (a bounded native pool needs
+a cross-`lua_State` task channel).
 
-## FIXED — AOT-MULTIMOD-001 (2026-06-12): GC swept Protos during startup build
+## fixed, AOT-MULTIMOD-001 (2026-06-12): GC swept Protos during startup build
 
-**Root cause (found via blob-roundtrip instrumentation + layout probes, NOT
-the original "miscompile" theory):** `LuacProgram_BuildEntry` reconstructs
-every Proto at startup as fresh WHITE, UNANCHORED GC objects; nothing roots
-them until the entry closure / package.preload registration at the end. Once
-a program's reconstruction allocates past the collector's step threshold
-(~17 KB+, i.e. any larger multi-module bundle), an incremental cycle
-completes mid-build and SWEEPS the live Protos — the exe then runs on freed
-memory. Manifestations varied with layout (heap corruption, access
-violations, wrong-register calls, negative line numbers) because the freed
-blocks were reused differently; -O1 exes often "worked" only because their
-elided code reads fewer Proto fields (code[]/k[]) at runtime than -O0's
-helper-heavy code. The bug was LATENT since the generated-ProtoInit-C era
-(same unanchored pattern); small programs never tripped a full cycle. The
+Root cause (found via blob-roundtrip instrumentation plus layout probes,
+not the original "miscompile" theory): `LuacProgram_BuildEntry`
+reconstructs every Proto at startup as fresh white, unanchored GC
+objects; nothing roots them until the entry closure /
+package.preload registration at the end. Once a program's reconstruction
+allocates past the collector's step threshold (~17 KB+, i.e. any larger
+multi-module bundle), an incremental cycle completes mid-build and
+sweeps the live Protos, the exe then runs on freed memory. Manifestations
+varied with layout (heap corruption, access violations, wrong-register
+calls, negative line numbers) because the freed blocks were reused
+differently; -O1 exes often "worked" only because their elided code
+reads fewer Proto fields (code[]/k[]) at runtime than -O0's helper-heavy
+code. The bug was latent since the generated-ProtoInit-C era (same
+unanchored pattern); small programs never tripped a full cycle. The
 serializer/deserializer were verified byte-faithful
 (tests/unit/test_lc_protoblob_roundtrip.c) before the GC was implicated.
 
-**Fix:** stop the collector across the build and restart it once everything
-is rooted (clua/src/runtime/aot_entry.c) — the same idiom upstream Lua uses
-in `f_luaopen` for state bootstrap. Regression:
-tests/differential/aot_multimod.lua (+ multimod_payload.lua, 150 functions —
-red-green verified: heap-corruption crash without the fix, byte-identical to
-the oracle with it) at the diff and aotdiff[O0/O1] layers.
+Fix: stop the collector across the build and restart it once everything
+is rooted (clua/src/runtime/aot_entry.c), the same idiom upstream Lua
+uses in `f_luaopen` for state bootstrap. Regression:
+tests/differential/aot_multimod.lua (plus multimod_payload.lua, 150
+functions, red-green verified: heap-corruption crash without the fix,
+byte-identical to the oracle with it) at the diff and aotdiff[O0/O1]
+layers.
 
-## (historical record of the original OPEN entry follows)
+## (historical record of the original open entry follows)
 
 ### AOT-MULTIMOD-001 original report: multi-module miscompile at scale
 
-Compiling a program that bundles LARGER multi-module sets (e.g. the registry
-`json` ~64 functions + `semver`) produces a corrupted exe; the oracle runs
-the identical sources correctly, and the v0.1.0 single/two-module corpus
-(greet, rover's 71-fn single module) is unaffected. Manifestations shift
-with link layout (memory corruption, so the same .text fails differently):
+Compiling a program that bundles larger multi-module sets (e.g. the
+registry `json` ~64 functions + `semver`) produces a corrupted exe; the
+oracle runs the identical sources correctly, and the v0.1.0
+single/two-module corpus (greet, rover's 71-fn single module) is
+unaffected. Manifestations shift with link layout (memory corruption, so
+the same .text fails differently):
 
 - 3-module `require "json" + require "semver"` at -O1, lvm_nointerp link:
   exit 0xC0000374 (heap corruption) before any output.
 - Same with the full lvm.o linked (add a `"debug"` string constant):
-  `json/init.lua:25: attempt to call a nil value (local '_null')` — a CALL
+  `json/init.lua:25: attempt to call a nil value (local '_null')`, a CALL
   took its callee from a wrong register/slot.
 - Single-module stripped-json at -O0: `:-25: attempt to call a nil value
-  (field '?')` — NEGATIVE line + garbage name (corrupt debug-info reads);
-  the byte-identical source runs clean under `clua-interp -i`, and the
-  UNSTRIPPED json works at -O0 — the failure is input-shape-sensitive
-  (line-table/layout dependent), not a source-semantics issue.
+  (field '?')`, negative line plus garbage name (corrupt debug-info
+  reads); the byte-identical source runs clean under `clua-interp -i`,
+  and the unstripped json works at -O0, the failure is
+  input-shape-sensitive (line-table/layout dependent), not a
+  source-semantics issue.
 
 Repro: `tools\build-registry.lua <stage>` + `rover publish <stage>` +
 `rover install json --registry <stage>` (isolated CLUA_HOME), then
-`clua build` a program requiring json+semver. Suspect surface: blob/COFF
-emission or codegen at larger function counts/sizes (fn table, reloc,
-branch-patch, or lineinfo paths). NEEDS a minimization pass + an XFAIL
-differential fixture; until fixed, large multi-module bundles are
-unreliable — the published registry packages themselves are
+`clua build` a program requiring json+semver. Suspect surface:
+blob/COFF emission or codegen at larger function counts/sizes (fn table,
+reloc, branch-patch, or lineinfo paths). Needs a minimization pass plus
+an XFAIL differential fixture; until fixed, large multi-module bundles
+are unreliable, the published registry packages themselves are
 oracle-verified correct.
 
-- `hash` is correct: `sha256("abc")` = `ba7816bf…20015ad` matches the NIST vector.
+- `hash` is correct: `sha256("abc")` = `ba7816bf...20015ad` matches the
+  NIST vector.
 - `math.type("x")` returning `nil` is correct Lua 5.4.
-- Across 26+ differential probes the JIT had **no silent wrong-answer
-  arithmetic/metamethod/closure miscompiles** — the JIT risks were
-  crashes-on-limits + the one close-upvalue register caching corner (fixed).
-- **Argon2id "wrong p=1 digest"** (Round-3 audit claim): false — it compared the
-  m=256 output to the published reference for m=65536. Both authoritative vectors
-  pass.
-- **table.move "must bypass metamethods"** (audit claim): false — Lua 5.4
-  `table.move` uses `lua_geti`/`lua_seti`, so it correctly honors `__index`/
-  `__newindex`. CLua matches the spec.
+- Across 26+ differential probes the JIT had no silent wrong-answer
+  arithmetic/metamethod/closure miscompiles, the JIT risks were
+  crashes-on-limits plus the one close-upvalue register caching corner
+  (fixed).
+- Argon2id "wrong p=1 digest" (round-3 audit claim): false, it compared
+  the m=256 output to the published reference for m=65536. Both
+  authoritative vectors pass.
+- table.move "must bypass metamethods" (audit claim): false, Lua 5.4
+  `table.move` uses `lua_geti`/`lua_seti`, so it correctly honors
+  `__index`/`__newindex`. CLua matches the spec.
 
-## Update 2026-06-10 — LuaC AOT adversarial attack findings (rounds 1–6)
+## update 2026-06-10, LuaC AOT adversarial attack findings (rounds 1 to 6)
 
-The multi-lens differential attack harness (aotc -O1 vs `clua-interp -i`) found and we
-fixed five silent wrong-answer bugs — including three in the **shared baseline
-runtime/JIT**, which corrects the earlier "no silent metamethod miscompiles"
-note above:
+The multi-lens differential attack harness (aotc -O1 vs `clua-interp -i`)
+found and we fixed five silent wrong-answer bugs, including three in the
+shared baseline runtime/JIT, which corrects the earlier "no silent
+metamethod miscompiles" note above:
 
-- **FIXED `2910a30`/`13489d3`** — two -O1 type-inference elision unsoundnesses
-  (metamethod result types; closure-captured loop var) + pre-existing
+- Fixed `2910a30`/`13489d3`, two -O1 type-inference elision unsoundnesses
+  (metamethod result types; closure-captured loop var) plus pre-existing
   SHRI/SHLI `__shl` dispatch.
-- **FIXED `66f4b66`** — three baseline (-O0, also v1-JIT) fidelity bugs:
-  (1) `Rt_ForPrep` skipped every integer loop with an out-of-int64 float limit
-  (`for i = 1, math.huge` ran zero iterations) instead of truncating like
-  lvm.c `forlimit()`; (2) imm/K arith helpers dispatched the wrong metamethod
-  event/order (`x - 1` called `__add(x, -1)` instead of `__sub(x, 1)`; flipped
-  `1 + x` lost operand order) — now `Rt_ArithIK` reads the trailing
-  MMBINI/MMBINK; (3) LTI/LEI/GTI/GEI handed `__lt`/`__le` an integer immediate
-  where lvm.c passes a float (`t < 2.0`) — now `Rt_OrderISlow` honors the isf
+- Fixed `66f4b66`, three baseline (-O0, also v1-JIT) fidelity bugs:
+  (1) `Rt_ForPrep` skipped every integer loop with an out-of-int64 float
+  limit (`for i = 1, math.huge` ran zero iterations) instead of
+  truncating like lvm.c `forlimit()`;
+  (2) imm/K arith helpers dispatched the wrong metamethod event/order
+  (`x - 1` called `__add(x, -1)` instead of `__sub(x, 1)`; flipped
+  `1 + x` lost operand order), now `Rt_ArithIK` reads the trailing
+  MMBINI/MMBINK;
+  (3) LTI/LEI/GTI/GEI handed `__lt`/`__le` an integer immediate where
+  lvm.c passes a float (`t < 2.0`), now `Rt_OrderISlow` honors the isf
   flag. Regression tests: `tests/differential/aot_forlimit.lua`,
   `tests/differential/aot_mm_dispatch.lua` (run under both engines).
 
-### AOT-ERRBANNER-001 — RESOLVED (2026-06-13)
+### AOT-ERRBANNER-001, resolved (2026-06-13)
 
 An uncaught runtime error from a compiled exe now prints
-`<progname>: <message>` followed by a `stack traceback: …`, the SAME format the
-reference interpreter uses (`clua_interp_main.c` `Clua_PrintError`). The message
-body and traceback match; the leading name token is the program's own basename
-(`AotProgName(argv[0])` in `clua/src/runtime/aot_entry.c`) rather than a fixed
-string, which is correct — a standalone exe reports under its own name, not the
-compiler's. The earlier traceback-handler work (`AotMsgHandler`) plus this
-progname banner close the divergence in format; only the name token differs, by
-design (different programs have different names). Differential tests may still
-assert error *messages* through `pcall`, but the top-level banner is no longer a
-documented divergence.
+`<progname>: <message>` followed by a `stack traceback: ...`, the same
+format the reference interpreter uses (`clua_interp_main.c`
+`Clua_PrintError`). The message body and traceback match; the leading
+name token is the program's own basename (`AotProgName(argv[0])` in
+`clua/src/runtime/aot_entry.c`) rather than a fixed string, which is
+correct, a standalone exe reports under its own name, not the compiler's.
+The earlier traceback-handler work (`AotMsgHandler`) plus this progname
+banner close the divergence in format; only the name token differs, by
+design (different programs have different names). Differential tests may
+still assert error messages through `pcall`, but the top-level banner is
+no longer a documented divergence.
 
-### Round 6 (2026-06-10, post-`66f4b66`) — three more, FIXED in `80ec826`
+### round 6 (2026-06-10, post-`66f4b66`), three more, fixed in `80ec826`
 
-- **Stale `L->top.p` in arith slow helpers** — every arith/bitwise/unary/len
-  helper ran `luaO_arith`/`luaV_objlen` on whatever top was current and only
-  restored the ceiling afterwards, so metamethod/error pushes clobbered live
-  operand slots: `nil + 1` in a pcall'd closure reported "arithmetic on a
-  **string** value"; `"hi" + 1` handed the string `__add` a **function**
-  operand (value corruption). All 31 sites now raise top BEFORE dispatch
-  (the pattern the order-compare helpers already used). Affected both engines.
-- **`Rt_ArithIK` raw-op conflation** — `x - 0` (ADDI x,0 + MMBINI TM_SUB) must
-  compute the ADDITION `x + (-0)` like lvm.c's ADDI arm (observable at
-  `x = -0.0`); now split into `luaO_rawarith` (original opcode semantics) +
-  `luaT_trybinTM` (MMBIN event, metamethods only).
-- **`debug.setlocal` vs -O1 type proofs** — reflection can rewrite any live
+- Stale `L->top.p` in arith slow helpers, every
+  arith/bitwise/unary/len helper ran `luaO_arith`/`luaV_objlen` on
+  whatever top was current and only restored the ceiling afterwards, so
+  metamethod/error pushes clobbered live operand slots: `nil + 1` in a
+  pcall'd closure reported "arithmetic on a string value"; `"hi" + 1`
+  handed the string `__add` a function operand (value corruption). All
+  31 sites now raise top before dispatch (the pattern the order-compare
+  helpers already used). Affected both engines.
+- `Rt_ArithIK` raw-op conflation, `x - 0` (ADDI x,0 + MMBINI TM_SUB) must
+  compute the addition `x + (-0)` like lvm.c's ADDI arm (observable at
+  `x = -0.0`); now split into `luaO_rawarith` (original opcode
+  semantics) plus `luaT_trybinTM` (MMBIN event, metamethods only).
+- `debug.setlocal` vs -O1 type proofs, reflection can rewrite any live
   local, falsifying static INT/FLT proofs (a proven-int local set to 9.5
   printed garbage). Mitigation: any module carrying the string constant
-  `"debug"` compiles with the typeinfer pass disabled (checked fastpaths,
-  which re-verify tags at runtime, stay on).
+  `"debug"` compiles with the typeinfer pass disabled (checked
+  fastpaths, which re-verify tags at runtime, stay on).
 
-Regression test: `tests/differential/aot_errpath_fidelity.lua` (both engines).
+Regression test: `tests/differential/aot_errpath_fidelity.lua` (both
+engines).
 
-### AOT-DEBUGREFLECT-001 — RESOLVED (2026-06-13)
+### AOT-DEBUGREFLECT-001, resolved (2026-06-13)
 
-A debug table fetched WITHOUT the literal string `"debug"` (e.g. `_G["de".."bug"]`,
-`pairs(_G)` harvesting) used to evade the constant-scan guard, so `debug.setlocal`
-under such a chunk could falsify a -O1 type proof. The fix closes the hole at its
-source: the proof-producing inference is now also disabled for any module that
-**materializes the global environment as a first-class value**, which is the
-precise moment a dynamic key could reach `debug`. In bytecode that is exactly two
-shapes — `OP_GETUPVAL` of the `_ENV` upvalue (`_ENV[expr]`, `pairs(_ENV)`,
-`e = _ENV`) and `OP_GETTABUP _ENV "_G"`/`"_ENV"` (naming the global table). Plain
-global *reads* (`OP_GETTABUP` with a constant non-`_G`/`_ENV` key) and local table
-indexing (`OP_GETTABLE` on a non-`_ENV` register) do NOT trip it, so ordinary hot
-loops keep their proofs; only code that hoists the global env loses them,
-module-wide. Sound because the gate is module-wide (a helper indexing a passed-in
-env is covered by the caller that materialized it). `lc_module_reflects_globals`
-in `clua/src/opt/passes.c`, gating `lc_pass_ip_typeprop`. Pinned by
-`tests/differential/aot_debugreflect.lua` at O0+O1. `-O0` was always
-reflection-exact.
+A debug table fetched without the literal string `"debug"` (e.g.
+`_G["de".."bug"]`, `pairs(_G)` harvesting) used to evade the
+constant-scan guard, so `debug.setlocal` under such a chunk could
+falsify a -O1 type proof. The fix closes the hole at its source: the
+proof-producing inference is now also disabled for any module that
+materializes the global environment as a first-class value, which is the
+precise moment a dynamic key could reach `debug`. In bytecode that is
+exactly two shapes, `OP_GETUPVAL` of the `_ENV` upvalue (`_ENV[expr]`,
+`pairs(_ENV)`, `e = _ENV`) and `OP_GETTABUP _ENV "_G"`/`"_ENV"` (naming
+the global table). Plain global reads (`OP_GETTABUP` with a constant
+non-`_G`/`_ENV` key) and local table indexing (`OP_GETTABLE` on a
+non-`_ENV` register) do not trip it, so ordinary hot loops keep their
+proofs; only code that hoists the global env loses them, module-wide.
+Sound because the gate is module-wide (a helper indexing a passed-in env
+is covered by the caller that materialized it).
+`lc_module_reflects_globals` in `clua/src/opt/passes.c`, gating
+`lc_pass_ip_typeprop`. Pinned by `tests/differential/aot_debugreflect.lua`
+at O0+O1. `-O0` was always reflection-exact.
 
-- **AOT-CLOSEDWORLD-002** (2026-06-12) — compiled exes no longer link the Lua
+- AOT-CLOSEDWORLD-002 (2026-06-12), compiled exes no longer link the Lua
   front-end: `aot_entry.c` defines closed-world stubs for `luaY_parser` /
   `luaU_undump` / `luaU_dump` / `luaX_init`, so ld never extracts
-  lparser/lcode/llex/lundump/ldump from the archive (~34 KB text per exe). A
-  program that EVADES the compile-time closed-world scan (e.g.
-  `_G["lo".."ad"]`) gets a runtime loader error — `load(...)` returns
-  `nil, "source chunk loading is disabled in a compiled CLua program (closed
-  world)"` — where `clua-interp -i` would parse and run the chunk. Legal programs
-  can never reach the stubs (`load`/`loadstring`/`dofile`/`string.dump` by
-  name are compile errors), so this is a bounded divergence of the same class
-  as AOT-DEBUGREFLECT-001. Guarded by tools/test-clua-cli.lua (asserts the
-  exact stub message and a lean-exe size canary). Same date, same mechanism:
-  emitted exes link `runtime-aot.a` (LUAC_AOT_RUNTIME), which carries the
-  dispatch CACHE but no JIT compiler (codegen/emit_x64/regalloc excluded;
-  the tail-call drive loop does lookup-only dispatch).
+  lparser/lcode/llex/lundump/ldump from the archive (~34 KB text per
+  exe). A program that evades the compile-time closed-world scan (e.g.
+  `_G["lo".."ad"]`) gets a runtime loader error, `load(...)` returns
+  `nil, "source chunk loading is disabled in a compiled CLua program
+  (closed world)"`, where `clua-interp -i` would parse and run the
+  chunk. Legal programs can never reach the stubs
+  (`load`/`loadstring`/`dofile`/`string.dump` by name are compile
+  errors), so this is a bounded divergence of the same class as
+  AOT-DEBUGREFLECT-001. Guarded by tools/test-clua-cli.lua (asserts the
+  exact stub message and a lean-exe size canary). Same date, same
+  mechanism: emitted exes link `runtime-aot.a` (LUAC_AOT_RUNTIME), which
+  carries the dispatch cache but no JIT compiler
+  (codegen/emit_x64/regalloc excluded; the tail-call drive loop does
+  lookup-only dispatch).
 
-- **AOT-NODEBUG-001** (2026-06-12) — a compiled program whose chunks never
-  carry the string constant `"debug"` links `lvm_nointerp.o` instead of the
-  archive's full `lvm.o`: the bytecode interpreter loop (`clua_Interpret`,
-  ~15 KB) is compiled out, because debug hooks — the only way the
-  interpreter can become reachable in a closed-world exe — cannot be
-  activated without the debug library. The scan is the SAME conservative
-  constant scan that disables the -O1 type proofs (`lc_module_uses_debug`).
-  Programs that mention debug keep the full interpreter and behave exactly
-  like the oracle under `debug.sethook` (guarded by
-  tests/differential/aot_debughooks.lua at O0/O1). A program that EVADES the
-  scan (`_G["de".."bug"].sethook(...)`) FAILS FAST: the hook closure is the
-  first thing dispatched through luaV_execute, so the exe exits 1 at the
-  sethook site with `clua: runtime error: <src>:<line>: bytecode interpreter
-  unavailable in this compiled CLua program (closed world: no 'debug'
-  reference, so debug hooks cannot run)` — uncatchable by pcall (it fires
-  inside the call-hook machinery), which is the desirable shape for an
-  evader: loud, immediate, attributed. Same accepted class as
+- AOT-NODEBUG-001 (2026-06-12), a compiled program whose chunks never
+  carry the string constant `"debug"` links `lvm_nointerp.o` instead of
+  the archive's full `lvm.o`: the bytecode interpreter loop
+  (`clua_Interpret`, ~15 KB) is compiled out, because debug hooks, the
+  only way the interpreter can become reachable in a closed-world exe,
+  cannot be activated without the debug library. The scan is the same
+  conservative constant scan that disables the -O1 type proofs
+  (`lc_module_uses_debug`). Programs that mention debug keep the full
+  interpreter and behave exactly like the oracle under `debug.sethook`
+  (guarded by tests/differential/aot_debughooks.lua at O0/O1). A program
+  that evades the scan (`_G["de".."bug"].sethook(...)`) fails fast: the
+  hook closure is the first thing dispatched through luaV_execute, so
+  the exe exits 1 at the sethook site with `clua: runtime error:
+  <src>:<line>: bytecode interpreter unavailable in this compiled CLua
+  program (closed world: no 'debug' reference, so debug hooks cannot
+  run)`, uncatchable by pcall (it fires inside the call-hook machinery),
+  which is the desirable shape for an evader: loud, immediate,
+  attributed. Same accepted class as
   AOT-DEBUGREFLECT-001/AOT-CLOSEDWORLD-002. Guarded by
-  tools/test-clua-cli.lua (asserts the message + nonzero exit).
+  tools/test-clua-cli.lua (asserts the message plus nonzero exit).
