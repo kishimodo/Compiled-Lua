@@ -24,6 +24,7 @@
 #include "link/pe_link_v2.h"
 #include "link/pe_emit.h"
 #include "compiler/resolve.h"     /* RESOLVED_EXPORT_T */
+#include "link/import_lib.h"      /* LcEmit_DefFile / LcEmit_DeriveDefPath */
 #include "common/stdlib_libs.h"   /* LCLIB_* bits of the used-libs mask */
 
 /* Kept in lock-step with LC_OUTPUT_EXE / LC_OUTPUT_DLL in driver/aotc.h.
@@ -693,4 +694,33 @@ int LuacLink_LinkProgram( const char *userObj, const char *outExe,
     }
 
     return PublishStagedOutput( staged_out, outExe, err, errlen );
+}
+
+/* Emit the .DEF module-definition file for a DLL build. Thin wrapper over
+** import_lib.c that also derives the default def_path from the DLL path when
+** the caller passes NULL. Called by the driver after LuacLink_LinkProgram
+** returns success for a DLL output; never on the .exe path (exes have no
+** import surface). Keeping the shim here (rather than in the driver) lets a
+** future DLL link path emit the .def in the same code that publishes the
+** DLL, so the two files land together or not at all. */
+int LuacLink_EmitDllDef( const char *outDll, const char *def_path,
+                         const char *const *exports, size_t nexports,
+                         char *err, size_t errlen ) {
+    char def_derived[ LC_PATH_MAX ];
+
+    if ( err && errlen ) err[ 0 ] = '\0';
+    if ( outDll == NULL ) {
+        set_errv( err, errlen, "LuacLink_EmitDllDef: NULL DLL path" );
+        return 0;
+    }
+    if ( def_path == NULL || def_path[ 0 ] == '\0' ) {
+        if ( !LcEmit_DeriveDefPath( outDll, def_derived, sizeof( def_derived ) ) ) {
+            set_errv( err, errlen,
+                      "cannot derive .def path from '%s' (path too long)",
+                      outDll );
+            return 0;
+        }
+        def_path = def_derived;
+    }
+    return LcEmit_DefFile( outDll, def_path, exports, nexports, err, errlen );
 }

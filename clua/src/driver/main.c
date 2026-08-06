@@ -440,6 +440,29 @@ int lc_drive( const LcDriverOptions *opt ) {
         }
         if ( !opt->keep_temps ) remove( obj_path );
 
+        /* DLL builds: emit a .DEF module-definition file next to the .dll so
+        ** downstream C consumers can produce a matching .lib (MSVC:
+        ** `link /def:foo.def /dll`) or libfoo.a (MinGW:
+        ** `dlltool -d foo.def -D foo.dll -l foo.lib`). Gated on emit_dll --
+        ** an .exe has no import surface to describe, and skipping the write
+        ** for exe builds keeps the byte-for-byte output the fidelity tests
+        ** already pin. The export set today is {"clua_run"}: the DLL entry
+        ** that runtime_init.c publishes (__declspec(dllexport) int clua_run).
+        ** Adding module-level exports later means growing the array here; the
+        ** import_lib.c writer stays the same. */
+        if ( opt->emit_dll ) {
+            static const char *const kExports[] = { "clua_run" };
+            char derr[ 256 ] = { 0 };
+            if ( !LuacLink_EmitDllDef( opt->output, opt->emit_def_path,
+                                       kExports,
+                                       sizeof( kExports ) / sizeof( kExports[0] ),
+                                       derr, sizeof( derr ) ) ) {
+                fprintf( stderr, "aotc: error: .def emit failed: %s\n",
+                         derr[0] ? derr : "(unknown)" );
+                goto cleanup;
+            }
+        }
+
         printf( "[+] %s (%zu module%s, %u function%s) -> %s\n",
                 opt->input, res.Count, res.Count == 1 ? "" : "s",
                 reach.count, reach.count == 1 ? "" : "s", opt->output );
@@ -462,7 +485,7 @@ static void usage( const char *argv0 ) {
     fprintf( stderr,
              "aotc (LuaC) — Lua 5.4 -> native Windows x64 PE\n"
              "usage: %s <main.lua> [-o output] [-O<n>] [-L <pkg>]... "
-             "[--shared-rt] [--output=exe|dll] [-shared]\n",
+             "[--shared-rt] [--output=exe|dll] [-shared] [--emit-def=<path>]\n",
              argv0 );
 }
 
@@ -489,7 +512,8 @@ int main( int argc, char **argv ) {
                                  "(use -O0, -O1, -O2 or -O3)\n", a );
                 return 2;
             }
-        } else if ( strcmp( a, "--dll" ) == 0 ) {
+        } else if ( strcmp( a, "--dll" ) == 0
+                    || strcmp( a, "--output=dll" ) == 0 ) {
             opt.emit_dll = true;
             opt.output_kind = LC_OUTPUT_DLL;
         } else if ( strcmp( a, "-shared" ) == 0 ) {
@@ -506,6 +530,13 @@ int main( int argc, char **argv ) {
                                  "(supported: exe, dll)\n", kind );
                 return 2;
             }
+        } else if ( strncmp( a, "--emit-def=", 11 ) == 0 ) {
+            opt.emit_def_path = a + 11;
+        } else if ( strncmp( a, "--emit-implib=", 14 ) == 0 ) {
+            /* Alias: the naming users reach for. Today we always emit a .def
+            ** (both MSVC and MinGW consume it); the path is treated as the
+            ** .def destination. */
+            opt.emit_def_path = a + 14;
         } else if ( strcmp( a, "--shared-rt" ) == 0 ) {
             opt.shared_rt = true;
         } else if ( strcmp( a, "--ld=internal" ) == 0 ) {

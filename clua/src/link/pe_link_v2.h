@@ -69,4 +69,26 @@ int LuacLink_LinkProgram( const char *userObj, const char *outExe,
                           struct _RESOLVED_EXPORT *exports, size_t nexports,
                           char *err, size_t errlen );
 
+/* Emit the .DEF module-definition file that describes a DLL build's exports.
+** Call AFTER LuacLink_LinkProgram has published the .dll so the .def can be
+** written next to a real, complete DLL (matches what downstream toolchains
+** expect: MSVC `link /def:foo.def /dll` or MinGW
+** `dlltool -d foo.def -D foo.dll -l foo.lib`). Never called for .exe builds.
+**
+**   outDll    — path to the .dll the .def describes (used only for its
+**               basename in the LIBRARY directive and to derive the default
+**               def_path).
+**   def_path  — where to write the .def. NULL/empty = derive
+**               `<outDll-without-ext>.def` in the same directory.
+**   exports   — array of exported symbol names (as they will appear from
+**               `dumpbin /exports foo.dll`), one per entry.
+**   nexports  — length of exports[]. Zero is legal (empty EXPORTS section).
+**
+** Returns 1 on success, 0 + message in `err` on failure. Deterministic: the
+** same (outDll basename, exports) input produces the same bytes on every
+** rebuild -- the .def is a stable interface descriptor. */
+int LuacLink_EmitDllDef( const char *outDll, const char *def_path,
+                         const char *const *exports, size_t nexports,
+                         char *err, size_t errlen );
+
 #endif /* LUAC_LINK_PE_LINK_V2_H */

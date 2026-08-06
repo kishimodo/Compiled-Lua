@@ -84,6 +84,15 @@ typedef struct LcDriverOptions {
                                 1 = sequential (no threads), N>1 = pool of N.
                                 Byte-identity across values of jobs is a hard
                                 gate (tools/test-parallel-codegen.lua).       */
+  const char  *emit_def_path;/* --emit-def=<path>: write a .DEF module-
+                                definition file listing the DLL's exports
+                                next to the .dll. NULL = auto-derive
+                                (<dll basename>.def beside the DLL) when
+                                emit_dll is true; otherwise no .def is
+                                written. Ignored for .exe builds. Both
+                                MSVC (link /def) and MinGW dlltool consume
+                                the .def to produce the matching .lib /
+                                .dll.a import archive.                     */
   const char **force_pkgs;   /* -L forced packages                          */
   int          nforce_pkgs;
   LcEmitMode   emit_mode;    /* --emit=bytecode|ir|asm; LC_EMIT_NONE = off  */

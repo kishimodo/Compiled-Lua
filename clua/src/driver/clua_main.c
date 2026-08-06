@@ -95,6 +95,14 @@ static void usage( FILE *to ) {
         "  --emit-only      suppress the binary output even when -o is set\n"
         "                   (only meaningful with --emit=<mode>). With\n"
         "                   --emit-only the -o path is the dump destination.\n"
+        "  --emit-def=<path> / --emit-implib=<path>\n"
+        "                   for DLL builds, write a .DEF module-definition\n"
+        "                   file at <path> listing the DLL's exports. Both\n"
+        "                   MSVC (`link /def:foo.def /dll`) and MinGW\n"
+        "                   (`dlltool -d foo.def -D foo.dll -l foo.lib`)\n"
+        "                   consume the .def to synthesize the matching\n"
+        "                   import library. Default: <dll-basename>.def\n"
+        "                   beside the DLL. Ignored for .exe builds.\n"
         "\n"
         "environment:\n"
         "  CLUA_HOME        CLua installation root (lib\\runtime-aot.a ...)\n"
@@ -210,6 +218,12 @@ static int parse_build_args( CluaArgs *a, int argc, char **argv, int from,
             a->opt.emit_only = true;
         } else if ( ( emit_rc = parse_emit_arg( a, s ) ) != -1 ) {
             if ( emit_rc == 0 ) return 0;
+        } else if ( strncmp( s, "--emit-def=", 11 ) == 0 ) {
+            a->opt.emit_def_path = s + 11;
+        } else if ( strncmp( s, "--emit-implib=", 14 ) == 0 ) {
+            /* Alias: users reach for "implib"; we always emit the .def
+            ** (both MSVC link.exe and MinGW dlltool consume it). */
+            a->opt.emit_def_path = s + 14;
         } else if ( ( strcmp( s, "-L" ) == 0 || strcmp( s, "--link" ) == 0 )
                     && i + 1 < argc ) {
             if ( nforce < 63 ) {
