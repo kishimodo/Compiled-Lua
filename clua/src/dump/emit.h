@@ -54,4 +54,11 @@ int Lc_DumpIr( FILE *out, const struct LcModule *m );
 ** faithful without hiding bytes the disassembler cannot name. */
 int Lc_DumpAsm( FILE *out, const struct LcCodeModule *cm );
 
+/* Dump the front-end Proto tree (entry first, then nested p[] recursively)
+** as an indented tree. Node lines carry source/lines/params/vararg/stack,
+** counts of upvalues/constants/locals/children, and the named upvalue and
+** local slots. Higher-level than --emit=bytecode: no pc-indexed listing,
+** just the AST shape a user asking "what did the parser see?" wants. */
+int Lc_DumpAst( FILE *out, struct Proto *root );
+
 #endif /* LUAC_DUMP_EMIT_H */

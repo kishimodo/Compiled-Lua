@@ -49,8 +49,26 @@ typedef enum {
   LC_EMIT_NONE = 0,
   LC_EMIT_BYTECODE,   /* raw Lua 5.4 bytecode per Proto (like luac -l)     */
   LC_EMIT_IR,         /* the LcModule after the optimizer, before codegen  */
-  LC_EMIT_ASM         /* emitted x64 machine code as an assembly listing   */
+  LC_EMIT_ASM,        /* emitted x64 machine code as an assembly listing   */
+  LC_EMIT_AST         /* front-end Proto tree (types + nesting) as a tree  */
 } LcEmitMode;
+
+/* --strip=<mode> selector. Controls how aggressively the internal linker
+** removes debug/symbol information from the emitted PE:
+**   none  -- keep every symbol; grows the exe, useful for debugging
+**   debug -- drop the .clualn / .debug* sections (what happens without -g)
+**   all   -- drop everything the loader does not need (default when -g is
+**            off; a bare `-g` build promotes the default to `none` so the
+**            requested debug section is not immediately stripped again)
+** Byte-identity of a default build is preserved because the default (`all`)
+** matches the behavior every previous build already produced. Callers that
+** want to distinguish "user asked for --strip=all" from "driver defaulted
+** to all" test `strip_mode_explicit` alongside `strip_mode`. */
+typedef enum {
+  LC_STRIP_ALL   = 0,   /* default; drop debug info + COFF symbol table    */
+  LC_STRIP_DEBUG = 1,   /* drop .clualn / .debug* only                     */
+  LC_STRIP_NONE  = 2    /* keep every symbol                                */
+} LcStripMode;
 
 /* --output=<kind> selector. exe (default) matches every existing test; dll
 ** flips IMAGE_FILE_DLL, emits an export directory, and pulls aot_entry_dll.o
@@ -128,6 +146,17 @@ typedef struct LcDriverOptions {
   const char  *cache_dir;    /* --cache-dir=<path>: override the default cache
                                 dir (%LOCALAPPDATA%\clua\cache or
                                 $XDG_CACHE_HOME/clua). NULL = use the default. */
+  const char  *depfile_path; /* --emit-depfile=<path> / -MD: write a make-
+                                style dependency file listing every module
+                                the resolver walked. NULL = no depfile. */
+  int          strip_mode;   /* --strip=none|debug|all: LcStripMode. Default
+                                is LC_STRIP_ALL, preserving byte-identity of
+                                every existing build. */
+  bool         strip_mode_explicit; /* true iff the user passed --strip=<x>.
+                                When false, the driver quietly upgrades the
+                                default to STRIP_NONE if -g / debug_line_info
+                                was requested, so the emitted .clualn is not
+                                immediately stripped again. */
 } LcDriverOptions;
 
 /* Returns process exit code. */

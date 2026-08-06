@@ -22,8 +22,11 @@
 #ifdef LUAC_CLUA_STANDALONE
 
 #include "aotc.h"
+#include "argexpand.h"
+#include "bugreport.h"
 #include "common/version.h"   /* CLUA_VERSION_STRING -- the single source of truth */
 #include "compiler/diag_pretty.h"
+#include "compiler/paths.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,7 +34,7 @@
 #include <process.h>   /* _getpid, _spawnv */
 #include <direct.h>    /* _getcwd (clua init project name) */
 #ifdef _WIN32
-#include <windows.h>   /* GetModuleFileNameA: exe-relative docs discovery */
+#include <windows.h>   /* GetModuleFileNameA: exe-relative docs + --print-runtime-path */
 #endif
 
 #define CLUA_VERSION CLUA_VERSION_STRING
@@ -49,8 +52,15 @@ static void usage( FILE *to ) {
         "                                    rover.toml, .gitignore)\n"
         "  clua explain <code>               show the reference page for a\n"
         "                                    diagnostic code (E001, W004, ...)\n"
+        "  clua bug-report [--out=<path>]    write a Markdown bug report\n"
+        "                                    (toolchain version, target triple,\n"
+        "                                    CLUA_* env, OS/CWD, git SHA)\n"
         "  clua version                      print version\n"
         "  clua help                         this help\n"
+        "  clua --print-target-triple        the compiler's target triple\n"
+        "  clua --print-search-dirs          CLUA_HOME + package + sysroot dirs\n"
+        "  clua --print-runtime-path         path to runtime-aot.a\n"
+        "  clua --print-package-path         path to bundled packages\n"
         "\n"
         "build options:\n"
         "  -o <out.exe>     output path (default: <input-basename>.exe)\n"
@@ -151,6 +161,21 @@ static void usage( FILE *to ) {
         "                   <path> (or creates it). Use this from a build\n"
         "                   driver that compiles many entry points and wants\n"
         "                   one JSON array per workspace.\n"
+        "  --emit-depfile=<path> / -MD\n"
+        "                   write a make-style dependency file listing every\n"
+        "                   module the resolver walked. `-MD` derives the\n"
+        "                   path as <output-basename>.d beside the exe.\n"
+        "  --strip=none|debug|all\n"
+        "                   linker strip mode. `all` (default) drops every\n"
+        "                   debug/symbol byte the loader does not need;\n"
+        "                   `debug` drops .clualn / .debug* but keeps other\n"
+        "                   symbols; `none` keeps everything (grows the exe).\n"
+        "                   -g without --strip auto-upgrades to `none` so the\n"
+        "                   requested .clualn actually survives the link.\n"
+        "  @<file>          any argument starting with `@` is treated as a\n"
+        "                   response file: its whitespace-separated tokens\n"
+        "                   are spliced into argv at that position (one level\n"
+        "                   deep; nested @ is left as a literal token).\n"
         "\n"
         "environment:\n"
         "  CLUA_HOME        CLua installation root (lib\\runtime-aot.a ...)\n"
@@ -219,8 +244,9 @@ static int parse_emit_arg( CluaArgs *a, const char *s ) {
     if ( strcmp( val, "bytecode" ) == 0 ) { a->opt.emit_mode = LC_EMIT_BYTECODE; return 1; }
     if ( strcmp( val, "ir"       ) == 0 ) { a->opt.emit_mode = LC_EMIT_IR;       return 1; }
     if ( strcmp( val, "asm"      ) == 0 ) { a->opt.emit_mode = LC_EMIT_ASM;      return 1; }
+    if ( strcmp( val, "ast"      ) == 0 ) { a->opt.emit_mode = LC_EMIT_AST;      return 1; }
     fprintf( stderr, "clua: unknown --emit mode '%s' "
-                     "(supported: bytecode, ir, asm)\n", val );
+                     "(supported: bytecode, ir, asm, ast)\n", val );
     return 0;
 }
 
@@ -328,6 +354,25 @@ static int parse_build_args( CluaArgs *a, int argc, char **argv, int from,
         } else if ( strncmp( s, "--emit-compdb-append=", 21 ) == 0 ) {
             a->opt.compdb_path   = s + 21;
             a->opt.compdb_append = true;
+        } else if ( strncmp( s, "--emit-depfile=", 15 ) == 0 ) {
+            /* Make-style dependency file listing every module the resolver
+            ** walked, mirroring gcc's `-MF <path>`. Off unless the user asks. */
+            a->opt.depfile_path = s + 15;
+        } else if ( strcmp( s, "-MD" ) == 0 ) {
+            /* gcc-compatible shorthand: --emit-depfile=<output-basename>.d.
+            ** lc_drive derives the real path (needs the resolved output). */
+            a->opt.depfile_path = "-MD";
+        } else if ( strncmp( s, "--strip=", 8 ) == 0 ) {
+            const char *m = s + 8;
+            if      ( strcmp( m, "none"  ) == 0 ) a->opt.strip_mode = LC_STRIP_NONE;
+            else if ( strcmp( m, "debug" ) == 0 ) a->opt.strip_mode = LC_STRIP_DEBUG;
+            else if ( strcmp( m, "all"   ) == 0 ) a->opt.strip_mode = LC_STRIP_ALL;
+            else {
+                fprintf( stderr, "clua: unknown --strip mode '%s' "
+                                 "(supported: none, debug, all)\n", m );
+                return 0;
+            }
+            a->opt.strip_mode_explicit = true;
         } else if ( strncmp( s, "--emit-def=", 11 ) == 0 ) {
             a->opt.emit_def_path = s + 11;
         } else if ( strncmp( s, "--emit-implib=", 14 ) == 0 ) {
@@ -660,25 +705,132 @@ static int cmd_explain( int argc, char **argv, int from ) {
     return 0;
 }
 
-int main( int argc, char **argv ) {
-    const char *cmd;
+/* --print-<name> diagnostic helpers (see the four --print-* CLI flags):
+** each one prints ONE line and exits 0. Same behaviour as clang / gcc's
+** `-print-<name>` flags. */
+static void print_search_dirs( void ) {
+    const char *home = getenv( "CLUA_HOME" );
+    char        pkgs[ 1024 ] = { 0 };
+    printf( "CLUA_HOME=%s\n", ( home && home[ 0 ] ) ? home : "(unset)" );
+    if ( Paths_BuiltinPackagesRoot( pkgs, sizeof( pkgs ) ) ) {
+        printf( "packages=%s\n", pkgs );
+    } else {
+        printf( "packages=(not found)\n" );
+    }
+    printf( "cwd-sysroot=%s\n", "build\\bin\\sysroot" );
+}
 
-    if ( argc < 2 ) { usage( stderr ); return 2; }
+static void print_runtime_path( void ) {
+    const char *home = getenv( "CLUA_HOME" );
+    char        exedir[ 1024 ] = { 0 };
+    if ( home && home[ 0 ] ) {
+        printf( "%s\\lib\\runtime-aot.a\n", home );
+        return;
+    }
+    if ( GetModuleFileNameA( NULL, exedir, sizeof( exedir ) ) > 0 ) {
+        char *slash = strrchr( exedir, '\\' );
+        if ( slash ) *slash = '\0';
+        printf( "%s\\lib\\runtime-aot.a\n", exedir );
+        return;
+    }
+    printf( "runtime-aot.a\n" );
+}
+
+static void print_package_path( void ) {
+    char pkgs[ 1024 ] = { 0 };
+    if ( Paths_BuiltinPackagesRoot( pkgs, sizeof( pkgs ) ) ) {
+        printf( "%s\n", pkgs );
+    } else {
+        printf( "(not found)\n" );
+    }
+}
+
+/* `clua bug-report [--out=<path>]` -- collect toolchain state into a
+** self-contained Markdown file the user can drop into an issue. Doc:
+** clua/src/driver/bugreport.h. Returns the CLI exit code. */
+static int cmd_bug_report( int argc, char **argv, int from ) {
+    const char *out = NULL;
+    char        used[ 512 ] = { 0 };
+    char        err[ 256 ] = { 0 };
+    int         i;
+    for ( i = from; i < argc; i++ ) {
+        const char *s = argv[ i ];
+        if ( strncmp( s, "--out=", 6 ) == 0 ) {
+            out = s + 6;
+        } else if ( strcmp( s, "--out" ) == 0 && i + 1 < argc ) {
+            out = argv[ ++i ];
+        } else {
+            fprintf( stderr,
+                     "clua: unknown argument '%s' to bug-report\n", s );
+            return 2;
+        }
+    }
+    if ( !LcBugreport_Write( out, used, sizeof( used ),
+                             err, sizeof( err ) ) ) {
+        fprintf( stderr, "clua: bug-report failed: %s\n",
+                 err[ 0 ] ? err : "(no detail)" );
+        return 1;
+    }
+    printf( "[+] wrote bug report to %s\n", used );
+    return 0;
+}
+
+int main( int raw_argc, char **raw_argv ) {
+    const char *cmd;
+    int         argc = 0;
+    char      **argv = LcArg_Expand( raw_argc, raw_argv, &argc );
+    int         rc;
+
+    if ( argv == NULL ) return 2;
+
+    /* --print-* flags win over everything else so `clua --print-...` works
+    ** at the top level too, not just inside a build. Scan argv up front. */
+    {
+        int i;
+        for ( i = 1; i < argc; i++ ) {
+            const char *a = argv[ i ];
+            if ( strcmp( a, "--print-target-triple" ) == 0 ) {
+                printf( "%s\n", LcBugreport_TargetTriple( ) );
+                LcArg_FreeExpanded( argc, argv );
+                return 0;
+            }
+            if ( strcmp( a, "--print-search-dirs" ) == 0 ) {
+                print_search_dirs( );
+                LcArg_FreeExpanded( argc, argv );
+                return 0;
+            }
+            if ( strcmp( a, "--print-runtime-path" ) == 0 ) {
+                print_runtime_path( );
+                LcArg_FreeExpanded( argc, argv );
+                return 0;
+            }
+            if ( strcmp( a, "--print-package-path" ) == 0 ) {
+                print_package_path( );
+                LcArg_FreeExpanded( argc, argv );
+                return 0;
+            }
+        }
+    }
+
+    if ( argc < 2 ) { usage( stderr ); LcArg_FreeExpanded( argc, argv ); return 2; }
     cmd = argv[ 1 ];
 
-    if ( strcmp( cmd, "build" ) == 0 )   return cmd_build( argc, argv, 2 );
-    if ( strcmp( cmd, "run" ) == 0 )     return cmd_run( argc, argv, 2 );
-    if ( strcmp( cmd, "check" ) == 0 )   return cmd_check( argc, argv, 2 );
-    if ( strcmp( cmd, "init" ) == 0 )    return cmd_init( argc, argv, 2 );
-    if ( strcmp( cmd, "explain" ) == 0 ) return cmd_explain( argc, argv, 2 );
+    if ( strcmp( cmd, "build"      ) == 0 ) { rc = cmd_build  ( argc, argv, 2 ); goto done; }
+    if ( strcmp( cmd, "run"        ) == 0 ) { rc = cmd_run    ( argc, argv, 2 ); goto done; }
+    if ( strcmp( cmd, "check"      ) == 0 ) { rc = cmd_check  ( argc, argv, 2 ); goto done; }
+    if ( strcmp( cmd, "init"       ) == 0 ) { rc = cmd_init   ( argc, argv, 2 ); goto done; }
+    if ( strcmp( cmd, "explain"    ) == 0 ) { rc = cmd_explain( argc, argv, 2 ); goto done; }
+    if ( strcmp( cmd, "bug-report" ) == 0 ) { rc = cmd_bug_report( argc, argv, 2 ); goto done; }
     if ( strcmp( cmd, "version" ) == 0 || strcmp( cmd, "--version" ) == 0 ||
          strcmp( cmd, "-v" ) == 0 ) {
         printf( "clua " CLUA_VERSION " (Lua 5.4, x86-64 Windows)\n" );
+        LcArg_FreeExpanded( argc, argv );
         return 0;
     }
     if ( strcmp( cmd, "help" ) == 0 || strcmp( cmd, "--help" ) == 0 ||
          strcmp( cmd, "-h" ) == 0 ) {
         usage( stdout );
+        LcArg_FreeExpanded( argc, argv );
         return 0;
     }
 
@@ -686,12 +838,17 @@ int main( int argc, char **argv ) {
     {
         size_t len = strlen( cmd );
         if ( len > 4 && strcmp( cmd + len - 4, ".lua" ) == 0 ) {
-            return cmd_build( argc, argv, 1 );
+            rc = cmd_build( argc, argv, 1 );
+            goto done;
         }
     }
 
     fprintf( stderr, "clua: unknown command '%s' (see `clua help`)\n", cmd );
+    LcArg_FreeExpanded( argc, argv );
     return 2;
+done:
+    LcArg_FreeExpanded( argc, argv );
+    return rc;
 }
 
 #else /* !LUAC_CLUA_STANDALONE */

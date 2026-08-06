@@ -73,6 +73,7 @@ int LuacLink_LinkProgram( const char *userObj, const char *outExe,
                           int shared_rt, int ld_internal, int no_gc_sections,
                           int output_kind,
                           struct _RESOLVED_EXPORT *exports, size_t nexports,
+                          int strip_mode,
                           char *err, size_t errlen );
 
 /* Emit the .DEF module-definition file that describes a DLL build's exports.

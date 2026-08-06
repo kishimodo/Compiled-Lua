@@ -212,6 +212,9 @@ typedef struct {
     const char  *entry;
     uint64_t     image_base;
     int          gc_sections;   /* run dead-section elimination (default 1)  */
+    int          strip_mode;    /* LC_PE_STRIP_ALL / _DEBUG / _NONE; picks
+                                   whether .clualn survives gc-sections and
+                                   whether symbol/debug bytes stay in the PE. */
 
     /* DLL export directory. Populated only when output_kind == DLL. Names
     ** and per-export target symbols are copied here from the caller's inputs
@@ -1177,18 +1180,23 @@ static const int32_t *gsym_cache_row( Linker *L, const LcCoffObj *o ) {
 }
 
 /* Sections kept even when no live relocation targets them. */
-static int gc_keep_by_name( const char *n ) {
+static int gc_keep_by_name( const char *n, int strip_mode ) {
     if ( strncmp( n, ".ctors", 6 ) == 0 ) return 1;
     if ( strncmp( n, ".dtors", 6 ) == 0 ) return 1;
     if ( strncmp( n, ".CRT",   4 ) == 0 ) return 1;  /* .CRT XC/XI/XL/XT init  */
     if ( strncmp( n, ".tls",   4 ) == 0 ) return 1;  /* TLS template/callbacks*/
     if ( strncmp( n, ".pdata", 6 ) == 0 ) return 1;  /* SEH unwind (loader)   */
     if ( strncmp( n, ".xdata", 6 ) == 0 ) return 1;
-    /* -g / --debug: mirror .pdata/.xdata -- debug info sections are reached
-    ** by an external tool, not by ordinary relocations, so mark them live
-    ** unconditionally (belt-and-suspenders; the user object's sections are
-    ** already all roots, but a later refactor should not have to remember). */
-    if ( strncmp( n, ".clualn", 7 ) == 0 ) return 1;
+    /* -g / --debug emits .clualn per compiled function. Under the default
+    ** --strip=all the section is a byproduct of that flag alone -- if the
+    ** user did not ask for -g, no .clualn is present at all and the check
+    ** is inert. Under --strip=none we mirror .pdata/.xdata (keep) so a
+    ** downstream tool can find the section even if nothing directly refs it;
+    ** under --strip=debug we let gc-sections sweep any surviving .clualn
+    ** (matches what happens without -g). */
+    if ( strncmp( n, ".clualn", 7 ) == 0 ) {
+        return ( strip_mode == LC_PE_STRIP_NONE ) ? 1 : 0;
+    }
     /* mingw pseudo-reloc list bracket sections */
     if ( strstr( n, "RUNTIME_PSEUDO_RELOC_LIST" ) ) return 1;
     return 0;
@@ -1291,14 +1299,21 @@ static int gc_sections( Linker *L, const char *const *force_undef, int nforce ) 
     /* Start everything dead; roots flip live + enqueue. */
     for ( i = 0; i < L->ncontribs; i++ ) L->contribs[i].dropped = 1;
 
-    /* ROOT 1: every section of the user object (objs[0]) + KEEP-by-name. */
+    /* ROOT 1: every section of the user object (objs[0]) + KEEP-by-name.
+    ** --strip mode override: under STRIP_DEBUG or STRIP_ALL, a `.clualn`
+    ** section coming from the user object is dropped even though the
+    ** normal is_user rule would keep it. Under STRIP_NONE we honour the
+    ** blanket is_user root as before. */
     for ( i = 0; i < L->ncontribs; i++ ) {
         Contrib *c = &L->contribs[i];
         const char *n = c->obj->sections[ c->sec_index ].name_long
                       ? c->obj->sections[ c->sec_index ].name_long
                       : c->obj->sections[ c->sec_index ].name;
         int is_user = ( L->nobjs > 0 && c->obj == L->objs[0] );
-        if ( is_user || gc_keep_by_name( n ) ) {
+        int strip_debug_here = ( L->strip_mode != LC_PE_STRIP_NONE ) &&
+                               ( strncmp( n, ".clualn", 7 ) == 0 );
+        if ( ( is_user && !strip_debug_here ) ||
+             gc_keep_by_name( n, L->strip_mode ) ) {
             if ( c->dropped ) { c->dropped = 0; queue[ qn++ ] = i; }
         }
     }
@@ -2682,6 +2697,10 @@ int LcPe_Link( const LcPeLinkInputs *in, char *err, size_t errlen ) {
     L.entry = ( in->entry && in->entry[0] ) ? in->entry : PE_DEF_ENTRY;
     L.image_base = PE_IMAGE_BASE;
     L.gc_sections = !in->no_gc_sections;   /* default ON; escape via input flag */
+    L.strip_mode  = in->strip_mode;        /* 0 = all (default), 1 = debug,
+                                             ** 2 = none. Read by gc_sections
+                                             ** to decide whether the user
+                                             ** object's .clualn survives. */
     L.output_kind = in->output_kind;
 
     /* DLL: copy the export-name list into linker-owned storage now so the

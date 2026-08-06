@@ -42,6 +42,24 @@
    (sys, driver, etc.) is added later. */
 enum { LC_PE_OUTPUT_EXE = 0, LC_PE_OUTPUT_DLL = 1 };
 
+/* --strip=<mode>, mirrored into the linker so gc_keep_by_name / debug-section
+** emission can react. Kept in lock-step with driver/aotc.h LcStripMode enum:
+**   LC_PE_STRIP_ALL   (0): default; drop every debug section (.clualn, ...)
+**                          -- matches the pre-flag baseline byte-for-byte.
+**   LC_PE_STRIP_DEBUG (1): same as ALL today (nothing else the loader can
+**                          ignore is emitted right now); reserved for the
+**                          future when the internal linker starts writing
+**                          a COFF symbol table by default.
+**   LC_PE_STRIP_NONE  (2): keep every section, including .clualn even when
+**                          gc-sections would otherwise sweep it. Grows the
+**                          exe; useful when a downstream debugger wants the
+**                          native-pc -> Lua-line map without recompiling. */
+enum {
+    LC_PE_STRIP_ALL   = 0,
+    LC_PE_STRIP_DEBUG = 1,
+    LC_PE_STRIP_NONE  = 2
+};
+
 typedef struct LcPeLinkInputs {
     const char *const *objects;     /* explicit .o paths, loaded in order    */
     int                nobjects;
@@ -72,6 +90,9 @@ typedef struct LcPeLinkInputs {
     const char        *dll_module_name; /* the DLLName field in the export dir;
                                            NULL falls back to the basename of
                                            out_path                             */
+    int                strip_mode;      /* LC_PE_STRIP_ALL (default) /
+                                           _DEBUG / _NONE. Threaded from the
+                                           driver's --strip=<mode>.             */
 } LcPeLinkInputs;
 
 /* Link. Returns 1 on success, 0 + a message in err. */

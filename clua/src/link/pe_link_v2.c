@@ -374,6 +374,7 @@ static int LinkInternal( const LcToolchain *tc, const char *userObj,
                          const char *const *export_names,
                          const char *const *export_abi_shapes,
                          int nexport_names,
+                         int strip_mode,
                          char *err, size_t errlen ) {
     char  objbuf[ 6 ][ LC_PATH_MAX ];
     char  arcbuf[ N_CRT_ARCHIVES + 2 ][ LC_PATH_MAX ];
@@ -450,6 +451,7 @@ static int LinkInternal( const LcToolchain *tc, const char *userObj,
     in.export_abi_shapes  = export_abi_shapes;
     in.nexport_names      = nexport_names;
     in.dll_module_name    = NULL; /* default: basename of out_path            */
+    in.strip_mode         = strip_mode;
 
     return LcPe_Link( &in, err, errlen );
 }
@@ -460,6 +462,7 @@ int LuacLink_LinkProgram( const char *userObj, const char *outExe,
                           int shared_rt, int ld_internal, int no_gc_sections,
                           int output_kind,
                           struct _RESOLVED_EXPORT *exports, size_t nexports,
+                          int strip_mode,
                           char *err, size_t errlen ) {
     char        cmd[ 4096 ];
     char        staged_out[ MAX_PATH ];
@@ -610,6 +613,7 @@ int LuacLink_LinkProgram( const char *userObj, const char *outExe,
                             used_libs, no_gc_sections,
                             output_kind, export_name_ptrs, export_shape_ptrs,
                             nexport_name_ptrs,
+                            strip_mode,
                             err, errlen ) ) {
             DeleteFileA( staged_out );
             free( export_name_ptrs );
@@ -646,14 +650,20 @@ int LuacLink_LinkProgram( const char *userObj, const char *outExe,
            used ones to pull their import thunks (otherwise &Clua_OpenStrlib is
            null and the library is never opened). */
         if ( !MakeStagedOutput( outExe, staged_out, err, errlen ) ) return 0;
-        snprintf( cmd, sizeof( cmd ),
-                  "%s -o \"%s\" \"%s\" \"%s\" \"%s\" %s%s%s\"%s\" "
-                  "-Wl,--subsystem,console -s -lm -lkernel32 -ladvapi32",
-                  GccCommand( ), staged_out, userObj, entry_obj, tc.protoinit_o,
-                  require_ffi  ? "-Wl,--undefined=Clua_OpenFfi "  : "",
-                  require_coro ? "-Wl,--undefined=Coro_OpenLib " : "",
-                  libundef,
-                  tc.rt_implib );
+        /* --strip=none disables ld's -s so the COFF symbol table survives
+        ** the link (grows the exe; useful for debugging). Default keeps -s. */
+        {
+            const char *strip_flag =
+                ( strip_mode == LC_PE_STRIP_NONE ) ? "" : "-s ";
+            snprintf( cmd, sizeof( cmd ),
+                      "%s -o \"%s\" \"%s\" \"%s\" \"%s\" %s%s%s\"%s\" "
+                      "-Wl,--subsystem,console %s-lm -lkernel32 -ladvapi32",
+                      GccCommand( ), staged_out, userObj, entry_obj, tc.protoinit_o,
+                      require_ffi  ? "-Wl,--undefined=Clua_OpenFfi "  : "",
+                      require_coro ? "-Wl,--undefined=Coro_OpenLib " : "",
+                      libundef,
+                      tc.rt_implib, strip_flag );
+        }
         rc = run_cmd( cmd );
         if ( rc != 0 ) {
             DeleteFileA( staged_out );
@@ -706,19 +716,25 @@ int LuacLink_LinkProgram( const char *userObj, const char *outExe,
     ** discrepancy that tools/test-clua-cli.lua caught as a size-parity failure.
     ** Reordering the archives instead would not work: runtime-aot.a's helpers call
     ** into the Lua core, so neither single ordering satisfies both directions. */
-    snprintf( cmd, sizeof( cmd ),
-              "%s -o \"%s\" \"%s\" \"%s\" %s%s%s%s"
-              "-Wl,--undefined=__mingw_sprintf "
-              "-Wl,--undefined=__mingw_fprintf "
-              "-Wl,--undefined=__mingw_strtod "
-              "\"%s\" \"%s\" "
-              "-Wl,--subsystem,console -Wl,--gc-sections -s "
-              "-lm -lkernel32 -ladvapi32",
-              GccCommand( ), staged_out, userObj, entry_obj, lvm_obj,
-              require_ffi  ? "-Wl,--undefined=Clua_OpenFfi "  : "",
-              require_coro ? "-Wl,--undefined=Coro_OpenLib " : "",
-              libundef,
-              tc.runtime_a, tc.lualib_a );
+    /* --strip=none suppresses ld's -s so the COFF symbol table stays put.
+    ** Default (STRIP_ALL) matches the pre-flag baseline byte-for-byte. */
+    {
+        const char *strip_flag =
+            ( strip_mode == LC_PE_STRIP_NONE ) ? "" : "-s ";
+        snprintf( cmd, sizeof( cmd ),
+                  "%s -o \"%s\" \"%s\" \"%s\" %s%s%s%s"
+                  "-Wl,--undefined=__mingw_sprintf "
+                  "-Wl,--undefined=__mingw_fprintf "
+                  "-Wl,--undefined=__mingw_strtod "
+                  "\"%s\" \"%s\" "
+                  "-Wl,--subsystem,console -Wl,--gc-sections %s"
+                  "-lm -lkernel32 -ladvapi32",
+                  GccCommand( ), staged_out, userObj, entry_obj, lvm_obj,
+                  require_ffi  ? "-Wl,--undefined=Clua_OpenFfi "  : "",
+                  require_coro ? "-Wl,--undefined=Coro_OpenLib " : "",
+                  libundef,
+                  tc.runtime_a, tc.lualib_a, strip_flag );
+    }
     rc = run_cmd( cmd );
     if ( rc != 0 ) {
         DeleteFileA( staged_out );

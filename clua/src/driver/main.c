@@ -32,6 +32,9 @@
 #include "../driver/closed_world.h"
 #include "../driver/supported_ops.h"
 #include "../driver/compdb.h"
+#include "../driver/argexpand.h"
+#include "../driver/bugreport.h"
+#include "../common/version.h"
 #include "../dump/emit.h"
 
 /* Reused front-end produces a Proto*; we read its nested-proto array (p[]) to
@@ -208,6 +211,74 @@ static FILE *OpenEmitOut( const LcDriverOptions *opt, int diagnostic_owns_o,
     return stdout;
 }
 
+/* Escape a single path token for a make-style depfile: whitespace and $ /
+** # / : need backslash-quoting so `make` reads the token as one name.
+** Writes to `out` (size out_size) and returns the number of bytes written,
+** truncating to out_size - 1 if the input is oversized. */
+static size_t make_escape( const char *src, char *out, size_t out_size ) {
+    size_t si = 0, oi = 0;
+    if ( out_size == 0 ) return 0;
+    while ( src[ si ] != '\0' && oi + 2 < out_size ) {
+        unsigned char c = ( unsigned char )src[ si++ ];
+        if ( c == ' ' || c == '\t' || c == '#' || c == '$' ) {
+            out[ oi++ ] = '\\';
+        }
+        out[ oi++ ] = ( char )c;
+    }
+    out[ oi ] = '\0';
+    return oi;
+}
+
+/* Derive a "<basename>.d" path from an output path, into `out` (size
+** out_size). Trims the last extension if present. Returns 0 on overflow. */
+static int derive_depfile_path( const char *output_path,
+                                char *out, size_t out_size ) {
+    const char *base = output_path, *p, *dot;
+    size_t n;
+    if ( output_path == NULL || out == NULL || out_size == 0 ) return 0;
+    for ( p = output_path; *p; p++ ) {
+        if ( *p == '/' || *p == '\\' ) base = p + 1;
+    }
+    dot = strrchr( base, '.' );
+    n = ( dot && dot != base ) ? ( size_t )( dot - output_path )
+                                : strlen( output_path );
+    if ( n + 3 >= out_size ) return 0;
+    memcpy( out, output_path, n );
+    memcpy( out + n, ".d", 3 );
+    return 1;
+}
+
+/* Write a make-style depfile listing every path in `modules`. Uses the
+** `<target>: <dep1> <dep2>` shape make / ninja both understand; wraps
+** each token through make_escape so paths with spaces survive. */
+static int write_depfile( const char *depfile_path,
+                          const char *target_path,
+                          const RESOLVED_MODULE_T *modules, size_t nmodules ) {
+    char  esc[ 1024 ];
+    FILE *f;
+    size_t i;
+
+    if ( depfile_path == NULL || depfile_path[ 0 ] == '\0' ) return 0;
+    if ( target_path == NULL || target_path[ 0 ] == '\0' ) target_path = "a.out";
+
+    f = fopen( depfile_path, "wb" );
+    if ( f == NULL ) return 0;
+
+    make_escape( target_path, esc, sizeof( esc ) );
+    fputs( esc, f );
+    fputs( ":", f );
+    for ( i = 0; i < nmodules; i++ ) {
+        const char *p = modules[ i ].Path;
+        if ( p == NULL || p[ 0 ] == '\0' ) continue;
+        make_escape( p, esc, sizeof( esc ) );
+        fputc( ' ', f );
+        fputs( esc, f );
+    }
+    fputc( '\n', f );
+    fclose( f );
+    return 1;
+}
+
 static const char *DirOf( const char *Path, char *Buf, size_t BufSize ) {
     size_t L = strlen( Path );
     size_t I;
@@ -357,6 +428,44 @@ int lc_drive( const LcDriverOptions *opt ) {
             return 1;
         }
     }
+    /* --emit-depfile=<path> / -MD: dump the make-style dependency file the
+    ** moment resolve is complete. All the paths we need (each module's on-
+    ** disk source file) live in RESOLVE_RESULT_T already. Fires before the
+    ** rest of the pipeline so an editor / IDE can pick up the deps even if
+    ** the build itself fails later; matches the compile_commands.json
+    ** ordering already implemented above.
+    **
+    ** `-MD` is signalled with the sentinel value "-MD" (the driver level
+    ** doesn't know the output basename until after this point); derive the
+    ** actual path from opt->output when we see the sentinel. */
+    if ( opt->depfile_path != NULL && opt->depfile_path[ 0 ] != '\0' ) {
+        const char *target = ( opt->output != NULL && opt->output[ 0 ] != '\0' )
+                              ? opt->output
+                              : opt->input;
+        char        derived_dep[ 1024 ] = { 0 };
+        const char *dep_target = opt->depfile_path;
+        if ( strcmp( opt->depfile_path, "-MD" ) == 0 ) {
+            const char *basis = ( opt->output != NULL && opt->output[ 0 ] != '\0' )
+                                  ? opt->output : opt->input;
+            if ( !derive_depfile_path( basis, derived_dep,
+                                       sizeof( derived_dep ) ) ) {
+                fprintf( stderr, "aotc: error: -MD path derivation failed "
+                                 "(output path too long)\n" );
+                Resolve_FreeResult( &res );
+                return 1;
+            }
+            dep_target = derived_dep;
+        }
+        if ( !write_depfile( dep_target, target,
+                             res.Modules, res.Count ) ) {
+            fprintf( stderr,
+                     "aotc: error: cannot write depfile '%s'\n",
+                     dep_target );
+            Resolve_FreeResult( &res );
+            return 1;
+        }
+    }
+
     if ( opt->verbose ) {
         LONGLONG t1 = qpc_now( );
         T.resolve_ticks = t1 - t0;
@@ -476,6 +585,21 @@ int lc_drive( const LcDriverOptions *opt ) {
         FILE *of = OpenEmitOut( opt, skip_binary, &close_me );
         if ( of == NULL ) goto cleanup;
         Lc_DumpBytecode( of, entryProto );
+        fflush( of );
+        if ( close_me ) fclose( of );
+        if ( skip_binary ) { rc = 0; goto cleanup; }
+    }
+
+    /* --emit=ast: dump the front-end Proto tree as an indented tree of
+    ** node shapes (params, locals, upvalues, constants, children). Same
+    ** dump timing as --emit=bytecode (right after front-end resolve,
+    ** before IR lift) so both dumps reflect the parsed structure without
+    ** any optimizer transforms in between. */
+    if ( opt->emit_mode == LC_EMIT_AST ) {
+        int close_me = 0;
+        FILE *of = OpenEmitOut( opt, skip_binary, &close_me );
+        if ( of == NULL ) goto cleanup;
+        Lc_DumpAst( of, entryProto );
         fflush( of );
         if ( close_me ) fclose( of );
         if ( skip_binary ) { rc = 0; goto cleanup; }
@@ -725,7 +849,18 @@ int lc_drive( const LcDriverOptions *opt ) {
         /* Programs that never mention "debug" can't activate debug hooks, so
         ** their exes drop the bytecode interpreter (same conservative scan
         ** that gates the -O1 type proofs). Programs referencing ffi/bit get
-        ** the FFI initialization anchor linked in. */
+        ** the FFI initialization anchor linked in.
+        **
+        ** --strip default is LC_STRIP_ALL (byte-identical to the pre-flag
+        ** baseline). When -g was requested WITHOUT an explicit --strip=<x>,
+        ** promote to LC_STRIP_NONE so the .clualn section the codegen just
+        ** emitted actually survives the link -- otherwise -g would be a
+        ** no-op under the default strip. Explicit --strip=debug / =all with
+        ** -g wins (matches gcc: `-g -s` strips debug). */
+        int effective_strip = opt->strip_mode;
+        if ( !opt->strip_mode_explicit && opt->debug_line_info ) {
+            effective_strip = LC_STRIP_NONE;
+        }
         if ( !LuacLink_LinkProgram( obj_path, opt->output,
                                     !lc_module_uses_debug( m ),
                                     res.RequiresFfi || lc_module_uses_ffi( m ),
@@ -736,6 +871,7 @@ int lc_drive( const LcDriverOptions *opt ) {
                                     opt->no_gc_sections,
                                     output_kind,
                                     res.Exports, res.ExportCount,
+                                    effective_strip,
                                     err, sizeof( err ) ) ) {
             fprintf( stderr, "aotc: error: link failed: %s\n",
                      err[0] ? err : "(unknown)" );
@@ -832,15 +968,95 @@ static void usage( const char *argv0 ) {
              "[--shared-rt] [--output=exe|dll|obj|lib] [-shared] "
              "[--emit-def=<path>] "
              "[--emit-compdb=<path>|--emit-compdb-append=<path>] "
-             "[-v|--verbose]\n",
+             "[--emit-depfile=<path>|-MD] [--emit=ast|bytecode|ir|asm] "
+             "[--strip=none|debug|all] "
+             "[-v|--verbose] "
+             "[@<response-file>]\n"
+             "  --print-target-triple / --print-search-dirs / "
+             "--print-runtime-path / --print-package-path exit after printing.\n",
              argv0 );
 }
 
-int main( int argc, char **argv ) {
+/* Shared print helpers: one line to stdout and return 0 so the wrapper
+** callers can `exit(rc)` immediately without touching the argv scanner. */
+static void print_search_dirs( void ) {
+    const char *home = getenv( "CLUA_HOME" );
+    char        pkgs[ 1024 ] = { 0 };
+    printf( "CLUA_HOME=%s\n", ( home && home[ 0 ] ) ? home : "(unset)" );
+    if ( Paths_BuiltinPackagesRoot( pkgs, sizeof( pkgs ) ) ) {
+        printf( "packages=%s\n", pkgs );
+    } else {
+        printf( "packages=(not found)\n" );
+    }
+    printf( "cwd-sysroot=%s\n", "build\\bin\\sysroot" );
+}
+
+static void print_runtime_path( void ) {
+    const char *home = getenv( "CLUA_HOME" );
+    char        exedir[ 1024 ] = { 0 };
+    /* Match the resolution order LuacLink_LinkProgram uses; without wanting
+    ** to duplicate ResolveToolchain, we print the FIRST plausible location
+    ** in the same priority order: CLUA_HOME\lib, <exedir>\lib, <exedir>. */
+    if ( home && home[ 0 ] ) {
+        printf( "%s\\lib\\runtime-aot.a\n", home );
+        return;
+    }
+    if ( GetModuleFileNameA( NULL, exedir, sizeof( exedir ) ) > 0 ) {
+        char *slash = strrchr( exedir, '\\' );
+        if ( slash ) *slash = '\0';
+        printf( "%s\\lib\\runtime-aot.a\n", exedir );
+        return;
+    }
+    printf( "runtime-aot.a\n" );
+}
+
+static void print_package_path( void ) {
+    char pkgs[ 1024 ] = { 0 };
+    if ( Paths_BuiltinPackagesRoot( pkgs, sizeof( pkgs ) ) ) {
+        printf( "%s\n", pkgs );
+    } else {
+        printf( "(not found)\n" );
+    }
+}
+
+/* Returns 1 if `a` was handled as a --print-* flag; caller should exit(0). */
+static int handle_print_flag( const char *a ) {
+    if ( strcmp( a, "--print-target-triple" ) == 0 ) {
+        printf( "%s\n", LcBugreport_TargetTriple( ) );
+        return 1;
+    }
+    if ( strcmp( a, "--print-search-dirs" ) == 0 ) {
+        print_search_dirs( );
+        return 1;
+    }
+    if ( strcmp( a, "--print-runtime-path" ) == 0 ) {
+        print_runtime_path( );
+        return 1;
+    }
+    if ( strcmp( a, "--print-package-path" ) == 0 ) {
+        print_package_path( );
+        return 1;
+    }
+    return 0;
+}
+
+int main( int raw_argc, char **raw_argv ) {
     LcDriverOptions opt;
     const char *force[ 64 ];
     int  nforce = 0;
     int  i;
+    int  argc = 0;
+    char **argv = LcArg_Expand( raw_argc, raw_argv, &argc );
+    if ( argv == NULL ) return 2;
+
+    /* --print-* flags win over everything else; scan once up front so the
+    ** user can drop them anywhere on the command line. */
+    for ( i = 1; i < argc; i++ ) {
+        if ( handle_print_flag( argv[ i ] ) ) {
+            LcArg_FreeExpanded( argc, argv );
+            return 0;
+        }
+    }
 
     memset( &opt, 0, sizeof( opt ) );
     opt.opt_level = 0;
@@ -857,6 +1073,7 @@ int main( int argc, char **argv ) {
             if ( !lc_parse_opt_level( a, &opt.opt_level ) ) {
                 fprintf( stderr, "aotc: unsupported optimization level '%s' "
                                  "(use -O0, -O1, -O2 or -O3)\n", a );
+                LcArg_FreeExpanded( argc, argv );
                 return 2;
             }
         } else if ( strcmp( a, "--dll" ) == 0
@@ -879,6 +1096,7 @@ int main( int argc, char **argv ) {
             } else {
                 fprintf( stderr, "aotc: unknown --output kind '%s' "
                                  "(supported: exe, dll, obj, lib)\n", kind );
+                LcArg_FreeExpanded( argc, argv );
                 return 2;
             }
         } else if ( strncmp( a, "--emit-def=", 11 ) == 0 ) {
@@ -930,11 +1148,36 @@ int main( int argc, char **argv ) {
             if      ( strcmp( v, "bytecode" ) == 0 ) opt.emit_mode = LC_EMIT_BYTECODE;
             else if ( strcmp( v, "ir"       ) == 0 ) opt.emit_mode = LC_EMIT_IR;
             else if ( strcmp( v, "asm"      ) == 0 ) opt.emit_mode = LC_EMIT_ASM;
+            else if ( strcmp( v, "ast"      ) == 0 ) opt.emit_mode = LC_EMIT_AST;
             else {
                 fprintf( stderr, "aotc: unknown --emit mode '%s' "
-                                 "(supported: bytecode, ir, asm)\n", v );
+                                 "(supported: bytecode, ir, asm, ast)\n", v );
+                LcArg_FreeExpanded( argc, argv );
                 return 2;
             }
+        } else if ( strncmp( a, "--emit-depfile=", 15 ) == 0 ) {
+            /* Make-style dependency file. Absolute path recommended; a
+            ** relative path resolves against the CWD at compile time. */
+            opt.depfile_path = a + 15;
+        } else if ( strcmp( a, "-MD" ) == 0 ) {
+            /* GCC-style shorthand for --emit-depfile=<basename>.d beside
+            ** the output. The actual path is derived inside lc_drive once
+            ** it knows the final output path. Signalled here via the
+            ** sentinel value "-MD" -- lc_drive checks for it and computes
+            ** the actual name. */
+            opt.depfile_path = "-MD";
+        } else if ( strncmp( a, "--strip=", 8 ) == 0 ) {
+            const char *m = a + 8;
+            if      ( strcmp( m, "none"  ) == 0 ) opt.strip_mode = LC_STRIP_NONE;
+            else if ( strcmp( m, "debug" ) == 0 ) opt.strip_mode = LC_STRIP_DEBUG;
+            else if ( strcmp( m, "all"   ) == 0 ) opt.strip_mode = LC_STRIP_ALL;
+            else {
+                fprintf( stderr, "aotc: unknown --strip mode '%s' "
+                                 "(supported: none, debug, all)\n", m );
+                LcArg_FreeExpanded( argc, argv );
+                return 2;
+            }
+            opt.strip_mode_explicit = true;
         } else if ( strncmp( a, "--emit-compdb=", 14 ) == 0 ) {
             opt.compdb_path   = a + 14;
             opt.compdb_append = false;
@@ -967,6 +1210,7 @@ int main( int argc, char **argv ) {
 
     if ( opt.input == NULL ) {
         usage( argv[ 0 ] );
+        LcArg_FreeExpanded( argc, argv );
         return 2;
     }
     /* Same rule as clua_main.c cmd_build: only synthesise an output path
@@ -993,6 +1237,10 @@ int main( int argc, char **argv ) {
     opt.drv_argc = argc;
     opt.drv_argv = ( const char *const * )argv;
 
-    return lc_drive( &opt );
+    {
+        int rc = lc_drive( &opt );
+        LcArg_FreeExpanded( argc, argv );
+        return rc;
+    }
 }
 #endif
