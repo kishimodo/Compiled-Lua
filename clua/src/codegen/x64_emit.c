@@ -193,6 +193,15 @@ int X64Emit_CmpMem8Imm8( LcCodeBuf *Buf, X64_GPR_T Base, int32_t Disp,
     return AppendBytes( Buf, &Imm, 1 );
 }
 
+int X64Emit_TestMem8Imm8( LcCodeBuf *Buf, X64_GPR_T Base, int32_t Disp,
+                          int8_t Imm ) {
+    /* F6 /0 ib   TEST r/m8, imm8.  ModR/M reg-field extension = 0; the
+       shared EmitMemOp handles disp0/disp8/disp32 selection and REX.B for
+       R8..R15 bases the same way as the CMP form above. */
+    if ( !EmitMemOp( Buf, 0xF6, 0, 0, Base, Disp, 0 ) ) return 0;
+    return AppendBytes( Buf, &Imm, 1 );
+}
+
 int X64Emit_AddMemToReg( LcCodeBuf *Buf, X64_GPR_T Dst,
                          X64_GPR_T Base, int32_t Disp ) {
     /* 03 /r   ADD r64, r/m64 */
@@ -201,6 +210,18 @@ int X64Emit_AddMemToReg( LcCodeBuf *Buf, X64_GPR_T Dst,
 
 int X64Emit_JneRel8( LcCodeBuf *Buf, int8_t Rel ) {
     if ( !AppendByte( Buf, 0x75 ) )       return 0;
+    return AppendBytes( Buf, &Rel, 1 );
+}
+
+int X64Emit_JeRel8( LcCodeBuf *Buf, int8_t Rel ) {
+    /* 74 ib   JE rel8  (jump if ZF=1). */
+    if ( !AppendByte( Buf, 0x74 ) )       return 0;
+    return AppendBytes( Buf, &Rel, 1 );
+}
+
+int X64Emit_JbeRel8( LcCodeBuf *Buf, int8_t Rel ) {
+    /* 76 ib   JBE rel8  (jump if CF=1 or ZF=1, unsigned below-or-equal). */
+    if ( !AppendByte( Buf, 0x76 ) )       return 0;
     return AppendBytes( Buf, &Rel, 1 );
 }
 

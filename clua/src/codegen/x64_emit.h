@@ -115,6 +115,15 @@ int X64Emit_CmpMem8Imm8( LcCodeBuf *Buf, X64_GPR_T Base, int32_t Disp,
 
 /*!
  * @brief
+ *  TEST r/m8, imm8   (F6 /0 ib).  Encodes:  TEST byte [Base + Disp], imm8
+ *  Sets ZF/SF/PF from (byte & imm8); leaves memory unchanged. Same disp8/
+ *  disp32 selection as the CMP form; REX.B is added for R8..R15 bases.
+ */
+int X64Emit_TestMem8Imm8( LcCodeBuf *Buf, X64_GPR_T Base, int32_t Disp,
+                          int8_t Imm );
+
+/*!
+ * @brief
  *  REX.W = 1 ADD r64, r/m64.   Encodes:  ADD Dst, [Base + Disp]
  */
 int X64Emit_AddMemToReg( LcCodeBuf *Buf, X64_GPR_T Dst,
@@ -126,6 +135,22 @@ int X64Emit_AddMemToReg( LcCodeBuf *Buf, X64_GPR_T Dst,
  *  (We hand-compute the forward jump distance when emitting fast paths.)
  */
 int X64Emit_JneRel8( LcCodeBuf *Buf, int8_t Rel );
+
+/*!
+ * @brief
+ *  JE rel8   (74 ib).  2-byte conditional forward/backward jump taken when
+ *  ZF=1. Same shape as X64Emit_JneRel8; used for fast-path fall-through
+ *  when a compare succeeded.
+ */
+int X64Emit_JeRel8( LcCodeBuf *Buf, int8_t Rel );
+
+/*!
+ * @brief
+ *  JBE rel8  (76 ib).  2-byte conditional jump taken when CF=1 OR ZF=1
+ *  (unsigned "below or equal"). Same shape as X64Emit_JneRel8; used for
+ *  unsigned-bounds fast paths (e.g. checking an index against a length).
+ */
+int X64Emit_JbeRel8( LcCodeBuf *Buf, int8_t Rel );
 
 /*!
  * @brief

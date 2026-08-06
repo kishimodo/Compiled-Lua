@@ -80,6 +80,89 @@ int main( void ) {
     CHECK( C.bytes[3] == 0x00 && C.bytes[4] == 0x00 &&
            C.bytes[5] == 0x00 && C.bytes[6] == 0x80 );
 
+    /* ---- X64Emit_JbeRel8: opcode 0x76 + signed rel8 byte, 2 bytes total.
+       Rel range covers zero, INT8_MAX, INT8_MIN, and -1 so the sign-extension
+       of the displacement is exercised end-to-end. */
+    {
+        struct { int8_t rel; unsigned char want[2]; } cases[] = {
+            {    0, { 0x76, 0x00 } },
+            {  127, { 0x76, 0x7F } },
+            { -128, { 0x76, 0x80 } },
+            {   -1, { 0x76, 0xFF } },
+        };
+        size_t i;
+        for ( i = 0; i < sizeof( cases ) / sizeof( cases[0] ); i++ ) {
+            LcCodeBuf M;
+            CHECK( LcCodeBuf_Init( &M, 16 ) == 1 );
+            CHECK( X64Emit_JbeRel8( &M, cases[i].rel ) == 1 );
+            CHECK( M.used == 2 );
+            CHECK( memcmp( M.bytes, cases[i].want, 2 ) == 0 );
+            LcCodeBuf_Free( &M );
+        }
+    }
+
+    /* ---- X64Emit_JeRel8: opcode 0x74, same shape as JbeRel8. */
+    {
+        struct { int8_t rel; unsigned char want[2]; } cases[] = {
+            {    0, { 0x74, 0x00 } },
+            {  127, { 0x74, 0x7F } },
+            { -128, { 0x74, 0x80 } },
+            {   -1, { 0x74, 0xFF } },
+        };
+        size_t i;
+        for ( i = 0; i < sizeof( cases ) / sizeof( cases[0] ); i++ ) {
+            LcCodeBuf M;
+            CHECK( LcCodeBuf_Init( &M, 16 ) == 1 );
+            CHECK( X64Emit_JeRel8( &M, cases[i].rel ) == 1 );
+            CHECK( M.used == 2 );
+            CHECK( memcmp( M.bytes, cases[i].want, 2 ) == 0 );
+            LcCodeBuf_Free( &M );
+        }
+    }
+
+    /* ---- X64Emit_TestMem8Imm8: F6 /0 ib.  Four cases cover the ModR/M
+       encoding matrix that the shared EmitMemOp selects on:
+         - RAX + disp0     -> mod=00, no SIB, no disp, no REX
+         - RCX + disp8     -> mod=01, one-byte disp
+         - RDI + disp32    -> mod=10, four-byte disp (0x11223344 makes any
+                              byte-order slip unmistakable)
+         - R8  + disp8     -> REX.B prefix + mod=01, disp8 (verifies the
+                              high-register path)
+       The imm8 sits in the last byte of every case. */
+    {
+        struct {
+            X64_GPR_T base; int32_t disp; int8_t imm;
+            size_t n; unsigned char want[8];
+        } cases[] = {
+            /* F6 00 42                       -- test byte [rax], 0x42 */
+            { X64_RAX, 0x00000000, 0x42, 3,
+              { 0xF6, 0x00, 0x42 } },
+            /* F6 41 08 55                    -- test byte [rcx + 8], 0x55 */
+            { X64_RCX, 0x00000008, 0x55, 4,
+              { 0xF6, 0x41, 0x08, 0x55 } },
+            /* F6 87 44 33 22 11 7F           -- test byte [rdi + 0x11223344], 0x7F.
+               ModR/M = 10 000 111 = 0x87 (mod=disp32, reg=/0 opcode extension = 0,
+               rm=RDI=7). The reg field must be 0 for F6 /0 (TEST); a 0xBF here
+               would encode /7 and mean something different. */
+            { X64_RDI, 0x11223344, 0x7F, 7,
+              { 0xF6, 0x87, 0x44, 0x33, 0x22, 0x11, 0x7F } },
+            /* 41 F6 40 10 01                 -- test byte [r8 + 0x10], 0x01 */
+            { X64_R8,  0x00000010, 0x01, 5,
+              { 0x41, 0xF6, 0x40, 0x10, 0x01 } },
+        };
+        size_t i;
+        for ( i = 0; i < sizeof( cases ) / sizeof( cases[0] ); i++ ) {
+            LcCodeBuf M;
+            CHECK( LcCodeBuf_Init( &M, 16 ) == 1 );
+            CHECK( X64Emit_TestMem8Imm8( &M, cases[i].base, cases[i].disp,
+                                         cases[i].imm ) == 1 );
+            CHECK( M.used == cases[i].n );
+            CHECK( memcmp( M.bytes, cases[i].want, cases[i].n ) == 0 );
+            CHECK( M.nrelocs == 0 );
+            LcCodeBuf_Free( &M );
+        }
+    }
+
     LcCodeBuf_Free( &B );
     LcCodeBuf_Free( &C );
     TEST_END();
