@@ -285,6 +285,12 @@ bool lc_optimize(LcModule *m, const LcPassConfig *cfg) {
     /* ip_typeprop already ran in the -O1 block above */
     lc_pass_monomorphize(m);
     lc_pass_ip_devirt(m);
+    /* Fold `if false then ... end` guards BEFORE dead_global so the
+       provably-taken jump no longer keeps its guarded OP_CLOSURE alive.
+       Runs per-function; dead_global then walks the pruned CLOSURE edges. */
+    for (uint32_t i = 0; i < m->nfuncs; i++) {
+      lc_pass_fold_dead_branches(m->funcs[i]);
+    }
     lc_pass_dead_global(m);
     if (!opt_verify(m, cfg, "the -O2 interprocedural pass group")) return false;
   }
@@ -694,6 +700,128 @@ void lc_pass_inline_small(LcModule *m)   { (void)m; /* TODO(M1) */ }
 /* lc_pass_ip_typeprop: real implementation at the end of this file (M2). */
 void lc_pass_monomorphize(LcModule *m)   { (void)m; /* TODO(M2) keep ANY fallback clone */ }
 void lc_pass_ip_devirt(LcModule *m)      { (void)m; /* TODO(M2) */ }
+
+/* lc_pass_fold_dead_branches: fold `if false then BODY end` / `if nil then ...`.
+**
+** WHY THIS EXISTS. The Lua 5.4 front end does NOT parse-fold a literal
+** `if false then ... end`; it emits the block verbatim with a LOADFALSE + TEST +
+** JMP guard that is provably-taken at run time. If the body contains a
+** `local function inner() ... end`, the OP_CLOSURE inside the guarded region
+** creates a closure -- and, more importantly, a reference edge -- that keeps
+** `inner`'s Proto alive as far as lc_pass_dead_global is concerned. So a real
+** program with a stubbed-out debug branch (a very common pattern) drags every
+** closure inside that branch into the AOT exe.
+**
+** WHAT WE MATCH (deliberately narrow). The exact 3-instruction guard the front
+** end emits for `if false`/`if nil`:
+**
+**   OP_LOADFALSE R          (or OP_LFALSESKIP)
+**   OP_TEST      R, k=0
+**   OP_JMP       tgt        (tgt > pc(JMP), i.e. forward jump)
+**
+** and we ONLY fold if the guarded body (JMP.pc+1 .. tgt-1) contains at least
+** one OP_CLOSURE. That last condition is what makes this a size/reachability
+** win rather than a purely cosmetic rewrite: with no closure inside, the
+** downstream --gc-sections pass has nothing to prune, and folding would only
+** obscure diagnostics.
+**
+** HOW WE NEUTRALIZE. Each folded instruction stays in the IR list (so bc_pc
+** slots do not shift and forward-branch resolution keeps working) but its
+** `bc_op` is set to OP_EXTRAARG, which codegen already treats as "emit zero
+** bytes" (see lift.c's LOADKX/NEWTABLE fusion and codegen.c's OP_EXTRAARG case
+** in lower_inst). The IR opcode is set to LC_OP_JMP with c=bc_pc (self-loop
+** placeholder never used) so any dataflow scan that reads `op` sees a benign
+** control op rather than a live constant/closure. Instruction memory itself is
+** untouched -- SSA use-def edges into these ops (there are none from live code
+** by construction) would be safe either way.
+**
+** SOUNDNESS. Because we require the LOAD to be OP_LOADFALSE / OP_LFALSESKIP
+** and the TEST to be against the same register with k=0, the guard branch is
+** taken UNCONDITIONALLY at run time -- the body is DEAD in the pre-existing
+** semantics, and removing dead code cannot change stdout. The differential
+** oracle (fuzz-differential.lua) compares stdout of compiled vs interpreter,
+** so this fold is invisible to it by construction.
+**
+** WHY -O2. This pass runs before lc_pass_dead_global; that pass then no
+** longer sees the folded CLOSURE and can prune the entire nested function.
+** At -O0/-O1 the pass does not run -- byte-identity at those levels is
+** preserved for the byte-identity gate (tools/check-byte-identity.py). */
+void lc_pass_fold_dead_branches(LcFunc *f) {
+  Proto *p;
+  uint32_t bi;
+  if (!f || !f->source) return;
+  p = f->source;
+
+  for (bi = 0; bi < f->nblocks; bi++) {
+    LcInst *in;
+    if (!f->blocks[bi]) continue;
+    for (in = f->blocks[bi]->first; in; in = in->next) {
+      LcInst *iload = in;
+      LcInst *itest, *ijmp;
+      int load_reg, jmp_tgt, body_pc, has_closure;
+      LcInst *scan;
+      LcInst *cur;
+
+      /* Anchor: OP_LOADFALSE or OP_LFALSESKIP at this pc. */
+      if (iload->bc_op != OP_LOADFALSE && iload->bc_op != OP_LFALSESKIP) continue;
+      load_reg = iload->a;
+
+      /* Next real IR inst must be OP_TEST on the same register with k=0. */
+      itest = iload->next;
+      while (itest && itest->bc_op == OP_EXTRAARG) itest = itest->next;
+      if (!itest || itest->bc_op != OP_TEST) continue;
+      if (itest->a != load_reg) continue;
+      if (itest->c != 0) continue;       /* k-bit: cond != k -> skip; we need JMP */
+
+      /* Next after TEST must be OP_JMP forward. */
+      ijmp = itest->next;
+      while (ijmp && ijmp->bc_op == OP_EXTRAARG) ijmp = ijmp->next;
+      if (!ijmp || ijmp->bc_op != OP_JMP) continue;
+      jmp_tgt = ijmp->c;                 /* resolved by lift.c */
+      if (jmp_tgt <= ijmp->bc_pc + 1) continue;   /* only forward, guarded body  */
+
+      /* Scan the guarded body: must contain at least one OP_CLOSURE. Otherwise
+         folding buys us nothing (dead_global would not prune anything) and we
+         leave the IR untouched. */
+      body_pc = ijmp->bc_pc + 1;
+      has_closure = 0;
+      for (scan = ijmp->next; scan; scan = scan->next) {
+        if (scan->bc_pc >= jmp_tgt) break;
+        if (scan->bc_pc < body_pc) continue;
+        if (scan->bc_op == OP_CLOSURE) { has_closure = 1; break; }
+      }
+      if (!has_closure) continue;
+
+      /* Bounds sanity: never fold past the function's bytecode. */
+      if (jmp_tgt > p->sizecode) continue;
+
+      /* Neutralize the LOAD/TEST/JMP guard AND every instruction in the body
+         [body_pc, jmp_tgt). Rewrite bc_op to OP_EXTRAARG so codegen emits zero
+         bytes, and set the IR opcode to LC_OP_JMP with a self-loop c so any
+         later scan sees a benign control op rather than a live value producer.
+         Instruction sequence (and pc labels) are preserved so forward-branch
+         resolution and savedpc arithmetic keep pointing at real code offsets. */
+      for (cur = iload; cur; cur = cur->next) {
+        if (cur->bc_pc >= jmp_tgt) break;
+        cur->bc_op = OP_EXTRAARG;
+        cur->op    = LC_OP_JMP;
+        cur->c     = cur->bc_pc;   /* harmless self-referring target */
+        cur->flags = LC_FX_PURE;
+        cur->nargs = 0;            /* SSA use-def scans see no operands */
+      }
+
+      /* Advance the outer loop past what we just folded. `cur` is the first
+         still-live inst (or NULL if we folded to end of function). The outer
+         `for` step will do `in = in->next`, so back up one -- if we ran off
+         the end, break out of this block entirely. */
+      if (!cur) break;
+      /* We need `in->next == cur` after the step; walk backward via prev. */
+      if (cur->prev) in = cur->prev;
+      else break;
+    }
+  }
+}
+
 /* lc_pass_dead_global: whole-program reachability from the roots.
 **
 ** A function is a ROOT if it is the program entry (m->entry) or a

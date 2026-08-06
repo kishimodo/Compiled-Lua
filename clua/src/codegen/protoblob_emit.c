@@ -83,12 +83,61 @@ static int proto_index( LcModule *m, Proto *p ) {
 /* Serialize one function record (field order = the deserializer's
 ** construction order = the old generated C's construction order). */
 static int emit_func( BBuf *b, LcModule *m, int idx, char *err, size_t errlen ) {
-    Proto *P = m->funcs[idx]->source;
-    int    j;
+    LcFunc *F = m->funcs[idx];
+    Proto  *P = F->source;
+    int     j;
 
     if ( P == NULL ) {
         emit_err( err, errlen, "protoblob: function %d has no source Proto", idx );
         return 0;
+    }
+
+    /* Dead-function stub. lc_pass_dead_global marked this function unreachable
+    ** from any root, and codegen emitted a minimal returns-zero body at
+    ** luac_fn_<idx>. Any strings/constants/nested-Proto pointers in this record
+    ** would only ever be walked by an interpreter-fallback path that itself is
+    ** unreachable in the current program, so emit the smallest valid record: a
+    ** 0-param, 0-code, 0-upvalue, 0-nested, 0-const Proto with no source name.
+    ** This is what strips the "you should not see me" constants of a dead
+    ** function from the exe's ProtoBlob and lets --gc-sections finish the job
+    ** on the native side. The fn_table slot at idx is still populated (see
+    ** LcCg_CompileFunctionBody's dead path) and every OTHER function's p[j]
+    ** index into m->funcs is preserved -- the invariant BuildOne relies on. */
+    if ( F->dead ) {
+        int mn_stub;
+        if ( !w8( b, 0u ) ||                           /* numparams              */
+             !w8( b, 0u ) ||                           /* is_vararg              */
+             !w8( b, 2u ) ||                           /* maxstacksize (>=2 for  */
+                                                       /*   any Lua fn: A+1 slot */
+                                                       /*   for at least the fn  */
+                                                       /*   and a return spot)   */
+             !w8( b, 0u ) ||                           /* has source name = 0    */
+             !wi32( b, P->linedefined ) ||             /* keep for diagnostics   */
+             !wi32( b, P->lastlinedefined ) ) goto oom;
+        if ( !w32( b, 0u ) ) goto oom;                 /* sizelineinfo           */
+        if ( !w32( b, 0u ) ) goto oom;                 /* sizeabslineinfo        */
+        if ( !w32( b, 0u ) ) goto oom;                 /* sizek                  */
+        if ( !w32( b, 0u ) ) goto oom;                 /* sizeupvalues           */
+        if ( !w32( b, 0u ) ) goto oom;                 /* sizep -- important:    */
+                                                       /*   drop the child       */
+                                                       /*   pointers so BuildOne */
+                                                       /*   does NOT recurse     */
+                                                       /*   into further dead    */
+                                                       /*   functions whose      */
+                                                       /*   constants we also    */
+                                                       /*   already stripped     */
+                                                       /*   independently (each  */
+                                                       /*   dead child is        */
+                                                       /*   already independently*/
+                                                       /*   in m->funcs and gets */
+                                                       /*   its own stub record) */
+        if ( !w32( b, 0u ) ) goto oom;                 /* sizecode               */
+        if ( !w32( b, 0u ) ) goto oom;                 /* sizelocvars            */
+        mn_stub = F->module_name != NULL ? 1 : 0;
+        if ( !w8( b, mn_stub ? 1u : 0u ) ) goto oom;
+        if ( mn_stub && !wlstr( b, F->module_name, strlen( F->module_name ) ) )
+            goto oom;
+        return 1;
     }
 
     if ( !w8( b, ( unsigned )P->numparams )    ||

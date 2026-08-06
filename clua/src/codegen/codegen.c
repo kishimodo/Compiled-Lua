@@ -2488,6 +2488,41 @@ int LcCg_CompileFunctionBody( LcModule *m, LcCodeModule *cm,
 
     if (!LcCodeBuf_Init(&buf, 256)) return 0;
 
+    /* Dead-function fast path (set by lc_pass_dead_global at -O2+). Emit a
+       minimal body: prologue + Rt_PrepReturn(0,0,0) + epilogue. The symbol
+       luac_fn_<i> still exists at the correct index so luac_fn_table's slot
+       is populated (protoblob's ProtoInit indexes into luac_fn_table by func
+       index) and --gc-sections keeps the tiny stub section alive via the
+       fn_table ADDR64 reloc -- but the body is now ~40 bytes instead of the
+       full original, and its ProtoBlob record is stripped to a stub (see
+       protoblob_emit.c's F->dead branch), so the real savings come from the
+       constants and code that no longer ride the .rdata blob. Any runtime
+       path that ever calls this dead function (i.e. the closed-world analysis
+       was defeated by a shape we did not model) still gets a safe "return
+       zero results" from the same helper the normal fall-through path uses. */
+    if (f && f->dead) {
+        LcCgFnCtx dead_fn;
+        lc_cg_fn_init(&dead_fn, cg, 0);
+        if (!LcCg_EmitPrologue(&buf, &dead_fn.frame) ||
+            !LcCg_EmitHelperCall3(&buf, "Rt_PrepReturn", 0, 0, 0, /*reload*/0) ||
+            !LcCg_EmitEpilogue(&buf, &dead_fn.frame)) {
+            lc_cg_fn_dispose(&dead_fn);
+            LcCodeBuf_Free(&buf);
+            return 0;
+        }
+        lc_cg_fn_dispose(&dead_fn);
+        cf->code       = buf.bytes;
+        cf->code_len   = buf.used;
+        cf->relocs     = buf.relocs;
+        cf->nrelocs    = buf.nrelocs;
+        cf->unwind     = NULL;
+        cf->unwind_len = 0;
+        snprintf(cf->name, sizeof(cf->name), "luac_fn_%u", (unsigned)i);
+        buf.bytes = NULL; buf.relocs = NULL;
+        buf.used = buf.cap = 0; buf.nrelocs = buf.relocap = 0;
+        return 1;
+    }
+
     /* Per-function branch context (bc_pc -> code-offset map + deferred rel32
        patch queue). Sized by the source Proto's instruction count. */
     int sizecode = (f && f->source) ? f->source->sizecode : 0;

@@ -85,6 +85,7 @@ void lc_pass_ip_typeprop(LcModule *m);     /* propagate arg/return types       *
 void lc_pass_monomorphize(LcModule *m);    /* clone polymorphic fns per type    */
 void lc_pass_ip_devirt(LcModule *m);       /* whole-program call devirt         */
 void lc_pass_dead_global(LcModule *m);     /* unused globals/fields/functions   */
+void lc_pass_fold_dead_branches(LcFunc *f);/* fold `if false then ... end`      */
 
 /* ---- M3: memory optimization ---- */
 void lc_pass_escape(LcModule *m);          /* escape analysis                   */
