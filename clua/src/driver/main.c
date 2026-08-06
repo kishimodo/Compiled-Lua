@@ -29,6 +29,7 @@
 #include "../driver/lc_undump.h"
 #include "../driver/closed_world.h"
 #include "../driver/supported_ops.h"
+#include "../driver/compdb.h"
 #include "../dump/emit.h"
 
 /* Reused front-end produces a Proto*; we read its nested-proto array (p[]) to
@@ -41,6 +42,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <process.h>   /* _getpid */
+#include <direct.h>    /* _getcwd, _fullpath (compile_commands.json emit) */
 
 /* ------------------------------------------------------------------ */
 /* Reachable-Proto collection.                                         */
@@ -147,6 +149,26 @@ int lc_drive( const LcDriverOptions *opt ) {
         fprintf( stderr, "clua: error: unsupported optimization level %d "
                          "(supported: 0-3)\n", opt->opt_level );
         return 2;
+    }
+
+    /* --emit-compdb[-append]=<path>: write the compile_commands.json entry
+    ** before we do any real work, so an editor / clang-tooling integration
+    ** can pick up the invocation even if the build itself fails later. The
+    ** entry records the absolute input path (resolved via _fullpath) and the
+    ** absolute CWD, which is what clangd / VS Code C/C++ / ccls expect. */
+    if ( opt->compdb_path != NULL && opt->drv_argc > 0 && opt->drv_argv != NULL ) {
+        char cwd_buf[ 1024 ] = { 0 };
+        char in_buf[ 1024 ]  = { 0 };
+        const char *cwd_s = _getcwd( cwd_buf, ( int )sizeof( cwd_buf ) );
+        const char *in_s  = _fullpath( in_buf, opt->input, sizeof( in_buf ) );
+        if ( cwd_s == NULL ) cwd_s = ".";
+        if ( in_s  == NULL ) in_s  = opt->input;
+        if ( LcCompdb_Write( opt->compdb_path,
+                             opt->drv_argc, opt->drv_argv,
+                             cwd_s, in_s,
+                             opt->compdb_append ? 1 : 0 ) != 0 ) {
+            return 1;
+        }
     }
 
     /* --dll / --output=dll / -shared: emit a DLL. The exe path stays the
@@ -605,7 +627,8 @@ static void usage( const char *argv0 ) {
              "aotc (LuaC) — Lua 5.4 -> native Windows x64 PE\n"
              "usage: %s <main.lua> [-o output] [-O<n>] [-L <pkg>]... "
              "[--shared-rt] [--output=exe|dll|obj|lib] [-shared] "
-             "[--emit-def=<path>]\n",
+             "[--emit-def=<path>] "
+             "[--emit-compdb=<path>|--emit-compdb-append=<path>]\n",
              argv0 );
 }
 
@@ -689,6 +712,12 @@ int main( int argc, char **argv ) {
                                  "(supported: bytecode, ir, asm)\n", v );
                 return 2;
             }
+        } else if ( strncmp( a, "--emit-compdb=", 14 ) == 0 ) {
+            opt.compdb_path   = a + 14;
+            opt.compdb_append = false;
+        } else if ( strncmp( a, "--emit-compdb-append=", 21 ) == 0 ) {
+            opt.compdb_path   = a + 21;
+            opt.compdb_append = true;
         } else if ( ( strcmp( a, "-L" ) == 0 || strcmp( a, "--link" ) == 0 )
                     && i + 1 < argc ) {
             if ( nforce < 63 ) {
@@ -726,6 +755,11 @@ int main( int argc, char **argv ) {
         opt.force_pkgs  = force;
         opt.nforce_pkgs = nforce;
     }
+
+    /* Give the driver the raw argv so --emit-compdb records the invocation
+    ** verbatim. lc_drive only reads it when compdb_path is set. */
+    opt.drv_argc = argc;
+    opt.drv_argv = ( const char *const * )argv;
 
     return lc_drive( &opt );
 }

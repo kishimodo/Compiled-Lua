@@ -119,6 +119,18 @@ static void usage( FILE *to ) {
         "                   consume the .def to synthesize the matching\n"
         "                   import library. Default: <dll-basename>.def\n"
         "                   beside the DLL. Ignored for .exe builds.\n"
+        "  --emit-compdb=<path>\n"
+        "                   write a compile_commands.json file at <path>\n"
+        "                   containing one entry (directory / file /\n"
+        "                   arguments) describing this invocation. clangd,\n"
+        "                   VS Code C/C++, and ccls read this to offer\n"
+        "                   navigation and hover over CLua sources.\n"
+        "                   Overwrites <path> if present.\n"
+        "  --emit-compdb-append=<path>\n"
+        "                   like --emit-compdb but appends to the array in\n"
+        "                   <path> (or creates it). Use this from a build\n"
+        "                   driver that compiles many entry points and wants\n"
+        "                   one JSON array per workspace.\n"
         "\n"
         "environment:\n"
         "  CLUA_HOME        CLua installation root (lib\\runtime-aot.a ...)\n"
@@ -253,6 +265,12 @@ static int parse_build_args( CluaArgs *a, int argc, char **argv, int from,
             a->opt.emit_only = true;
         } else if ( ( emit_rc = parse_emit_arg( a, s ) ) != -1 ) {
             if ( emit_rc == 0 ) return 0;
+        } else if ( strncmp( s, "--emit-compdb=", 14 ) == 0 ) {
+            a->opt.compdb_path   = s + 14;
+            a->opt.compdb_append = false;
+        } else if ( strncmp( s, "--emit-compdb-append=", 21 ) == 0 ) {
+            a->opt.compdb_path   = s + 21;
+            a->opt.compdb_append = true;
         } else if ( strncmp( s, "--emit-def=", 11 ) == 0 ) {
             a->opt.emit_def_path = s + 11;
         } else if ( strncmp( s, "--emit-implib=", 14 ) == 0 ) {
@@ -303,6 +321,8 @@ static int cmd_build( int argc, char **argv, int from ) {
         if ( derived == NULL ) { fprintf( stderr, "clua: oom\n" ); return 1; }
         a.opt.output = derived;
     }
+    a.opt.drv_argc = argc;
+    a.opt.drv_argv = ( const char *const * )argv;
     rc = lc_drive( &a.opt );
     free( derived );
     return rc;
@@ -376,6 +396,8 @@ static int cmd_check( int argc, char **argv, int from ) {
     if ( !parse_build_args( &a, argc, argv, from, 0 ) ) return 2;
     a.opt.check_only = true;
     a.opt.output     = NULL;
+    a.opt.drv_argc   = argc;
+    a.opt.drv_argv   = ( const char *const * )argv;
     return lc_drive( &a.opt );
 }
 
@@ -406,7 +428,9 @@ static int cmd_run( int argc, char **argv, int from ) {
     if ( tmpdir == NULL || tmpdir[0] == '\0' ) tmpdir = ".";
     snprintf( exe_path, sizeof( exe_path ), "%s\\clua_run_%d.exe",
               tmpdir, ( int )_getpid( ) );
-    a.opt.output = exe_path;
+    a.opt.output   = exe_path;
+    a.opt.drv_argc = argc;
+    a.opt.drv_argv = ( const char *const * )argv;
 
     rc = lc_drive( &a.opt );
     if ( rc != 0 ) return rc;
