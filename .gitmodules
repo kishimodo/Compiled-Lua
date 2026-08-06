@@ -1,0 +1,6 @@
+[submodule "rover"]
+	path = rover
+	url = https://github.com/kishimodo/Rover
+[submodule "clua/src/runtime/packages"]
+	path = clua/src/runtime/packages
+	url = https://github.com/kishimodo/CLua-Packages

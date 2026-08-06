@@ -98,6 +98,23 @@ and regression-pinned.
 
 ## Build & test
 
+Clone with submodules — Rover (the package manager) and the 195 built-in packages
+live in their own repos and are pulled in as `rover/` and
+`clua/src/runtime/packages/`:
+
+```
+git clone --recursive https://github.com/kishimodo/Compiled-Lua
+# or, if already cloned:
+git submodule update --init --recursive
+```
+
+The two sub-repos:
+
+- [`kishimodo/Rover`](https://github.com/kishimodo/Rover) — the package manager,
+  itself a CLua-compiled Lua program.
+- [`kishimodo/CLua-Packages`](https://github.com/kishimodo/CLua-Packages) — the
+  195 built-in packages baked into the runtime archives.
+
 From PowerShell:
 
 ```

@@ -9,6 +9,46 @@ of truth -- `clua/src/common/version.h` -- and this file in step.
 
 ### Changed
 
+- **`local a,b=2,3 local c=a+b print(c)` shrinks 21.7%**, from 141,824 to 111,104
+  bytes. The stdlib anchors are split into one translation unit per library, so a
+  program that only reaches `string` no longer links `table`/`math`/`os`/`io`/
+  `utf8`/`debug` alongside it. Archive member selection runs before section GC,
+  which is why `-ffunction-sections` alone did not do this earlier -- the object
+  was the unit that got pulled, not the section.
+
+  Correctness of the split turns on `lc_module_used_libs`, which now returns
+  `LCLIB_ALL` for the three shapes that reach a library never named by the source
+  (`package.loaded[k]`, `_G[k]`/`_ENV[k]` with computed keys, and
+  `debug.getregistry`). Without that escape, `package.loaded["o".."s"]` would
+  silently return `nil` in the exe where the interpreter returns a table -- the
+  same reason this size win sat blocked for the previous arc. Two tests hold the
+  line: `tests/differential/stdlib_reach.lua` (behaviour, diffed against the
+  interpreter) and `tools/test-stdlib-anchor-split.lua` (the link itself, per
+  library).
+
+  Rover trips the escape and correctly keeps all seven libraries, so its size
+  win comes from other changes: **rover -9,216 bytes** (592,896 -> 583,680) from
+  the frame-passing table helpers -- codegen now hands each table op the frame
+  base it already has in RDI, cutting two dependent memory loads per access and
+  shrinking each call site from 20 bytes to 12. And **~4 KB** more from imm8
+  encoding of `sub`/`add rsp` in prologues/epilogues.
+
+- **Hot-path store hoisted out of nine table helpers.** `L->top.p = L->ci->top.p`
+  used to run on every `Rt_GetField`/`Rt_SetField`/`Rt_GetI`/... call; only the
+  slow path needs it (the metamethod call reads `L->top`). The store now lives
+  in each `else` branch. Measured on this host: table-field kernel 261 -> 234 ms
+  (1.11x), array flat.
+
+- **This host cannot resolve a 10% timing effect.** A control kernel that
+  physically cannot be affected by the change under test came out 0.79x-1.05x
+  across a 13-rep order-alternating A/B on 2s kernels. `docs/benchmarks/
+  size-and-speed-current.md` now writes down the measurement protocol -- always
+  run a control, alternate arm order per iteration (fixed A-then-B biases 5%),
+  prefer deterministic proxies (`.text` bytes, disassembled load counts).
+  Compile-time deltas above are still fine because they compare like builds; a
+  wall-clock speed claim smaller than about 15% on this class of machine is
+  fabrication.
+
 - **Compile time roughly halved.** The internal linker now indexes each archive's
   symbol map and member table (lazily built, per archive) instead of walking them
   linearly. A Rover build resolved 25,114 archive queries with **41 million string
@@ -38,6 +78,22 @@ of truth -- `clua/src/common/version.h` -- and this file in step.
 
 ### Added
 
+- **Object-freshness gate.** `make` rebuilds only on a *strictly* newer
+  prerequisite, so a source and object stamped the same whole second look
+  current forever. An A/B in this arc hit exactly that: `x64_emit.c` and its
+  object shared an mtime, and the pre-imm8 SUB encoder stayed linked through a
+  dozen rebuilds; the wrong rover `.text` landed in
+  `docs/benchmarks/size-and-speed-current.md` as a measured "current size" and
+  nothing failed. `tools/check-object-freshness.py` is the check, runnable by
+  hand mid-A/B; `tools/test-object-freshness.lua` gates the suite (617 objects
+  covered) and was verified against an injected zero-second case.
+
+- **Sound-mask + anchor split.** See ### Changed above for the size win. The
+  scaffolding: `clua/src/common/rt_frame_abi.h` (the packed operand word the
+  frame-passing helpers unpack), seven `runtime/stdlib_anchor_<lib>.c` files,
+  and `tests/unit/test_rt_frame_abi.c` (round-trip + boundary + no-bleed tests
+  on the packing, since a mismatch is a wrong value far from the fault).
+
 - Header dependency tracking (`-MMD -MP`) in both makefiles, retiring the
   documented "wipe `build/bin/obj` before editing a header" step -- a trap that
   could make a stale object produce a silently empty binary. This exposed that
@@ -52,6 +108,32 @@ of truth -- `clua/src/common/version.h` -- and this file in step.
 - Archive-resolution accounting under `CLUA_GC_DEBUG`, reported per link.
 - Benchmark harnesses: `tools/bench-runtime.lua`, `check-byte-identity.py`,
   `count-imm-sites.py`, `bench-armap.c`.
+
+### Removed
+
+- **Rover and the 195 built-in packages moved to their own repositories.**
+  [`kishimodo/Rover`](https://github.com/kishimodo/Rover) is the package
+  manager source, and
+  [`kishimodo/CLua-Packages`](https://github.com/kishimodo/CLua-Packages) holds
+  every package under what was `clua/src/runtime/packages/`. CLua references
+  them as git submodules at `rover/` and `clua/src/runtime/packages/`; the
+  build is unchanged after `git submodule update --init --recursive`.
+
+  Rationale: the three code bases have independent update rhythms (Rover UX
+  changes, package library expansion, compiler internals) and each pulls in
+  contributors who care about only one of them. Splitting the repos lets each
+  history stay legible, and each release cycle stay independent.
+
+- **Agent-workflow scaffolding.** `AGENTS.md`, `CLAUDE.md`, `PROMPT.md`,
+  `.codex/`, `.mcp.json`, `tools/agent-coordination/`, and the
+  `docs/audits/handoff/roadmaps/superpowers/wip/session-*` trees are gone --
+  30 files, ~3,900 lines. What stays: README, CHANGELOG, LICENSE, and the
+  product docs under `docs/` that describe the compiler itself (TODO,
+  fork-manifest, known-bugs, test-system-design, and the per-topic benchmark
+  writeups). Comments referring to removed files were rewritten to stand
+  alone rather than deleted, so their explanations survive. `.gitignore` now
+  blocks `.claude/`, `.codex/`, `.vscode/`, and `.mcp.json`.
+
 ### Fixed
 
 - **Rover pins `%SystemRoot%\System32\tar.exe`** instead of resolving `tar` from
