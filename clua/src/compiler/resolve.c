@@ -147,8 +147,153 @@ static void ExportPush( PRESOLVE_RESULT_T R, const char *Name ) {
         R->Exports, ( R->ExportCount + 1 ) * sizeof( RESOLVED_EXPORT_T ) );
     if ( grown == NULL ) return;
     R->Exports = grown;
-    R->Exports[ R->ExportCount ].Name = strdup( Name );
+    R->Exports[ R->ExportCount ].Name     = strdup( Name );
+    /* Default ABI: (double,double)->double. The first arc supports this
+       shape unconditionally; an optional `_export_types = { name = "..." }`
+       scan below overrides it on a per-name basis. */
+    R->Exports[ R->ExportCount ].AbiShape = strdup( "dd_d" );
     R->ExportCount++;
+}
+
+/* Once an entry has an AbiShape assigned to Name, replace it with the
+   caller-supplied shape string. Called from the `_export_types` scan below.
+   Silently ignores an export that was never declared (a shape override for a
+   name that isn't in `_exports = {...}` is a no-op, not an error -- the DLL
+   simply won't advertise it). */
+static void ExportSetAbiShape( PRESOLVE_RESULT_T R, const char *Name,
+                                const char *Shape ) {
+    size_t i;
+    if ( R == NULL || Name == NULL || Shape == NULL ) return;
+    for ( i = 0; i < R->ExportCount; i++ ) {
+        if ( StrEq( R->Exports[ i ].Name, Name ) ) {
+            free( R->Exports[ i ].AbiShape );
+            R->Exports[ i ].AbiShape = strdup( Shape );
+            return;
+        }
+    }
+}
+
+/* Scan the main chunk for a top-level `_export_types = { name = "shape", ... }`
+   companion table.
+
+   Single forward walk with two active-tracking pieces so string values from
+   unrelated tables (`_exports` itself, ordinary module tables) never leak
+   into shape overrides:
+
+     - RegStr[i] holds the most recent LOADK'd string constant per register
+       (used only when a SETFIELD's value comes from a register rather than
+       the inline k-bit path -- long-string values). Short strings, which
+       cover every realistic ABI shape token, bypass RegStr entirely.
+
+     - TableReg tracks the register the most recent NEWTABLE targeted; every
+       SETFIELD against that register records into a small pending list. If
+       the SETTABUP that closes the span names `_export_types`, the list is
+       applied; otherwise it is discarded. This way an `_exports = {...}`
+       table literal above `_export_types` cannot bleed overrides into
+       unrelated exports even when field values happen to be strings.
+
+   Anything not clearly inside a `_export_types` span is ignored -- an
+   override that fails to parse just leaves the default "dd_d" in place,
+   which preserves the pre-annotation behaviour for anything the user didn't
+   touch. */
+static void ScanExportTypes( Proto *P, PRESOLVE_RESULT_T Res ) {
+    typedef struct { const char *Key; const char *Value; } PENDING_T;
+    int I;
+    int TableReg = -1;
+    PENDING_T *Pending = NULL;
+    int NPending = 0, CPending = 0;
+
+    int RegN = 0;
+    const char **RegStr = NULL;
+
+    if ( P == NULL || Res == NULL ) return;
+    RegN = ( int )P->maxstacksize;
+    if ( RegN <= 0 ) RegN = 1;
+    RegStr = ( const char ** )calloc( ( size_t )RegN, sizeof( const char * ) );
+    if ( RegStr == NULL ) return;
+
+    for ( I = 0; I < P->sizecode; I++ ) {
+        Instruction Op = P->code[ I ];
+        OpCode      C  = GET_OPCODE( Op );
+        int a = GETARG_A( Op );
+
+        if ( C == OP_LOADK ) {
+            int bx = GETARG_Bx( Op );
+            const char *s = ConstStr( P, bx );
+            if ( a >= 0 && a < RegN ) RegStr[ a ] = s;
+            continue;
+        }
+
+        if ( C == OP_NEWTABLE ) {
+            /* start a fresh pending list against a new table register */
+            NPending = 0;
+            TableReg = a;
+            if ( a >= 0 && a < RegN ) RegStr[ a ] = NULL;
+            continue;
+        }
+
+        if ( C == OP_SETFIELD && TableReg >= 0 && a == TableReg ) {
+            const char *Key   = ConstStr( P, GETARG_B( Op ) );
+            const char *Value = NULL;
+            int         cIsK  = GETARG_k( Op );
+            int         cArg  = GETARG_C( Op );
+            if ( cIsK ) {
+                Value = ConstStr( P, cArg );
+            } else if ( cArg >= 0 && cArg < RegN ) {
+                Value = RegStr[ cArg ];
+            }
+            /* Only record entries that look complete. A closure-source
+               SETFIELD (Value==NULL) simply drops. */
+            if ( Key != NULL && Value != NULL ) {
+                if ( NPending == CPending ) {
+                    int nc = CPending ? CPending * 2 : 8;
+                    PENDING_T *grown = ( PENDING_T * )realloc(
+                        Pending, ( size_t )nc * sizeof( PENDING_T ) );
+                    if ( grown == NULL ) break;
+                    Pending = grown; CPending = nc;
+                }
+                Pending[ NPending ].Key   = Key;
+                Pending[ NPending ].Value = Value;
+                NPending++;
+            }
+            continue;
+        }
+
+        if ( C == OP_SETTABUP ) {
+            int         cIsK = GETARG_k( Op );
+            int         cReg = GETARG_C( Op );
+            const char *Key  = ConstStr( P, GETARG_B( Op ) );
+            if ( !cIsK && cReg == TableReg && TableReg >= 0 &&
+                 StrEq( Key, "_export_types" ) ) {
+                int j;
+                for ( j = 0; j < NPending; j++ ) {
+                    ExportSetAbiShape( Res, Pending[ j ].Key,
+                                            Pending[ j ].Value );
+                }
+                NPending = 0;
+                TableReg = -1;
+            } else if ( !cIsK && cReg == TableReg ) {
+                /* SETTABUP to something else (`_exports`, a user global): the
+                   pending list belongs to a different table, so discard it. */
+                NPending = 0;
+                TableReg = -1;
+            }
+            continue;
+        }
+
+        /* Deliberately do NOT invalidate RegStr[a] on generic writes: doing
+           that risks clearing a valid LOADK that a later SETFIELD in the
+           same table literal still needs to read. Short-string values go
+           inline via the k-bit path and never touch RegStr; the risk of a
+           stale LOADK feeding a false override is bounded by the pending-
+           list gate above (only SETFIELDs inside a NEWTABLE-...-SETTABUP
+           span whose SETTABUP names `_export_types` reach ExportSetAbiShape)
+           and by ExportSetAbiShape itself dropping unknown keys. */
+        (void)a;
+    }
+
+    free( Pending );
+    free( RegStr );
 }
 
 static void ScanExports( Proto *P, PRESOLVE_RESULT_T Res ) {
@@ -354,7 +499,10 @@ static void ScanEntryExports( const char *Path, PRESOLVE_RESULT_T Res ) {
     Rc = luaL_loadfile( L, Path );
     if ( Rc != LUA_OK ) { lua_close( L ); return; }
     const LClosure *LC = clLvalue( s2v( L->top.p - 1 ) );
-    ScanExports( ( Proto * )LC->p, Res );
+    ScanExports    ( ( Proto * )LC->p, Res );
+    /* Optional shape overrides. Runs AFTER ScanExports so every export it
+       overrides is already in the array with the default "dd_d" placeholder. */
+    ScanExportTypes( ( Proto * )LC->p, Res );
     lua_close( L );
 }
 
@@ -653,6 +801,7 @@ void Resolve_FreeResult( PRESOLVE_RESULT_T R ) {
     R->BuiltinPackageCount  = 0;
     for ( size_t I = 0; I < R->ExportCount; I++ ) {
         free( R->Exports[ I ].Name );
+        free( R->Exports[ I ].AbiShape );
     }
     free( R->Exports );
     R->Exports      = NULL;

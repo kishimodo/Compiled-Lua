@@ -62,6 +62,13 @@ typedef struct LcPeLinkInputs {
     const char *const *export_names;    /* alphabetical is nice but not required;
                                            the linker sorts before emit         */
     int                nexport_names;
+    /* Per-export C-ABI shape token, one entry per export_names[] slot. NULL
+       (or NULL slots) mean "use the default `dd_d` dispatcher"; the recognised
+       tokens are `dd_d`, `ii_i`, `s_s` -- see build_export_trampolines /
+       aot_entry_dll.c for the marshalling those tokens promise. The linker
+       keeps this array paired with export_names[] across the sort inside
+       build_exports, so the caller need not pre-sort. */
+    const char *const *export_abi_shapes;
     const char        *dll_module_name; /* the DLLName field in the export dir;
                                            NULL falls back to the basename of
                                            out_path                             */

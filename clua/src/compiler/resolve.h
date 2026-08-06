@@ -21,10 +21,17 @@ typedef struct _RESOLVED_MODULE {
 
 /* One DLL export discovered by the module-scope scan. `Name` is the export
    name (the key in `_exports = { name = fn, ... }`); the compiler pipeline
-   resolves it to a function body downstream. Malloc'd, freed by
-   Resolve_FreeResult. */
+   resolves it to a function body downstream. `AbiShape` is the C-ABI shape
+   token the export trampoline should marshal for -- one of:
+     "dd_d"  double(double,double)      -- the default, always populated
+     "ii_i"  int64_t(int64_t,int64_t)
+     "s_s"   const char *(const char *)
+   Populated from an optional module-scope `_export_types = { name = shape }`
+   companion table; entries without an override keep the default. Malloc'd,
+   freed by Resolve_FreeResult. */
 typedef struct _RESOLVED_EXPORT {
     char *Name;
+    char *AbiShape;
 } RESOLVED_EXPORT_T, *PRESOLVED_EXPORT_T;
 
 typedef struct _RESOLVE_RESULT {

@@ -61,13 +61,24 @@ local function readfile(p)
   return s
 end
 
--- ---- 1. compile a small DLL with two named exports ----
+-- ---- 1. compile a small DLL with named exports across three ABI shapes ----
+-- The `_export_types` companion table tells the trampoline generator which
+-- dispatcher symbol each export routes to. `add` has no override, so it
+-- defaults to the double(double,double) shape (backward-compat with the
+-- pre-shape arc); `add_i` picks int64_t(int64_t,int64_t); `greet` picks
+-- const char *(const char *). All three flavours get exercised by the FFI
+-- round-trips further down.
 local src = TEMP .. "\\clua_test_dll_src.lua"
 local dll = TEMP .. "\\clua_test_dll_out.dll"
 writefile(src, [[
 _exports = {
-  add = function(a, b) return a + b end,
-  greet = function(name) return "hello, " .. name end,
+  add   = function(a, b) return a + b end,
+  greet = function(name) return "hi " .. name end,
+  add_i = function(a, b) return a + b end,
+}
+_export_types = {
+  add_i = "ii_i",
+  greet = "s_s",
 }
 ]])
 
@@ -137,8 +148,8 @@ if exists(dll) then
     local nname = u32(bytes, file_off + 24)
     local names_rva = u32(bytes, file_off + 32)
 
-    ok(nfunc == 2 and nname == 2,
-       "export directory reports 2 exports for add + greet",
+    ok(nfunc == 3 and nname == 3,
+       "export directory reports 3 exports for add + add_i + greet",
        ("nfunc=%d nname=%d"):format(nfunc, nname))
 
     -- resolve the names_rva to a file offset and pull each name string.
@@ -173,17 +184,19 @@ if exists(dll) then
         end
       end
       ok(names_found["add"],   "'add' appears in the export name table")
+      ok(names_found["add_i"], "'add_i' appears in the export name table")
       ok(names_found["greet"], "'greet' appears in the export name table")
     end
   end
 end
 
--- ---- 3. call the exported add(2,3) via LoadLibraryA + GetProcAddress ----
+-- ---- 3. call the exported functions via LoadLibraryA + GetProcAddress ----
 -- The trampoline generator wires each AddressOfFunctions slot to a small
--- .text stub that tail-jumps into Rt_DllExportDispatch(double,double,int).
--- Supported signature for this arc: (double,double)->double. The Lua fn
--- `add = function(a,b) return a+b end` is a natural match: numbers coerce
--- from doubles in both directions.
+-- .text stub that tail-jumps into one of the Rt_DllExportDispatch* variants,
+-- picked by the export's `_export_types` shape token:
+--   "dd_d" (default) -> Rt_DllExportDispatch(double, double, int32_t)
+--   "ii_i"           -> Rt_DllExportDispatch_ii_i(int64_t, int64_t, int32_t)
+--   "s_s"            -> Rt_DllExportDispatch_s_s(const char *, int64_t, int32_t)
 --
 -- The test loads the DLL through the platform's own loader (LoadLibraryA)
 -- so the DLL_PROCESS_ATTACH path -- Rt_DllMain / Rt_ModuleInit -- runs and
@@ -206,10 +219,13 @@ if exists(dll) then
       FARPROC GetProcAddress(HMODULE hModule, const char *lpProcName);
     ]])
     pcall(ffi.cdef, "typedef double (*add_fn_t)(double, double);")
+    pcall(ffi.cdef, "typedef int64_t (*add_i_fn_t)(int64_t, int64_t);")
+    pcall(ffi.cdef, "typedef const char *(*greet_fn_t)(const char *);")
     local mod = ffi.C.LoadLibraryA(dll)
     ok(mod ~= nil and mod ~= ffi.cast("HMODULE", 0),
        "LoadLibraryA succeeds on the built DLL")
     if mod ~= nil then
+      -- dd_d round-trip (the default, pre-shape behavior)
       local proc = ffi.C.GetProcAddress(mod, "add")
       ok(proc ~= nil and proc ~= ffi.cast("FARPROC", 0),
          "GetProcAddress('add') returns a non-NULL address")
@@ -218,6 +234,43 @@ if exists(dll) then
         local result = add(2.0, 3.0)
         ok(result == 5.0, "add(2.0, 3.0) returned 5.0 through the trampoline",
            ("got " .. tostring(result)))
+      end
+
+      -- ii_i round-trip
+      local proc_i = ffi.C.GetProcAddress(mod, "add_i")
+      ok(proc_i ~= nil and proc_i ~= ffi.cast("FARPROC", 0),
+         "GetProcAddress('add_i') returns a non-NULL address")
+      if proc_i ~= nil then
+        local add_i = ffi.cast("add_i_fn_t", proc_i)
+        -- Use values large enough that a stray double conversion would
+        -- lose precision, so a mis-shaped dispatcher is caught. 2^40 + 5
+        -- fits int64 exactly but rounds differently under IEEE double.
+        -- Lua 5.4 integers are int64 so a plain number passed to a cdata
+        -- signature is int64; skip the cdata boxing that the ffi
+        -- package's arithmetic metamethod does not support.
+        local a = 1099511627776 -- 2^40
+        local b = 5
+        local expect = a + b
+        local r = add_i(a, b)
+        ok(tonumber(r) == expect,
+           "add_i(2^40, 5) round-trips as int64_t through the ii_i dispatcher",
+           ("got " .. tostring(tonumber(r) or r) .. " want " .. tostring(expect)))
+      end
+
+      -- s_s round-trip. lua_tostring gives a Lua-owned string; the
+      -- dispatcher _strdup's it before popping, so the returned pointer
+      -- outlives the Lua GC cycle and is safe to read here. (The DLL leaks
+      -- one strdup per call today; documented behaviour for this arc.)
+      local proc_s = ffi.C.GetProcAddress(mod, "greet")
+      ok(proc_s ~= nil and proc_s ~= ffi.cast("FARPROC", 0),
+         "GetProcAddress('greet') returns a non-NULL address")
+      if proc_s ~= nil then
+        local greet = ffi.cast("greet_fn_t", proc_s)
+        local r = greet("world")
+        local got = r ~= nil and ffi.string(r) or "(nil)"
+        ok(got == "hi world",
+           "greet('world') returned 'hi world' through the s_s dispatcher",
+           ("got " .. tostring(got)))
       end
       ffi.C.FreeLibrary(mod)
     end

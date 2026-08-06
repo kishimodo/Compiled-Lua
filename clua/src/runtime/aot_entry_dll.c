@@ -28,11 +28,23 @@
  *      `add = function(a,b) return a+b end` satisfies (Lua numbers coerce
  *      cleanly from doubles).
  *
+*  Supported ABI shapes today (selected per-export by an optional
+ *  `_export_types = { name = "shape" }` companion table in the module; each
+ *  shape maps to its own dispatcher below):
+ *    - "dd_d"  double  (double, double)         Rt_DllExportDispatch
+ *    - "ii_i"  int64_t (int64_t, int64_t)       Rt_DllExportDispatch_ii_i
+ *    - "s_s"   const char * (const char *)      Rt_DllExportDispatch_s_s
+ *  Unannotated exports default to "dd_d" -- the pre-annotation behavior.
+ *  Every dispatcher's C signature takes THREE parameters -- the two visible
+ *  export inputs plus the ordinal -- so the linker-generated trampoline can
+ *  stay one shape (mov r8d, imm ; jmp rel32) regardless of the shape it
+ *  routes to. For s_s the second parameter is a filler slot.
+ *
  *  Not yet supported (deliberate scope for a later arc):
- *    - Other signatures (int/pointer/string in or out). The trampoline
- *      generator hard-codes the (double,double)->double marshalling; adding
- *      more shapes needs either an `_export_types` annotation table or a
- *      real signature parser and a per-shape trampoline template.
+ *    - Mixed / non-uniform shapes (e.g. `double(int, const char *)`) and
+ *      void-returning shapes. Adding one needs a new dispatcher below, a new
+ *      case in pe_emit.c's dispatcher_symbol_for_shape, and a new
+ *      --undefined root in pe_link_v2.c so gc-sections keeps it alive.
  *
  *  Compile-time: exactly one aot_entry_dll.o per DLL link. See pe_link_v2.c's
  *  toolchain resolution (aot_entry_dll_o).
@@ -306,6 +318,132 @@ double Rt_DllExportDispatch( double a, double b, int32_t ordinal ) {
     } else {
         /* Swallow the error; a real API would need a diagnostic channel back
            to the C caller. Pop the error message so the stack is balanced. */
+        lua_pop( L, 1 );
+    }
+    LeaveCriticalSection( &g_ModuleCs );
+    return result;
+}
+
+/* --------- additional C ABI shapes ---------------------------------------
+   Every dispatcher takes THREE fixed-position parameters so the linker's
+   generated trampoline is one shape for all -- 11 bytes, `mov r8d,imm ; jmp
+   rel32`. The Windows x64 ABI puts arg0 in rcx (or xmm0 if float), arg1 in
+   rdx (or xmm1 if float), and arg2 in r8 (or xmm2 if float); the trampoline's
+   `mov r8d, <ordinal>` therefore lands the ordinal exactly where each
+   dispatcher's third parameter already expects it.
+
+     Rt_DllExportDispatch_ii_i(int64_t a, int64_t b, int32_t ordinal)
+        rcx = a, rdx = b, r8d = ordinal
+     Rt_DllExportDispatch_s_s(const char *s, int64_t pad, int32_t ordinal)
+        rcx = s, rdx = <caller's second arg, unused>, r8d = ordinal
+        The `pad` slot is declared but never read -- callers of a
+        `const char *(*)(const char *)` type only pass one argument, and rdx
+        is scratch to the callee in the Microsoft x64 ABI, so its content is
+        undefined and safely ignored.
+
+   All three dispatchers share the same lookup, locking and error-swallowing
+   behavior as the double variant above. */
+
+int64_t Rt_DllExportDispatch_ii_i( int64_t a, int64_t b, int32_t ordinal ) {
+    lua_State  *L;
+    int64_t     result = 0;
+    int         status;
+    const char *name;
+
+    if ( g_L == NULL || g_ExportsRef == LUA_NOREF ||
+         g_ExportNames == NULL || ordinal < 0 || ordinal >= g_ExportCount ) {
+        return 0;
+    }
+    name = g_ExportNames[ ordinal ];
+    if ( name == NULL ) return 0;
+
+    EnterCriticalSection( &g_ModuleCs );
+    L = g_L;
+
+    lua_rawgeti( L, LUA_REGISTRYINDEX, g_ExportsRef );  /* [ tbl ] */
+    if ( lua_type( L, -1 ) != LUA_TTABLE ) {
+        lua_pop( L, 1 );
+        LeaveCriticalSection( &g_ModuleCs );
+        return 0;
+    }
+    lua_getfield( L, -1, name );                        /* [ tbl fn ] */
+    if ( !lua_isfunction( L, -1 ) ) {
+        lua_pop( L, 2 );
+        LeaveCriticalSection( &g_ModuleCs );
+        return 0;
+    }
+    lua_remove( L, -2 );                                /* [ fn ] */
+    lua_pushinteger( L, ( lua_Integer )a );
+    lua_pushinteger( L, ( lua_Integer )b );
+    status = lua_pcall( L, 2, 1, 0 );
+    if ( status == LUA_OK ) {
+        if ( lua_isinteger( L, -1 ) ) {
+            result = ( int64_t )lua_tointeger( L, -1 );
+        } else if ( lua_isnumber( L, -1 ) ) {
+            /* Lua may return a float from an integer-shape function
+               (`return a+b` on floats). lua_tointeger applies the same
+               narrowing convention Lua 5.4 uses for integer contexts. */
+            result = ( int64_t )lua_tointeger( L, -1 );
+        }
+        lua_pop( L, 1 );
+    } else {
+        lua_pop( L, 1 );
+    }
+    LeaveCriticalSection( &g_ModuleCs );
+    return result;
+}
+
+/* String return lifetime: lua_tostring returns a pointer into the Lua string
+   object on the stack. The moment we pop the stack the GC may reclaim it, so
+   the caller would see freed memory. _strdup the bytes before popping and
+   hand the owned copy back to the C caller; ownership crosses the DLL
+   boundary and freeing it is the caller's responsibility (CRT-compatible
+   free()). Returning NULL on any error keeps this well-defined for callers
+   that null-check the result. */
+const char *Rt_DllExportDispatch_s_s( const char *s, int64_t pad,
+                                       int32_t ordinal ) {
+    lua_State  *L;
+    const char *result = NULL;
+    int         status;
+    const char *name;
+    ( void )pad;    /* trampoline-position filler, see the comment above */
+
+    if ( g_L == NULL || g_ExportsRef == LUA_NOREF ||
+         g_ExportNames == NULL || ordinal < 0 || ordinal >= g_ExportCount ) {
+        return NULL;
+    }
+    name = g_ExportNames[ ordinal ];
+    if ( name == NULL ) return NULL;
+
+    EnterCriticalSection( &g_ModuleCs );
+    L = g_L;
+
+    lua_rawgeti( L, LUA_REGISTRYINDEX, g_ExportsRef );  /* [ tbl ] */
+    if ( lua_type( L, -1 ) != LUA_TTABLE ) {
+        lua_pop( L, 1 );
+        LeaveCriticalSection( &g_ModuleCs );
+        return NULL;
+    }
+    lua_getfield( L, -1, name );                        /* [ tbl fn ] */
+    if ( !lua_isfunction( L, -1 ) ) {
+        lua_pop( L, 2 );
+        LeaveCriticalSection( &g_ModuleCs );
+        return NULL;
+    }
+    lua_remove( L, -2 );                                /* [ fn ] */
+    if ( s != NULL ) {
+        lua_pushstring( L, s );
+    } else {
+        lua_pushnil( L );
+    }
+    status = lua_pcall( L, 1, 1, 0 );
+    if ( status == LUA_OK ) {
+        if ( lua_isstring( L, -1 ) ) {
+            const char *r = lua_tostring( L, -1 );
+            if ( r != NULL ) result = _strdup( r );
+        }
+        lua_pop( L, 1 );
+    } else {
         lua_pop( L, 1 );
     }
     LeaveCriticalSection( &g_ModuleCs );

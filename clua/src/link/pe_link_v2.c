@@ -370,13 +370,17 @@ static int LinkInternal( const LcToolchain *tc, const char *userObj,
                          const char *outExe, const char *entry_obj,
                          int no_interp, int require_ffi, unsigned used_libs,
                          int no_gc_sections, int output_kind,
-                         const char *const *export_names, int nexport_names,
+                         const char *const *export_names,
+                         const char *const *export_abi_shapes,
+                         int nexport_names,
                          char *err, size_t errlen ) {
     char  objbuf[ 6 ][ LC_PATH_MAX ];
     char  arcbuf[ N_CRT_ARCHIVES + 2 ][ LC_PATH_MAX ];
     const char *objs[ 6 ];
     const char *arcs[ N_CRT_ARCHIVES + 2 ];
-    const char *undef[ 2 + CLUA_STDLIB_ANCHOR_MAX ];   /* +1 for Rt_DllExportDispatch */
+    /* Undef slots: Clua_OpenFfi + three DLL dispatcher symbols + the stdlib
+    ** anchors. Extending the dispatcher list needs a matching bump here. */
+    const char *undef[ 4 + CLUA_STDLIB_ANCHOR_MAX ];
     int   nobj = 0, narc = 0, nundef = 0, i;
     LcPeLinkInputs in;
 
@@ -410,12 +414,19 @@ static int LinkInternal( const LcToolchain *tc, const char *userObj,
     }
 
     if ( require_ffi ) undef[nundef++] = "Clua_OpenFfi";
-    /* DLL: force-undef the shared export dispatcher so gc-sections cannot
-    ** sweep it. Every AddressOfFunctions entry the linker synthesises tail-
-    ** jumps into this symbol; without an --undefined root it looks dead
-    ** because nothing in the object graph references it. Same pattern as
-    ** the stdlib anchors and Clua_OpenFfi. */
-    if ( output_kind == LC_LINK_OUTPUT_DLL ) undef[nundef++] = "Rt_DllExportDispatch";
+    /* DLL: force-undef every export dispatcher so gc-sections cannot sweep
+    ** them. Each AddressOfFunctions entry the linker synthesises tail-jumps
+    ** into ONE of these symbols (chosen per-export by ABI shape); without an
+    ** --undefined root the sym looks dead because nothing in the object graph
+    ** references it. Force-undefining all three unconditionally is cheap --
+    ** the ones no export uses get pulled in and then gc-sections keeps them
+    ** alive for their --undefined root, adding ~200 bytes each in the worst
+    ** case. Same pattern as the stdlib anchors and Clua_OpenFfi. */
+    if ( output_kind == LC_LINK_OUTPUT_DLL ) {
+        undef[nundef++] = "Rt_DllExportDispatch";
+        undef[nundef++] = "Rt_DllExportDispatch_ii_i";
+        undef[nundef++] = "Rt_DllExportDispatch_s_s";
+    }
     nundef += StdlibAnchorUndefs( used_libs, &undef[ nundef ] );
 
     memset( &in, 0, sizeof in );
@@ -430,9 +441,10 @@ static int LinkInternal( const LcToolchain *tc, const char *userObj,
     in.no_gc_sections = no_gc_sections;
     in.output_kind    = ( output_kind == LC_LINK_OUTPUT_DLL )
                          ? LC_PE_OUTPUT_DLL : LC_PE_OUTPUT_EXE;
-    in.export_names   = export_names;
-    in.nexport_names  = nexport_names;
-    in.dll_module_name = NULL;   /* default: basename of out_path            */
+    in.export_names       = export_names;
+    in.export_abi_shapes  = export_abi_shapes;
+    in.nexport_names      = nexport_names;
+    in.dll_module_name    = NULL; /* default: basename of out_path            */
 
     return LcPe_Link( &in, err, errlen );
 }
@@ -551,20 +563,29 @@ int LuacLink_LinkProgram( const char *userObj, const char *outExe,
     }
 
     /* Copy the export names into a plain (const char **) array before calling
-    ** into the internal linker. Not needed on the exe path. */
-    const char **export_name_ptrs = NULL;
+    ** into the internal linker. Two parallel arrays go across: names and
+    ** the per-name ABI-shape tokens the trampoline generator needs. Not
+    ** needed on the exe path. */
+    const char **export_name_ptrs  = NULL;
+    const char **export_shape_ptrs = NULL;
     int          nexport_name_ptrs = 0;
     if ( output_kind == LC_LINK_OUTPUT_DLL && nexports > 0 && exports != NULL ) {
-        export_name_ptrs = ( const char ** )calloc( nexports, sizeof( char * ) );
-        if ( export_name_ptrs == NULL ) {
+        export_name_ptrs  = ( const char ** )calloc( nexports, sizeof( char * ) );
+        export_shape_ptrs = ( const char ** )calloc( nexports, sizeof( char * ) );
+        if ( export_name_ptrs == NULL || export_shape_ptrs == NULL ) {
+            free( export_name_ptrs );
+            free( export_shape_ptrs );
             set_errv( err, errlen, "oom" );
             return 0;
         }
-        /* exports is RESOLVED_EXPORT_T[] (compiler/resolve.h). Each entry is
-        ** simply { char *Name; }. */
+        /* exports is RESOLVED_EXPORT_T[] (compiler/resolve.h). Each entry
+        ** carries { char *Name; char *AbiShape; } -- Name is required,
+        ** AbiShape defaults to "dd_d" but may be NULL if the caller built the
+        ** array by hand. NULL slots get the default dispatcher downstream. */
         PRESOLVED_EXPORT_T ev = ( PRESOLVED_EXPORT_T )exports;
         for ( size_t e = 0; e < nexports; e++ ) {
-            export_name_ptrs[e] = ev[e].Name;
+            export_name_ptrs [ e ] = ev[ e ].Name;
+            export_shape_ptrs[ e ] = ev[ e ].AbiShape;
         }
         nexport_name_ptrs = ( int )nexports;
     }
@@ -575,20 +596,25 @@ int LuacLink_LinkProgram( const char *userObj, const char *outExe,
     if ( use_internal && !shared_rt ) {
         if ( !MakeStagedOutput( outExe, staged_out, err, errlen ) ) {
             free( export_name_ptrs );
+            free( export_shape_ptrs );
             return 0;
         }
         if ( !LinkInternal( &tc, userObj, staged_out, entry_obj,
                             no_interp, require_ffi, used_libs, no_gc_sections,
-                            output_kind, export_name_ptrs, nexport_name_ptrs,
+                            output_kind, export_name_ptrs, export_shape_ptrs,
+                            nexport_name_ptrs,
                             err, errlen ) ) {
             DeleteFileA( staged_out );
             free( export_name_ptrs );
+            free( export_shape_ptrs );
             return 0;
         }
         free( export_name_ptrs );
+        free( export_shape_ptrs );
         return PublishStagedOutput( staged_out, outExe, err, errlen );
     }
     free( export_name_ptrs );
+    free( export_shape_ptrs );
 
     /* ---- the shared-runtime link (--shared-rt) ----
     ** userObj + aot_entry.o + protoinit_rt.o (the LCPB deserializer reads

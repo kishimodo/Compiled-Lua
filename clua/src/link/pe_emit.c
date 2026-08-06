@@ -218,6 +218,10 @@ typedef struct {
     ** so the linker owns the string lifetime for the whole link. */
     int          output_kind;             /* LC_PE_OUTPUT_EXE / _DLL          */
     char       **export_names;            /* alphabetized                     */
+    /* Per-export ABI-shape token, one entry per export_names[] slot; kept in
+    ** lock-step with export_names across the alphabetical sort in
+    ** build_exports. NULL entries default to "dd_d". Owned by the linker. */
+    char       **export_abi_shapes;
     int          nexport_names;
     char        *dll_module_name;         /* value written into the export
                                              directory Name field             */
@@ -1587,10 +1591,13 @@ static int build_imports( Linker *L, ImportLayout *il ) {
 **
 ** Each AddressOfFunctions entry points at a per-name trampoline synthesised
 ** into OS_TEXT (build_export_trampolines below). Every trampoline stashes
-** its ordinal in r8d and tail-jumps to Rt_DllExportDispatch, defined in the
-** DLL's entry object (aot_entry_dll.o). Names are sorted alphabetically so
-** the runtime dispatcher's ordinal-to-name mapping stays in lock-step with
-** the PE loader's binary search on GetProcAddress.
+** its ordinal in r8d and tail-jumps to one of the Rt_DllExportDispatch*
+** variants, chosen per-export by the requested ABI shape (dd_d / ii_i /
+** s_s). All dispatchers live in the DLL's entry object (aot_entry_dll.o).
+** Names are sorted alphabetically so the runtime dispatcher's ordinal-to-
+** name mapping stays in lock-step with the PE loader's binary search on
+** GetProcAddress; the per-export shape array is permuted in lock-step by
+** sort_exports_paired so ordinal N still routes to the right dispatcher.
 =================================================================== */
 typedef struct {
     uint32_t dir_off;         /* offset of the export directory in OS_RDATA  */
@@ -1624,6 +1631,31 @@ static int cmp_str_ptr( const void *a, const void *b ) {
     return strcmp( sa, sb );
 }
 
+/* Sort export names alphabetically while keeping the per-export shape array
+** in lock-step. qsort's compare-by-value gives no cross-array hook, so we
+** sort an index permutation and apply it to both arrays in one pass. Called
+** from build_exports once per DLL link. */
+static void sort_exports_paired( char **names, char **shapes, int n ) {
+    /* Cocktail-simple: sort indices by name, then permute both arrays in a
+    ** single fresh-allocated buffer swap. n is tiny in practice (well under
+    ** 100 for any realistic DLL), so an O(n^2) selection sort keeps the code
+    ** minimal without adding a qsort_r dependency for the index compare. */
+    int i, j, mi;
+    for ( i = 0; i + 1 < n; i++ ) {
+        mi = i;
+        for ( j = i + 1; j < n; j++ ) {
+            if ( strcmp( names[ j ], names[ mi ] ) < 0 ) mi = j;
+        }
+        if ( mi != i ) {
+            char *tn = names[ i ];  names[ i ]  = names[ mi ];  names[ mi ]  = tn;
+            if ( shapes ) {
+                char *ts = shapes[ i ]; shapes[ i ] = shapes[ mi ]; shapes[ mi ] = ts;
+            }
+        }
+    }
+    ( void )cmp_str_ptr;    /* kept for other future callers if needed */
+}
+
 /* Reserve zeroed space for the export directory in OS_RDATA and record every
 ** structural offset. The RVAs are patched in finalize_exports once .rdata's
 ** final RVA is known. */
@@ -1635,9 +1667,11 @@ static int build_exports( Linker *L, ExportLayout *el ) {
     memset( el, 0, sizeof( *el ) );
     if ( L->output_kind != LC_PE_OUTPUT_DLL || L->nexport_names <= 0 ) return 1;
 
-    /* sort names alphabetically per the PE loader's binary-search assumption */
-    qsort( L->export_names, ( size_t )L->nexport_names, sizeof( char * ),
-           cmp_str_ptr );
+    /* sort names alphabetically per the PE loader's binary-search assumption;
+    ** keep the per-export ABI-shape array (if any) permuted in lock-step so
+    ** finalize_exports can pick the right dispatcher per name. */
+    sort_exports_paired( L->export_names, L->export_abi_shapes,
+                         L->nexport_names );
 
     el->nexports = ( uint32_t )L->nexport_names;
     el->name_off = ( uint32_t * )calloc( el->nexports, sizeof( uint32_t ) );
@@ -1683,11 +1717,19 @@ static int build_exports( Linker *L, ExportLayout *el ) {
 **
 ** Layout of one 11-byte trampoline (little-endian):
 **   41 B8 xx xx xx xx      mov  r8d, <ordinal>
-**   E9 yy yy yy yy         jmp  Rt_DllExportDispatch   (rel32)
+**   E9 yy yy yy yy         jmp  Rt_DllExportDispatch*  (rel32)
 **
-** The Windows x64 ABI pins the trampoline's two double parameters into
-** xmm0 / xmm1, which the dispatcher inherits by position (arg0=xmm0,
-** arg1=xmm1, arg2=r8/r8d for an int32). No shuffling is necessary. */
+** The Windows x64 ABI puts every fixed-position argument in its own
+** register (rcx/rdx/r8/r9 for ints/pointers, xmm0..xmm3 for floats). Every
+** dispatcher takes three parameters in the third slot's ordinal position,
+** so the trampoline's `mov r8d, imm` lands the ordinal exactly where each
+** signature expects it -- no shuffling needed for any shape:
+**   dd_d(double,double,int32_t)          uses xmm0, xmm1, r8d   -- ordinal
+**   ii_i(int64_t,int64_t,int32_t)        uses rcx,  rdx,  r8d   -- ordinal
+**   s_s (const char *,int64_t,int32_t)   uses rcx,  rdx (unused), r8d
+** The s_s dispatcher's second parameter (int64_t pad) is a filler position
+** so its signature matches the trampoline's fixed layout; the value in
+** rdx is scratch per the Microsoft ABI and the callee ignores it. */
 static int build_export_trampolines( Linker *L, ExportLayout *el ) {
     OutSec *text = &L->out[OS_TEXT];
     uint32_t i;
@@ -1720,28 +1762,72 @@ static int build_export_trampolines( Linker *L, ExportLayout *el ) {
 /* Write the export directory content once .rdata's final RVA and every
 ** exported symbol's RVA are known. Each AddressOfFunctions slot points at
 ** its per-name trampoline in OS_TEXT; each trampoline's jmp rel32 is
-** patched to target Rt_DllExportDispatch. The old placeholder symbol
-** Rt_DllExportDefault is no longer required by the export table (it
-** remains in aot_entry_dll.c as a legacy fallback for out-of-tree entry
-** objects). */
+** patched to target the Rt_DllExportDispatch* variant whose C signature
+** matches export i's ABI shape (dispatcher_symbol_for_shape below). The
+** old placeholder symbol Rt_DllExportDefault is no longer required by the
+** export table (it remains in aot_entry_dll.c as a legacy fallback for
+** out-of-tree entry objects). */
+
+/* Map an ABI-shape token to the runtime dispatcher symbol whose C signature
+** matches the trampoline's caller ABI. NULL / unknown falls back to the
+** default (double,double)->double dispatcher, which preserves the pre-shape
+** behavior for any export the compiler couldn't classify. */
+static const char *dispatcher_symbol_for_shape( const char *shape ) {
+    if ( shape == NULL || shape[0] == '\0' ) return "Rt_DllExportDispatch";
+    if ( strcmp( shape, "ii_i" ) == 0 ) return "Rt_DllExportDispatch_ii_i";
+    if ( strcmp( shape, "s_s"  ) == 0 ) return "Rt_DllExportDispatch_s_s";
+    /* "dd_d" and any unrecognized token fall through to the default. */
+    return "Rt_DllExportDispatch";
+}
+
 static int finalize_exports( Linker *L, ExportLayout *el ) {
     OutSec  *rdata = &L->out[OS_RDATA];
     OutSec  *text  = &L->out[OS_TEXT];
     uint8_t *base;
     uint32_t rva;
-    uint32_t dispatch_rva = 0;
-    GSym    *dispatch;
     int      i;
+    /* Three dispatchers today; extending this list needs a matching entry in
+    ** aot_entry_dll.c AND a force-undef in pe_link_v2.c so gc-sections cannot
+    ** sweep the new symbol. Keeping the list here avoids threading the shape
+    ** vocabulary through the linker's global sym scan. */
+    static const char *const kAllDispatchers[] = {
+        "Rt_DllExportDispatch",
+        "Rt_DllExportDispatch_ii_i",
+        "Rt_DllExportDispatch_s_s",
+        NULL
+    };
 
     if ( L->output_kind != LC_PE_OUTPUT_DLL || el->nexports == 0 ) return 1;
-    dispatch = gsym_find( L, "Rt_DllExportDispatch" );
-    if ( !dispatch || !dispatch->defined ) {
-        return lerr( L,
-            "DLL export dispatcher 'Rt_DllExportDispatch' undefined "
-            "(link aot_entry_dll.o or a compatible entry object)",
-            NULL );
+    /* Verify every dispatcher this DLL actually needs is present. A missing
+    ** default gets the original error text (kept for existing-caller parity);
+    ** a missing shape-specific dispatcher gets its own message so the user
+    ** knows which shape triggered it. */
+    for ( i = 0; kAllDispatchers[ i ] != NULL; i++ ) {
+        int used = 0;
+        uint32_t j;
+        const char *sym = kAllDispatchers[ i ];
+        for ( j = 0; j < el->nexports; j++ ) {
+            const char *shape = L->export_abi_shapes ? L->export_abi_shapes[ j ]
+                                                     : NULL;
+            if ( strcmp( dispatcher_symbol_for_shape( shape ), sym ) == 0 ) {
+                used = 1;
+                break;
+            }
+        }
+        if ( !used ) continue;
+        GSym *g = gsym_find( L, sym );
+        if ( !g || !g->defined ) {
+            if ( strcmp( sym, "Rt_DllExportDispatch" ) == 0 ) {
+                return lerr( L,
+                    "DLL export dispatcher 'Rt_DllExportDispatch' undefined "
+                    "(link aot_entry_dll.o or a compatible entry object)",
+                    NULL );
+            }
+            return lerr( L,
+                "DLL export dispatcher '%s' undefined (link aot_entry_dll.o "
+                "or a compatible entry object)", sym );
+        }
     }
-    dispatch_rva = dispatch->rva;
     base = rdata->raw.p;
     rva  = rdata->rva;
 
@@ -1759,12 +1845,20 @@ static int finalize_exports( Linker *L, ExportLayout *el ) {
         w32( d + 32, rva + el->names_off );            /* AddressOfNames        */
         w32( d + 36, rva + el->ords_off );             /* AddressOfNameOrdinals */
     }
-    /* address table: entry i -> RVA of trampoline i */
+    /* address table: entry i -> RVA of trampoline i. Each trampoline's jmp
+    ** rel32 targets the dispatcher whose C signature matches export i's ABI
+    ** shape -- lookup happens per-export because different shapes route
+    ** through different Rt_DllExportDispatch_* symbols. The presence check
+    ** above already guaranteed every dispatcher this loop can name is
+    ** defined, so gsym_find never returns NULL here. */
     for ( i = 0; i < ( int )el->nexports; i++ ) {
         uint32_t tr_rva = text->rva + el->trampoline_off[ i ];
+        const char *shape = L->export_abi_shapes ? L->export_abi_shapes[ i ]
+                                                 : NULL;
+        const char *sym   = dispatcher_symbol_for_shape( shape );
+        GSym       *d     = gsym_find( L, sym );
+        uint32_t    dispatch_rva = d ? d->rva : 0;
         w32( base + el->funcs_off + ( uint32_t )i * 4, tr_rva );
-        /* patch the trampoline's jmp rel32 to the dispatcher.
-        ** disp = target - (rip after jmp) = dispatch_rva - (tr_rva + 11) */
         {
             uint32_t jmp_off = el->trampoline_off[ i ] + 6; /* opcode E9 */
             int32_t disp = ( int32_t )( dispatch_rva -
@@ -2550,6 +2644,10 @@ static void linker_free( Linker *L ) {
         for ( i = 0; i < L->nexport_names; i++ ) free( L->export_names[i] );
         free( L->export_names );
     }
+    if ( L->export_abi_shapes ) {
+        for ( i = 0; i < L->nexport_names; i++ ) free( L->export_abi_shapes[i] );
+        free( L->export_abi_shapes );
+    }
     free( L->dll_module_name );
 }
 
@@ -2581,6 +2679,24 @@ int LcPe_Link( const LcPeLinkInputs *in, char *err, size_t errlen ) {
             if ( !L.export_names[e] ) { snprintf( err, errlen, "oom" ); goto out; }
         }
         L.nexport_names = in->nexport_names;
+        /* Parallel per-export ABI-shape array; NULL slots inherit the default
+        ** dispatcher (dd_d) at emit time. Kept sorted with export_names by
+        ** sort_exports_paired in build_exports. */
+        if ( in->export_abi_shapes != NULL ) {
+            L.export_abi_shapes = ( char ** )calloc( in->nexport_names,
+                                                     sizeof( char * ) );
+            if ( !L.export_abi_shapes ) {
+                snprintf( err, errlen, "oom" ); goto out;
+            }
+            for ( e = 0; e < in->nexport_names; e++ ) {
+                const char *s = in->export_abi_shapes[ e ];
+                if ( s == NULL ) continue;
+                L.export_abi_shapes[ e ] = _strdup( s );
+                if ( !L.export_abi_shapes[ e ] ) {
+                    snprintf( err, errlen, "oom" ); goto out;
+                }
+            }
+        }
     }
     if ( in->output_kind == LC_PE_OUTPUT_DLL ) {
         const char *nm = in->dll_module_name;
