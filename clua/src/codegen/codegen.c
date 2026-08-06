@@ -583,6 +583,95 @@ static int lower_table_frame( LcCodeBuf *B, LcInst *in, const char *FrameSym,
 
 /*!
  * @brief
+ *  -O2 inline fast path for OP_GETI: R[A] = R[B][C], for a compile-time
+ *  integer immediate C in [1, MAXARG_C]. Emits a runtime-checked prefix that
+ *  reproduces luaV_fastgeti (lvm.h:96-101) inline -- tag=table, unsigned
+ *  bounds against Table.alimit, isempty check on the slot, then a 16-byte
+ *  TValue copy via movups. Any miss jumps to the existing lower_table_frame
+ *  slow path (Rt_GetIF) whose reload_after=1 handles __index / stack
+ *  relocation. The fast path never grows the stack, so its own control flow
+ *  needs no reload.
+ *
+ *  Semantics reproduced (from lvm.h and Rt_GetIF):
+ *    tag byte at [t + 8] must equal ctb(LUA_VTABLE)=0x45 (t is a table)
+ *    (C - 1u) < hvalue(t)->alimit                          (array bounds)
+ *    !isempty(&array[C-1])   i.e. (tag & 0x0F) != 0        (slot occupied)
+ *  All three passing -> copy the 16-byte TValue R[A] = array[C-1] verbatim
+ *  (setobj2s: value + tag).
+ *
+ *  Table layout is verified against lobject.h: CommonHeader = 10 bytes,
+ *  flags/lsizenode pad to 12, unsigned int alimit at +12, TValue *array at
+ *  +16 (8-aligned). ctb(LUA_VTABLE) is LUA_VTABLE (5) | BIT_ISCOLLECTABLE
+ *  (0x40) = 0x45. LUA_TNIL = 0, and isempty() collapses to ttisnil() which
+ *  is novariant()==LUA_TNIL, i.e. (tag & 0x0F) == 0.
+ *
+ *  Caller must have handled: in->c > 0 (C-1 unsigned bounds sanity),
+ *  and LC_RTF_FITS so lower_table_frame's frame-form path applies.
+ */
+static int lower_geti_inline( LcCodeBuf *B, LcInst *in ) {
+    int    A = in->a, Br = in->b, C = in->c;
+    int32_t cm1 = ( int32_t )( C - 1 );          /* zero-based array index    */
+    size_t jne_tag, jbe_bnd, je_emp, jmp_done;
+    size_t slow, done;
+
+    /* 1) tag byte at [rdi + B*16 + 8] == ctb(LUA_VTABLE) = 0x45 */
+    if ( !X64Emit_CmpMem8Imm8( B, X64_RDI, Br * 16 + 8, ( int8_t )0x45 ) ) return 0;
+    if ( !X64Emit_JneRel8( B, 0 ) ) return 0; jne_tag = B->used - 1;
+
+    /* 2) rax = table pointer at [rdi + B*16] */
+    if ( !X64Emit_MovMemToReg( B, X64_RAX, X64_RDI, Br * 16 ) ) return 0;
+
+    /* 3) unsigned bounds: (C - 1) < alimit  <=>  cmp dword [rax+12], (C-1) ;
+       fast-path only if alimit is strictly greater, i.e. JA taken. We invert
+       to JBE (unsigned <=) to jump to the slow path when alimit <= (C-1). */
+    if ( !X64Emit_CmpMem32Imm32( B, X64_RAX,
+                                 ( int32_t )offsetof( Table, alimit ),
+                                 cm1 ) ) return 0;
+    if ( !X64Emit_JbeRel8( B, 0 ) ) return 0; jbe_bnd = B->used - 1;
+
+    /* 4) rax = array base at [rax + 16] */
+    if ( !X64Emit_MovMemToReg( B, X64_RAX, X64_RAX,
+                               ( int32_t )offsetof( Table, array ) ) ) return 0;
+
+    /* 5) isempty check: fall through iff (tag & 0x0F) != 0. LUA_VNIL / _VEMPTY /
+       _VABSTKEY all have low nibble = LUA_TNIL = 0, so a zero low nibble is
+       exactly the empty case (jump to slow); anything else means "present". */
+    if ( !X64Emit_TestMem8Imm8( B, X64_RAX, cm1 * 16 + 8, ( int8_t )0x0F ) ) return 0;
+    if ( !X64Emit_JeRel8( B, 0 ) ) return 0; je_emp = B->used - 1;
+
+    /* 6) 16-byte TValue copy: xmm0 = [rax + (C-1)*16] ; [rdi + A*16] = xmm0.
+       movups: unaligned 128-bit move, safe for 16-byte TValue slots regardless
+       of the array's absolute alignment (the array TValue is 16-aligned in
+       practice, but movups doesn't require it and costs the same on modern
+       hardware). */
+    if ( !X64Emit_MovupsLoadXmm( B, 0, X64_RAX, cm1 * 16 ) ) return 0;
+    if ( !X64Emit_MovupsStoreXmm( B, 0, X64_RDI, A * 16 ) ) return 0;
+
+    /* 7) jump over the slow path to the join point (rel8 fits: slow body is
+       roughly 29 bytes = 3 arg moves + call + 11-byte reload; well under 127). */
+    jmp_done = X64Emit_JmpRel8_Placeholder( B );
+    if ( jmp_done == ( size_t )-1 ) return 0;
+
+    /* 8) slow label: patch the three fast-path miss branches to land here,
+       then emit the standard frame-passing call to Rt_GetIF, reload_after=1
+       (metamethods can relocate the stack). This mirrors lower_table_frame,
+       reproduced inline so the slow body sits adjacent to the fast prefix. */
+    slow = B->used;
+    if ( !X64Emit_PatchRel8( B, jne_tag, slow ) ) return 0;
+    if ( !X64Emit_PatchRel8( B, jbe_bnd, slow ) ) return 0;
+    if ( !X64Emit_PatchRel8( B, je_emp,  slow ) ) return 0;
+    if ( !LcCg_EmitHelperCallFrame(
+            B, "Rt_GetIF",
+            ( int32_t )LC_RTF_PACK( in->a, in->b, in->c, 0 ),
+            /*reload*/1 ) ) return 0;
+
+    /* 9) done label: fast-path JMP lands here. */
+    done = B->used;
+    return X64Emit_PatchRel8( B, jmp_done, done );
+}
+
+/*!
+ * @brief
  *  LC_OP_GLOBAL_GET (OP_GETTABUP on _ENV): R[A] = UpVal[B][K[C]].
  *  Ported from v1 Lower_GetTabUp (codegen.c ~1328): set RDX=A,R8=B,R9=C, call
  *  Rt_GetTabUp, then EmitReloadRdiAndCache (a metamethod can grow the stack).
@@ -1736,7 +1825,21 @@ static int lower_inst( LcBranchCtx *Br, LcFunc *f, LcInst *in ) {
         case OP_NEWTABLE:  return lower_helper3( B, in, "Rt_NewTable", 1 );
         case OP_GETFIELD:  return lower_table_frame( B, in, "Rt_GetFieldF",
                                                      "Rt_GetField", /*signed_c*/0 );
-        case OP_GETI:      return lower_table_frame( B, in, "Rt_GetIF",
+        case OP_GETI:
+                           /* -O2+: emit the runtime-checked array-fast-path
+                              prefix in front of the frame-passing helper. The
+                              path is skipped when in->c <= 0 (the array index
+                              would underflow to a huge unsigned and always
+                              miss, wasting ~35 bytes) and when LC_RTF_FITS
+                              rejects the operands (the frame form would not
+                              be reached, so the slow half would call the
+                              wrong helper). -O0/-O1 keep the plain call
+                              unchanged, so their emitted bytes stay
+                              identical to before this arc. */
+                           if ( Fn->cg->opt_level >= 2 && in->c > 0
+                                && LC_RTF_FITS( in->a, in->b, in->c ) )
+                               return lower_geti_inline( B, in );
+                           return lower_table_frame( B, in, "Rt_GetIF",
                                                      "Rt_GetI",     /*signed_c*/0 );
         case OP_GETTABLE:  return lower_table_frame( B, in, "Rt_GetTableF",
                                                      "Rt_GetTable", /*signed_c*/0 );
