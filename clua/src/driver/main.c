@@ -510,6 +510,7 @@ int lc_drive( const LcDriverOptions *opt ) {
         if ( !LuacLink_LinkProgram( obj_path, opt->output,
                                     !lc_module_uses_debug( m ),
                                     res.RequiresFfi || lc_module_uses_ffi( m ),
+                                    lc_module_uses_coroutine( m ),
                                     lc_module_used_libs( m ),
                                     opt->shared_rt,
                                     opt->ld_internal,

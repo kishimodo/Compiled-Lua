@@ -37,6 +37,11 @@ struct _RESOLVED_EXPORT;   /* full type in compiler/resolve.h                */
 **               the link force-pulls the Clua_OpenFfi anchor (ffi_anchor.o
 **               in runtime-aot.a, exported by clua-rt.dll) so aot_entry's
 **               weak call opens the FFI.
+**   require_coro — nonzero when the program could reach the coroutine table
+**               (lc_module_uses_coroutine): the link force-pulls Coro_OpenLib
+**               so aot_entry's weak call installs the fiber-based coroutine
+**               library. Zero drops coro.o (~3 KB on rover's hello.exe) via
+**               --gc-sections.
 **   shared_rt — nonzero links against clua-rt.dll (via libclua-rt.dll.a +
 **               the per-exe protoinit_rt.o) instead of the static archives:
 **               ~30 KB exes that need clua-rt.dll beside them (or on PATH)
@@ -63,7 +68,8 @@ struct _RESOLVED_EXPORT;   /* full type in compiler/resolve.h                */
 **   nexports   — number of entries in exports[].
 */
 int LuacLink_LinkProgram( const char *userObj, const char *outExe,
-                          int no_interp, int require_ffi, unsigned used_libs,
+                          int no_interp, int require_ffi, int require_coro,
+                          unsigned used_libs,
                           int shared_rt, int ld_internal, int no_gc_sections,
                           int output_kind,
                           struct _RESOLVED_EXPORT *exports, size_t nexports,

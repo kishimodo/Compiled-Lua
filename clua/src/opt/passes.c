@@ -54,6 +54,24 @@ bool lc_module_uses_ffi(LcModule *m) {
   return module_has_string_const(m, "ffi") || module_has_string_const(m, "bit");
 }
 
+/* TRUE iff the program could reach the fiber-based coroutine library.
+   Same conservative family as lc_module_used_libs: name the string
+   "coroutine", OR hit one of the three reflection escape shapes that can
+   reach any library from a computed key. When false, the driver leaves
+   Coro_OpenLib out of the force-undef list and --gc-sections drops the
+   whole coro.o (~3 KB on rover) from the exe. */
+bool lc_module_uses_coroutine(LcModule *m) {
+  if (module_has_string_const(m, "coroutine")) return true;
+  /* The three "any library reachable from a computed key" shapes:
+     _G[k] / _ENV[k] / pairs(_G) (lc_module_reflects_globals),
+     package.loaded[k] (mention of "package"),
+     debug.getregistry()[LUA_RIDX_LOADED] (mention of "debug"). */
+  if (lc_module_reflects_globals(m)) return true;
+  if (module_has_string_const(m, "package")) return true;
+  if (module_has_string_const(m, "debug")) return true;
+  return false;
+}
+
 /* Which optional standard libraries this module can reach.
 **
 ** SOUNDNESS. The per-library bits are set by NAMING a library, so the whole

@@ -41,6 +41,15 @@ bool lc_module_uses_debug(LcModule *m);
 ** driver links the FFI anchor so the runtime globals exist in the exe. */
 bool lc_module_uses_ffi(LcModule *m);
 
+/* TRUE iff the program could reach the fiber-based coroutine library. The
+** conservative gate is the same three-shape family the stdlib-anchor mask
+** uses: any function names the string constant "coroutine", OR the module
+** hoists globals as a value (_G/_ENV in a register, `debug.getregistry()`
+** and friends), OR mentions the string "package"/"debug" (both are roads
+** into `package.loaded[k]`). When false, the driver skips force-undef'ing
+** Coro_OpenLib and the whole ~3 KB coro.o falls to --gc-sections. */
+bool lc_module_uses_coroutine(LcModule *m);
+
 /* Which OPTIONAL standard libraries the program references, so the AOT exe
 ** opens (and links) only those -- a `print` hello-world drops table/io/os/math/
 ** utf8/string (~38 KB). Bit i set => the matching luaopen_* is needed. base,

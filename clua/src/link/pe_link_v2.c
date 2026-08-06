@@ -368,7 +368,8 @@ static const char *kCrtArchives[] = {
 /* Link the program with the built-in COFF->PE64 linker (no gcc). */
 static int LinkInternal( const LcToolchain *tc, const char *userObj,
                          const char *outExe, const char *entry_obj,
-                         int no_interp, int require_ffi, unsigned used_libs,
+                         int no_interp, int require_ffi, int require_coro,
+                         unsigned used_libs,
                          int no_gc_sections, int output_kind,
                          const char *const *export_names,
                          const char *const *export_abi_shapes,
@@ -378,9 +379,10 @@ static int LinkInternal( const LcToolchain *tc, const char *userObj,
     char  arcbuf[ N_CRT_ARCHIVES + 2 ][ LC_PATH_MAX ];
     const char *objs[ 6 ];
     const char *arcs[ N_CRT_ARCHIVES + 2 ];
-    /* Undef slots: Clua_OpenFfi + three DLL dispatcher symbols + the stdlib
-    ** anchors. Extending the dispatcher list needs a matching bump here. */
-    const char *undef[ 4 + CLUA_STDLIB_ANCHOR_MAX ];
+    /* Undef slots: Clua_OpenFfi, Coro_OpenLib, the three DLL dispatcher
+    ** symbols (dd_d, ii_i, s_s), and the stdlib anchors. Extending the
+    ** dispatcher list needs a matching bump here. */
+    const char *undef[ 5 + CLUA_STDLIB_ANCHOR_MAX ];
     int   nobj = 0, narc = 0, nundef = 0, i;
     LcPeLinkInputs in;
 
@@ -414,14 +416,17 @@ static int LinkInternal( const LcToolchain *tc, const char *userObj,
     }
 
     if ( require_ffi ) undef[nundef++] = "Clua_OpenFfi";
+    /* Coroutine bring-up. When lc_module_uses_coroutine says the program
+    ** could reach the coroutine table (names "coroutine", or hits one of
+    ** the three reflection shapes), force-undef Coro_OpenLib so the weak
+    ** call in aot_entry.c actually resolves and coro.o stays in the link.
+    ** When false, coro.o is unreferenced and --gc-sections drops it
+    ** (~3 KB on rover's hello.exe). */
+    if ( require_coro ) undef[nundef++] = "Coro_OpenLib";
     /* DLL: force-undef every export dispatcher so gc-sections cannot sweep
     ** them. Each AddressOfFunctions entry the linker synthesises tail-jumps
-    ** into ONE of these symbols (chosen per-export by ABI shape); without an
-    ** --undefined root the sym looks dead because nothing in the object graph
-    ** references it. Force-undefining all three unconditionally is cheap --
-    ** the ones no export uses get pulled in and then gc-sections keeps them
-    ** alive for their --undefined root, adding ~200 bytes each in the worst
-    ** case. Same pattern as the stdlib anchors and Clua_OpenFfi. */
+    ** into ONE of these symbols (chosen per-export by ABI shape); force-
+    ** undefining all three unconditionally is cheap. */
     if ( output_kind == LC_LINK_OUTPUT_DLL ) {
         undef[nundef++] = "Rt_DllExportDispatch";
         undef[nundef++] = "Rt_DllExportDispatch_ii_i";
@@ -450,7 +455,8 @@ static int LinkInternal( const LcToolchain *tc, const char *userObj,
 }
 
 int LuacLink_LinkProgram( const char *userObj, const char *outExe,
-                          int no_interp, int require_ffi, unsigned used_libs,
+                          int no_interp, int require_ffi, int require_coro,
+                          unsigned used_libs,
                           int shared_rt, int ld_internal, int no_gc_sections,
                           int output_kind,
                           struct _RESOLVED_EXPORT *exports, size_t nexports,
@@ -600,7 +606,8 @@ int LuacLink_LinkProgram( const char *userObj, const char *outExe,
             return 0;
         }
         if ( !LinkInternal( &tc, userObj, staged_out, entry_obj,
-                            no_interp, require_ffi, used_libs, no_gc_sections,
+                            no_interp, require_ffi, require_coro,
+                            used_libs, no_gc_sections,
                             output_kind, export_name_ptrs, export_shape_ptrs,
                             nexport_name_ptrs,
                             err, errlen ) ) {
@@ -640,10 +647,11 @@ int LuacLink_LinkProgram( const char *userObj, const char *outExe,
            null and the library is never opened). */
         if ( !MakeStagedOutput( outExe, staged_out, err, errlen ) ) return 0;
         snprintf( cmd, sizeof( cmd ),
-                  "%s -o \"%s\" \"%s\" \"%s\" \"%s\" %s%s\"%s\" "
+                  "%s -o \"%s\" \"%s\" \"%s\" \"%s\" %s%s%s\"%s\" "
                   "-Wl,--subsystem,console -s -lm -lkernel32 -ladvapi32",
                   GccCommand( ), staged_out, userObj, entry_obj, tc.protoinit_o,
-                  require_ffi ? "-Wl,--undefined=Clua_OpenFfi " : "",
+                  require_ffi  ? "-Wl,--undefined=Clua_OpenFfi "  : "",
+                  require_coro ? "-Wl,--undefined=Coro_OpenLib " : "",
                   libundef,
                   tc.rt_implib );
         rc = run_cmd( cmd );
@@ -699,7 +707,7 @@ int LuacLink_LinkProgram( const char *userObj, const char *outExe,
     ** Reordering the archives instead would not work: runtime-aot.a's helpers call
     ** into the Lua core, so neither single ordering satisfies both directions. */
     snprintf( cmd, sizeof( cmd ),
-              "%s -o \"%s\" \"%s\" \"%s\" %s%s%s"
+              "%s -o \"%s\" \"%s\" \"%s\" %s%s%s%s"
               "-Wl,--undefined=__mingw_sprintf "
               "-Wl,--undefined=__mingw_fprintf "
               "-Wl,--undefined=__mingw_strtod "
@@ -707,7 +715,8 @@ int LuacLink_LinkProgram( const char *userObj, const char *outExe,
               "-Wl,--subsystem,console -Wl,--gc-sections -s "
               "-lm -lkernel32 -ladvapi32",
               GccCommand( ), staged_out, userObj, entry_obj, lvm_obj,
-              require_ffi ? "-Wl,--undefined=Clua_OpenFfi " : "",
+              require_ffi  ? "-Wl,--undefined=Clua_OpenFfi "  : "",
+              require_coro ? "-Wl,--undefined=Coro_OpenLib " : "",
               libundef,
               tc.runtime_a, tc.lualib_a );
     rc = run_cmd( cmd );

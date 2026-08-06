@@ -39,7 +39,10 @@
 #include "lvm.h"        /* clua_dispatch_hook + clua_dispatch_t typedef */
 
 #include "jit/dispatch.h"
-#include "runtime/coro.h"   /* fiber-based coroutines so native code can yield */
+/* runtime/coro.h intentionally NOT included: Coro_OpenLib is reached via a
+   weak reference below so a program that never names "coroutine" (and never
+   hoists globals as a value / mentions package|debug) drops the whole coro.o
+   translation unit under --gc-sections. */
 
 #include "lzio.h"           /* closed-world stub signatures (luaY_parser/luaU_*) */
 #include "llex.h"
@@ -81,6 +84,13 @@ static void *AotLookupHook( lua_State *L, void *proto ) {
  * adds -Wl,--undefined=Clua_OpenFfi then; see ffi_anchor.c). Weak: NULL when
  * the anchor isn't in the link. */
 extern void Clua_OpenFfi( lua_State *L ) __attribute__(( weak ));
+
+/* Fiber-based coroutine library. Weak: linked only when the program could
+ * reach the coroutine table (lc_module_uses_coroutine); otherwise coro.o
+ * (~3 KB on rover) is unreferenced and --gc-sections drops it. The driver
+ * force-undefines Coro_OpenLib when the analysis says so; the guarded call
+ * is a no-op when the symbol is null. */
+extern void Coro_OpenLib( lua_State *L ) __attribute__(( weak ));
 
 /* Optional standard-library anchors (stdlib_anchors.c). Each is force-undef'd
  * by the driver only when the program references that library (lc_module_used_libs),
@@ -637,10 +647,15 @@ int main( int argc, char **argv ) {
         lua_setglobal( L, "arg" );
     }
 
-    Coro_OpenLib( L );                        /* replace stock coroutine with the
+    if ( &Coro_OpenLib != NULL ) {            /* replace stock coroutine with the
                                                  fiber-based lib (native code can
                                                  yield across call frames), as v1's
-                                                 RuntimeMain does (runtime_init.c) */
+                                                 RuntimeMain does (runtime_init.c).
+                                                 Weak: null when the driver's
+                                                 lc_module_uses_coroutine scan let
+                                                 --gc-sections drop coro.o. */
+        Coro_OpenLib( L );
+    }
     if ( &Clua_OpenFfi != NULL ) {            /* ffi/bit referenced: anchor linked */
         Clua_OpenFfi( L );
     }

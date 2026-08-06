@@ -96,6 +96,12 @@ extern void Clua_OpenOslib  ( lua_State *L ) __attribute__(( weak ));
 extern void Clua_OpenUtf8lib( lua_State *L ) __attribute__(( weak ));
 extern void Clua_OpenDbglib ( lua_State *L ) __attribute__(( weak ));
 
+/* Fiber-based coroutine library. Weak, same shape as the exe entry:
+   Coro_OpenLib is only linked when the driver's lc_module_uses_coroutine
+   scan force-undefines it. When the DLL never touches coroutines the
+   symbol is null and --gc-sections drops the whole coro.o. */
+extern void Coro_OpenLib   ( lua_State *L ) __attribute__(( weak ));
+
 /* Same subset the exe entry opens: base + package always, then each optional
    library whose anchor was linked. luaL_openlibs would drag in every
    luaopen_* even for a DLL that never uses them. */
@@ -179,6 +185,13 @@ static int Rt_ModuleInit( void ) {
     if ( L == NULL ) return 0;
 
     Clua_OpenUsedLibsDll( L );
+    if ( &Coro_OpenLib != NULL ) {           /* fiber-based coroutine lib, same
+                                                weak-ref pattern the exe entry
+                                                uses; null when the driver's
+                                                lc_module_uses_coroutine scan
+                                                let gc-sections drop coro.o. */
+        Coro_OpenLib( L );
+    }
     clua_dispatch_hook = AotLookupHookDll;
 
     lua_gc( L, LUA_GCSTOP );
