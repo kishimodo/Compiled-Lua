@@ -163,6 +163,7 @@ COMPILER_SRCS := \
     $(SRC_DIR)/compiler/diag_hints.c  \
     $(SRC_DIR)/compiler/diag_pretty.c \
     $(SRC_DIR)/compiler/diag_suggest.c \
+    $(SRC_DIR)/compiler/diag_json.c   \
     $(SRC_DIR)/compiler/warn_unused.c \
     $(SRC_DIR)/compiler/resolve.c
 COMPILER_OBJS := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/obj/%.o,$(COMPILER_SRCS))

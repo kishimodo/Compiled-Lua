@@ -1,6 +1,7 @@
 #include "compiler/diag.h"
 #include "compiler/diag_hints.h"
 #include "compiler/diag_pretty.h"
+#include "compiler/diag_json.h"
 
 #include "lua.h"
 #include "lauxlib.h"
@@ -50,9 +51,8 @@ static int GetSourceLine( const char *Text, int Line, char *Out, size_t OutSize 
     }
 }
 
-/* Map a legacy `Category` string (possibly bracketed like "warning[Wunused]")
- * to (severity, code). The lint driver already bracketed the code into the
- * message text so tests that grep the raw text still match. */
+/* Map a legacy Category string ("warning", "note", "help", "hint" possibly
+ * with a "[Wxxx]" suffix) to the shared severity enum. */
 static LcSeverity SeverityFromCategory( const char *Category ) {
     if ( Category == NULL ) { return LCSEV_ERROR; }
     if ( strncmp( Category, "warning", 7 ) == 0 &&
@@ -69,9 +69,8 @@ static LcSeverity SeverityFromCategory( const char *Category ) {
 }
 
 /* Emit a "help:" block for the raw lua error text if the hint database has
- * an entry for it. Reuses the note color so it reads as a helper rather than
- * a new diagnostic. Called AFTER the primary error has been printed; a
- * missing hint is invisible. */
+ * an entry for it. Called AFTER the primary error; a missing hint is
+ * invisible. */
 static void PrintHintBlock( FILE *Out, const char *RawMsg ) {
     const char *Hint;
     const char *Category = NULL;
@@ -92,20 +91,66 @@ static void PrintHintBlock( FILE *Out, const char *RawMsg ) {
             fputs( "      ", Out );
         }
     }
-    ( void )Category;   /* reserved for future JSON emitter tagging */
+    ( void )Category;
     fflush( Out );
 }
 
-/* Route through the rustc/clang-style pretty printer with 2-lines-of-context.
- * Col <= 0 means "unknown column" -- we point the caret at the first
- * non-blank character of the source line so the reader still gets a location
- * hint. When SourceText is NULL (file unreadable / missing) we fall back to
- * the legacy single-line shim so unlocatable errors still get a header +
- * arrow row. */
+/* Peel a bracketed diagnostic code off the front of a message:
+ * "[E001] undefined global 'g'" -> Code="E001", *OutMsg advanced past the
+ * "[E001] " prefix. Returns 1 on success. Used by the JSON emitter so the
+ * `code` field can be separate from the plain message. */
+static int SplitCodePrefix( const char *In, char *CodeOut, size_t CodeCap,
+                            const char **OutMsg ) {
+    if ( In == NULL || In[ 0 ] != '[' ) { return 0; }
+    const char *Close = strchr( In, ']' );
+    if ( Close == NULL || Close == In + 1 ) { return 0; }
+    size_t N = ( size_t )( Close - In - 1 );
+    if ( N >= CodeCap ) { return 0; }
+    memcpy( CodeOut, In + 1, N );
+    CodeOut[ N ] = '\0';
+    for ( size_t I = 0; I < N; I++ ) {
+        char C = CodeOut[ I ];
+        int Ok = ( C >= 'A' && C <= 'Z' ) || ( C >= 'a' && C <= 'z' )
+               || ( C >= '0' && C <= '9' );
+        if ( !Ok ) { return 0; }
+    }
+    *OutMsg = Close + 1;
+    while ( **OutMsg == ' ' ) { ( *OutMsg )++; }
+    return 1;
+}
+
+/* Route through the rustc/clang-style pretty printer with 2-lines-of-context,
+ * OR through the JSON writer when --diagnostics-format=json was passed. Col
+ * <= 0 means "unknown column" -- text mode points the caret at the first
+ * non-blank character; JSON mode encodes it as null. */
 static void PrintDiag( const char *File, int Line, int Col,
                        const char *Category,
                        const char *Message,
                        const char *SourceText ) {
+    if ( LcDiag_GetFormat( ) == LC_DIAG_JSON ) {
+        /* Peel the "[Wxxx] " prefix off (if present) into its own `code` field
+         * so consumers get the machine-readable code separately from the
+         * human-readable message -- matching rustc's `code.code`. */
+        char        Code[ 32 ] = { 0 };
+        const char *Msg        = Message ? Message : "";
+        SplitCodePrefix( Msg, Code, sizeof( Code ), &Msg );
+        LC_DIAG_SPAN_T Span = { 0 };
+        Span.File      = File ? File : "<source>";
+        Span.Line      = Line;
+        Span.ColStart  = Col;
+        Span.ColEnd    = ( Col > 0 ) ? Col + 1 : 0;
+        Span.Label     = NULL;
+        Span.IsPrimary = 1;
+        LcDiag_WriteJson( stderr,
+                          SeverityFromCategory( Category ),
+                          Code[ 0 ] ? Code : NULL,
+                          Msg,
+                          &Span, 1,
+                          NULL, 0,
+                          NULL );
+        return;
+    }
+
     char LineBuf[ 1024 ];
     int  Len = ( SourceText != NULL )
              ? GetSourceLine( SourceText, Line, LineBuf, sizeof( LineBuf ) )
@@ -200,14 +245,13 @@ void Diag_PrintCompileError( const char *SourcePath, const char *RawLuaErr,
     ( void )Opts;                             /* legacy plumb; color mode is now process-global */
 
     if ( !ParseLuaError( RawLuaErr, &Line, &Msg ) ) {
-        /* Couldn't parse -- fall back to the located header only (no snippet).
-         * A hint may still fire off the raw message, so run the lookup against
-         * the whole string rather than the (missing) parsed body. */
-        LcDiag_PrintError( stderr,
-                           SourcePath ? SourcePath : "<source>",
-                           1, 1, "error",
-                           RawLuaErr ? RawLuaErr : "(unknown error)",
-                           NULL );
+        /* Couldn't parse the raw text. Route through PrintDiag so JSON mode
+         * still emits a valid object, and text mode still prints a header
+         * (with a hint if the raw message matches a hint pattern). */
+        PrintDiag( SourcePath ? SourcePath : "<source>",
+                   1, 1, "error",
+                   RawLuaErr ? RawLuaErr : "(unknown error)",
+                   NULL );
         PrintHintBlock( stderr, RawLuaErr );
         return;
     }

@@ -18,6 +18,11 @@
  * it via LcDiag_SetColorMode() before the first diagnostic is emitted. */
 static LC_DIAG_COLOR_MODE_T g_ColorMode = LCDIAG_COLOR_AUTO;
 
+/* Process-wide diagnostic format. Text is the default; the CLI overrides via
+ * LcDiag_SetFormat() before the resolve pass runs (i.e. before any diagnostic
+ * has had a chance to fire). */
+static LC_DIAG_FORMAT_T g_DiagFormat = LC_DIAG_TEXT;
+
 /* True once we've tried to enable ENABLE_VIRTUAL_TERMINAL_PROCESSING on the
  * process's stderr/stdout consoles. GetConsoleMode is a syscall; do it once. */
 static int g_VtProbed = 0;
@@ -76,6 +81,21 @@ int LcDiag_ParseColorMode( const char *Value, LC_DIAG_COLOR_MODE_T *Out ) {
     if ( strcmp( Value, "auto"   ) == 0 ) { *Out = LCDIAG_COLOR_AUTO;   return 1; }
     if ( strcmp( Value, "always" ) == 0 ) { *Out = LCDIAG_COLOR_ALWAYS; return 1; }
     if ( strcmp( Value, "never"  ) == 0 ) { *Out = LCDIAG_COLOR_NEVER;  return 1; }
+    return 0;
+}
+
+void LcDiag_SetFormat( LC_DIAG_FORMAT_T Mode ) {
+    g_DiagFormat = Mode;
+}
+
+LC_DIAG_FORMAT_T LcDiag_GetFormat( void ) {
+    return g_DiagFormat;
+}
+
+int LcDiag_ParseFormat( const char *Value, LC_DIAG_FORMAT_T *Out ) {
+    if ( Value == NULL || Out == NULL ) { return 0; }
+    if ( strcmp( Value, "text" ) == 0 ) { *Out = LC_DIAG_TEXT; return 1; }
+    if ( strcmp( Value, "json" ) == 0 ) { *Out = LC_DIAG_JSON; return 1; }
     return 0;
 }
 

@@ -94,6 +94,11 @@ typedef struct _CLI {
        (the default) enables color only when stderr is a TTY that understands
        ANSI, unless NO_COLOR is set or CLICOLOR_FORCE forces it. */
     LC_DIAG_COLOR_MODE_T ColorMode;
+    /* --diagnostics-format=<text|json>: swap the pretty printer for the
+       rustc-shaped JSON writer. Editor / LSP shims that already speak rustc
+       JSON can then consume CLua diagnostics without a text parser. Default
+       is text so the existing byte-for-byte output is preserved. */
+    LC_DIAG_FORMAT_T     DiagFormat;
 } CLI_T, *PCLI_T;
 
 
@@ -228,6 +233,20 @@ static int ParseArgv( int Argc, char **Argv, PCLI_T Cli ) {
                          Argv[ I ] );
                 return 0;
             }
+        } else if ( strncmp( Argv[ I ], "--diagnostics-format=", 21 ) == 0 ) {
+            if ( !LcDiag_ParseFormat( Argv[ I ] + 21, &Cli->DiagFormat ) ) {
+                fprintf( stderr,
+                         "[-] unknown --diagnostics-format '%s' (expected: text|json)\n",
+                         Argv[ I ] + 21 );
+                return 0;
+            }
+        } else if ( strcmp( Argv[ I ], "--diagnostics-format" ) == 0 && I + 1 < Argc ) {
+            if ( !LcDiag_ParseFormat( Argv[ ++I ], &Cli->DiagFormat ) ) {
+                fprintf( stderr,
+                         "[-] unknown --diagnostics-format '%s' (expected: text|json)\n",
+                         Argv[ I ] );
+                return 0;
+            }
         } else if ( strcmp( Argv[ I ], "--encrypt" ) == 0 ) {
             Cli->Encrypt = 1;
         } else if ( strcmp( Argv[ I ], "--randomize" ) == 0 ) {
@@ -321,7 +340,8 @@ int main( int Argc, char **Argv ) {
                 "[-I include_dir]... [--runtime path] [--lualib path] "
                 "[--imgui path | --no-imgui] "
                 "[--subsystem console|windows] [--type|-t exe|dll|obj|lib|blob]\n"
-                "      diag:     [-w|--no-warn] [--Werror] [--color=auto|always|never]\n"
+                "      diag:     [-w|--no-warn] [--Werror] [--color=auto|always|never] "
+                "[--diagnostics-format=text|json]\n"
                 "      payload:  [--strip] [--encrypt] [--randomize] "
                 "[--rich-header-strip]\n"
                 "      link:     [--gc-sections] [--high-entropy-va] "
@@ -353,6 +373,7 @@ int main( int Argc, char **Argv ) {
        ENABLE_VIRTUAL_TERMINAL_PROCESSING itself, and honors NO_COLOR /
        CLICOLOR_FORCE under --color=auto. */
     LcDiag_SetColorMode( Cli.ColorMode );
+    LcDiag_SetFormat   ( Cli.DiagFormat );
     DIAG_OPTS_T Diag = { 0 };
     Diag.Warnings         = Cli.NoWarn ? 0 : 1;
     Diag.WarningsAsErrors = Cli.WarningsAsErrors;

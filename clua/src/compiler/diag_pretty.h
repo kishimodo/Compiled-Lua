@@ -69,6 +69,14 @@ typedef struct _LC_DIAG_NOTE {
     int               nspans;
 } LcDiagNote;
 
+/* Output format for diagnostics. LC_DIAG_TEXT (the default) is byte-identical
+ * to the pre-JSON output. LC_DIAG_JSON emits one rustc-shaped JSON object per
+ * diagnostic on stderr (see diag_json.h). */
+typedef enum _LC_DIAG_FORMAT {
+    LC_DIAG_TEXT = 0,
+    LC_DIAG_JSON = 1
+} LC_DIAG_FORMAT_T;
+
 /* Set the process-wide color mode (default LCDIAG_COLOR_AUTO). Also enables
  * ENABLE_VIRTUAL_TERMINAL_PROCESSING on the current console when color is
  * requested/possible, so the ANSI escapes render as color rather than as
@@ -78,6 +86,18 @@ void LcDiag_SetColorMode( LC_DIAG_COLOR_MODE_T Mode );
 /* Parse a --color=<mode> argument. Returns 1 with *Out set on success,
  * 0 for an unknown value (caller reports the error). */
 int  LcDiag_ParseColorMode( const char *Value, LC_DIAG_COLOR_MODE_T *Out );
+
+/* Set the process-wide diagnostic format (default LC_DIAG_TEXT). Safe to call
+ * more than once; last write wins. */
+void LcDiag_SetFormat( LC_DIAG_FORMAT_T Mode );
+
+/* Read back the current format so the router in diag.c can pick text vs JSON
+ * without threading a mode argument through every diagnostic call site. */
+LC_DIAG_FORMAT_T LcDiag_GetFormat( void );
+
+/* Parse a --diagnostics-format=<text|json> argument. Returns 1 with *Out set
+ * on success, 0 for an unknown value (caller reports the error). */
+int  LcDiag_ParseFormat( const char *Value, LC_DIAG_FORMAT_T *Out );
 
 /* 1 if color should be emitted to Out under the current mode, 0 otherwise. */
 int  LcDiag_ShouldColor( FILE *Out );
