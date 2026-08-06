@@ -1947,6 +1947,74 @@ static int lower_inst( LcBranchCtx *Br, LcFunc *f, LcInst *in ) {
                can GC-step but never moves the Lua stack), so v1 Lower_SetList
                skips the reload — match it. --- */
         case OP_NEWTABLE:  return lower_helper3( B, in, "Rt_NewTable", 1 );
+        /* OP_GETFIELD inline fast path -- deferred, and here is why.
+         *
+         * The plan in docs/plan-0.3.0-beta.2.md lists an inline shortstr hash
+         * probe at -O2 as one of the wall-clock arcs. On paper it looks like
+         * the biggest of the three table inlines: OP_GETFIELD's key is a
+         * compile-time-known short string, and short strings are interned so
+         * the key pointer at compile time is a stable value. The interpreter
+         * itself is already inline at this call site via luaV_fastget +
+         * luaH_getshortstr, which is a tag check, a hash-slot compute, and a
+         * pointer-compare walk down the collision chain.
+         *
+         * The productive shapes reduce to three, none of which pays here:
+         *
+         *   (A) inline ONLY a table-tag check, then fall through to the
+         *       existing Rt_GetFieldF (which itself starts with the same tag
+         *       check via luaV_fastget). This is pure duplicate work: on the
+         *       fast path the check runs twice; on the slow path the outer
+         *       branch is wasted. No cycles saved either way -- the helper
+         *       still runs. Size cost of the wrapper (cmp + je + jmp + a
+         *       second CALL site) is ~40 bytes over the 24-byte baseline for
+         *       zero speed win. Strict loss.
+         *
+         *   (B) inline the tag check plus a call to a NEW helper
+         *       Rt_GetShortstr_Inline that assumes the tag is right. Saves
+         *       one branch inside luaV_fastget (~2 cycles), costs ~15 bytes
+         *       per site, requires a new runtime symbol, and duplicates the
+         *       body of the existing helper minus one line. Marginal at
+         *       best; adds surface (a new export) for a win that would not
+         *       clear this host's ~10% timing floor documented in
+         *       docs/benchmarks/size-and-speed-current.md.
+         *
+         *   (C) fully inline the shortstr probe: tag check, load key pointer
+         *       from Proto.k[C] (needs the ci -> func -> LClosure -> Proto
+         *       -> k chain lower_const already emits, ~5 dependent loads),
+         *       compute hashpow2 of TString.hash into the Node array, walk
+         *       one node, compare the key pointer against &Node.key_tvk.gc,
+         *       and on hit copy the 16-byte value to R[A]. Falls back to
+         *       Rt_GetFieldF on miss / collision / non-table. This is the
+         *       real win -- three dependent loads on the fast path instead
+         *       of a full call+return -- and it is what the plan file was
+         *       pointing at. It also needs: node offset constants (Node
+         *       shape from lobject.h), a hashpow2 sequence (mask by
+         *       (1 << lsizenode) - 1), Table field offsets (node, lsizenode
+         *       tag byte), and a live-range analysis to keep RDI valid
+         *       across the fallback CALL. Sound to write; not a small arc.
+         *
+         * A future arc that picks up (C) needs three things this arc does
+         * not add:
+         *
+         *   1. Node struct offset constants in codegen. lobject.h defines
+         *      Node as a union { NodeKey, TValue }; the value half is at
+         *      offset 0 and the key TValue-ish header (key_tvk.gc for the
+         *      TString pointer, key_tt for the tag) is at offset 16. Bake
+         *      those into codegen.c the way LC_OFF_PROTO_K is.
+         *   2. A way to reach Table.node and Table.lsizenode from the
+         *      table pointer. Both are direct fields; the same trick
+         *      lower_const uses for Proto.k applies.
+         *   3. A pre-computed key-pointer + hash pair in the operand
+         *      stream, or a runtime reload from Proto.k[C]. The reload is
+         *      the honest choice for a first slice: it costs the same five
+         *      dependent loads that lower_const already emits and factors
+         *      cleanly.
+         *
+         * Trigger for that arc: a quieter host that can resolve a 10%
+         * wall-clock effect, or a fixture-driven proxy (dependent-load
+         * count per site drops from ~7 to ~3 -- measurable in the
+         * disassembled .text without a stopwatch). Until then, keeping
+         * this single-CALL lowering wins on size and on maintenance. */
         case OP_GETFIELD:  return lower_table_frame( B, in, "Rt_GetFieldF",
                                                      "Rt_GetField", /*signed_c*/0 );
         case OP_GETI:
