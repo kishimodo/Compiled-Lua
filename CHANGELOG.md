@@ -7,6 +7,82 @@ of truth, `clua/src/common/version.h`, and this file in step.
 
 ## [Unreleased]
 
+## [0.3.0-beta.2] - 2026-08-06
+
+### Added
+
+- **DLL output.** `clua build foo.lua --output=dll -o foo.dll` produces a
+  windows DLL with a valid IMAGE_EXPORT_DIRECTORY and one per-export
+  trampoline in .text. A module-scope table `_exports = { name = fn, ... }`
+  declares the exports; the linker synthesises an 11-byte trampoline per
+  name that tail-jumps to `Rt_DllExportDispatch`, which looks the closure
+  up via the registry, marshals two doubles in and one double out through
+  the windows x64 ABI, and returns. The `add = function(a,b) return a+b end`
+  fixture works end-to-end. Other C ABI shapes (int, strings, pointers) are
+  the natural follow-up.
+- **Diagnostic dumps.** `--emit=bytecode|ir|asm` prints Lua 5.4 bytecode
+  per Proto, the LcModule after the optimizer, or the emitted x64 as an
+  assembly listing. With no `-o` the dump goes to stdout and no binary is
+  produced; with `-o` the binary is still written and the dump lands on
+  stdout. `--emit-only` repurposes `-o` as the dump destination.
+- **Parallel per-function codegen.** `-j N` on the command line, `CLUA_JOBS`
+  in the environment. Default is the CPU count clamped to the module's
+  function count. A win32 thread pool built on `_beginthreadex` and
+  `InterlockedIncrement`, with byte-identity across `-j` values gated by
+  `tools/test-parallel-codegen.lua`. Speedup ceiling on rover: 1.2 to 1.4x
+  on 8 cores; the linker is single threaded and dominates the budget.
+- **`--emit-def=<path>` and `--emit-implib=<path>`.** For DLL builds, write
+  a .def module-definition file listing exports. Both MSVC and MinGW dlltool
+  consume it to produce the matching .lib import archive. Wired but not
+  auto-triggered on `--output=dll` yet; explicit `--emit-def=<path>` works.
+- **Documentation site scaffolding.** `docs/site/` is a mkdocs source tree
+  with the material theme, navigation for getting-started, language, cli,
+  packages, ffi, perf and internals. `tools/gen-package-docs.lua` scans
+  package init.lua files for doc headers; `tools/gen-cli-docs.lua` parses
+  `clua help` and `rover help` into per-command reference pages.
+  `.github/workflows/docs.yml` builds the site on push to main; deploy is
+  off by default pending a maintainer flip.
+- **Three x64 encoders**: `JbeRel8`, `JeRel8`, `TestMem8Imm8`. Used by the
+  inline table fast paths below.
+- **Four more encoders** used by the OP_GETTABLE inline path:
+  `SubRaxImm8`, `ShlRaxImm8`, `CmpMem32Reg`, `LeaRegBaseIndex`.
+- **Object-freshness gate.** `tools/test-object-freshness.py` +
+  `tools/test-object-freshness.lua` catch the equal-mtime source-vs-object
+  trap that lets `make` silently keep linking stale code. Verified against
+  an injected zero-second case.
+- **Doc-style gate.** `tools/test-doc-style.lua` enforces the humanized
+  style rules on every tracked `.md`: ASCII only, no em dashes, no smart
+  quotes, no AI watermark phrases.
+
+### Changed
+
+- **Every markdown file rewritten to a humanised style.** 299 em dashes and
+  157 other non-ASCII characters replaced by rewriting sentences rather
+  than doing find-and-replace on punctuation. Every technical claim
+  preserved exactly.
+- **OP_GETI inline fast path at -O2.** Codegen emits a runtime-checked
+  prefix in front of the Rt_GetIF call: table-tag check, unsigned bounds
+  check against alimit, empty-slot test, then the 16-byte TValue copy.
+  About 36 bytes per inline site. -O0 and -O1 remain byte-identical to the
+  pre-arc output. Rover .text grew 3 kb at -O2 from the ~90 GETI sites.
+- **OP_GETTABLE integer-key inline fast path at -O2.** Same shape as GETI
+  plus a tag check on the register key first; falls back to Rt_GetTableF
+  when the key is not an integer. About 56 bytes per site.
+- **L->top sync hoisted off the fast path** in all nine table helpers.
+- **Frame base passed to the table helpers** instead of re-derived from L.
+  Rover .text -9,216 bytes; every call site 20 -> 12 bytes.
+- **Three linker wins**: section-GC symbol lookups cached (8-12 ms),
+  archive classification pre-pass (8-18 ms), relocation output-section
+  cache (4-12 ms). Combined ceiling on a 180 ms rover link: 20 to 52 ms,
+  or 11 to 29%.
+
+### Removed
+
+- Three stale xfail markers in `tests/packages/test_event.lua`,
+  `test_mutex.lua`, and `test_semaphore.lua`. The bugs they gated were
+  fixed months ago; the assertions had already been rewritten to plain
+  ok() calls but the xfail helper and known-bug prose lingered.
+
 ## [0.3.0-beta.1] - 2026-08-06
 
 ### changed
