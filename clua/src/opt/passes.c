@@ -676,7 +676,122 @@ void lc_pass_inline_small(LcModule *m)   { (void)m; /* TODO(M1) */ }
 /* lc_pass_ip_typeprop: real implementation at the end of this file (M2). */
 void lc_pass_monomorphize(LcModule *m)   { (void)m; /* TODO(M2) keep ANY fallback clone */ }
 void lc_pass_ip_devirt(LcModule *m)      { (void)m; /* TODO(M2) */ }
-void lc_pass_dead_global(LcModule *m)    { (void)m; /* TODO(M2) */ }
+/* lc_pass_dead_global: whole-program reachability from the roots.
+**
+** A function is a ROOT if it is the program entry (m->entry) or a
+** required-module main chunk (module_name != NULL). The runtime registers
+** the latter into package.preload, so `require` can reach them even though
+** no IR-level CALL/CLOSURE in the module does; treating them as roots is
+** the sound thing to do.
+**
+** Two reachability edges out of a reachable function are followed:
+**
+**   1. OP_CLOSURE (instantiation). The `b` field carries the parent's
+**      p->p[] index; the target LcFunc is the one whose `source` pointer
+**      matches p->p[bx]. This is the DEFAULT edge: current lift always
+**      emits CLOSURE for `local function f() ... end`, so almost every
+**      function has a closure fired by its parent, which makes CLOSURE
+**      reachability a superset of "is called" -- expect very few dead
+**      marks in current CLua from this edge alone.
+**
+**   2. OP_CALL with `call_callee` resolved to a module index by
+**      lc_pass_ip_typeprop (-O1). Redundant with edge 1 today (a callee
+**      must have been closured first) but harmless, and it is the seed a
+**      future analysis will use once CLOSURE ceases to be a required
+**      antecedent (inline closure elision, direct-CALL_DIRECT lowering).
+**      Because arena memory starts zeroed and ip_typeprop rewrites
+**      call_callee to -1 up front, a call_callee of 0 on a program where
+**      ip_typeprop did not run only ever OVER-marks function 0 as live,
+**      which is sound (fewer dead marks, never a false dead).
+**
+** The result is stored on LcFunc.dead. This pass is DATA ONLY: codegen and
+** ProtoInit still emit an entry for every function, unchanged. Wiring the
+** pruning into codegen and stripping dead entries from luac_fn_table is a
+** correctness-sensitive follow-up (see the commit message).
+**
+** Defensive: if a CLOSURE's Bx is out of range for the parent Proto's p[]
+** array or the referenced Proto has no matching LcFunc in the module, the
+** edge is skipped. The walk terminates because every mark flips a true to
+** a false and only newly-marked nodes are pushed onto the worklist. */
+void lc_pass_dead_global(LcModule *m) {
+  uint32_t i;
+  uint32_t *work = NULL;
+  uint32_t wn = 0;
+  int debug = getenv("CLUA_DEBUG_DEADGLOBAL") != NULL;
+
+  if (!m || m->nfuncs == 0) return;
+
+  /* start with every function dead */
+  for (i = 0; i < m->nfuncs; i++)
+    if (m->funcs[i]) m->funcs[i]->dead = true;
+
+  work = (uint32_t *)malloc((size_t)m->nfuncs * sizeof(uint32_t));
+  if (!work) return;
+
+  /* seed roots: the entry, and every required-module main chunk */
+  for (i = 0; i < m->nfuncs; i++) {
+    LcFunc *f = m->funcs[i];
+    if (!f) continue;
+    if (f == m->entry || f->module_name != NULL) {
+      if (f->dead) { f->dead = false; work[wn++] = i; }
+    }
+  }
+
+  /* worklist fixpoint over CLOSURE + resolved-CALL edges */
+  while (wn > 0) {
+    uint32_t fi = work[--wn];
+    LcFunc *f = m->funcs[fi];
+    Proto *p = f ? f->source : NULL;
+    uint32_t bi;
+    LcInst *in;
+    if (!f || !p) continue;
+    for (bi = 0; bi < f->nblocks; bi++) {
+      if (!f->blocks[bi]) continue;
+      for (in = f->blocks[bi]->first; in; in = in->next) {
+        int target = -1;
+        if (in->bc_op == OP_CLOSURE) {
+          int bx = in->b;
+          if (bx >= 0 && bx < p->sizep && p->p[bx]) {
+            Proto *np = p->p[bx];
+            uint32_t cj;
+            for (cj = 0; cj < m->nfuncs; cj++) {
+              if (m->funcs[cj] && m->funcs[cj]->source == np) {
+                target = (int)cj;
+                break;
+              }
+            }
+          }
+        } else if (in->bc_op == OP_CALL && in->call_callee > 0 &&
+                   (uint32_t)in->call_callee < m->nfuncs) {
+          target = in->call_callee;
+        }
+        if (target >= 0 && (uint32_t)target < m->nfuncs) {
+          LcFunc *tf = m->funcs[target];
+          if (tf && tf->dead) {
+            tf->dead = false;
+            work[wn++] = (uint32_t)target;
+          }
+        }
+      }
+    }
+  }
+
+  free(work);
+
+  if (debug) {
+    for (i = 0; i < m->nfuncs; i++) {
+      LcFunc *f = m->funcs[i];
+      const char *name = "(anon)";
+      if (!f) continue;
+      if (f == m->entry)          name = "(entry)";
+      else if (f->module_name)    name = f->module_name;
+      else if (f->source && f->source->source)
+        name = getstr(f->source->source);
+      fprintf(stderr, "[dg] fn %u %s dead=%d\n",
+              (unsigned)i, name, f->dead ? 1 : 0);
+    }
+  }
+}
 
 /* M3 escape analysis: slice 2 will make this the INTERPROCEDURAL non-escape
    summary that scalar replacement consumes. For the slice-1 intra-procedural

@@ -257,6 +257,13 @@ struct LcFunc {
   LcType   ret_type;           /* joined return type                      */
   uint32_t effect_summary;     /* LcEffect bitset for the whole function  */
   bool     escapes;            /* address/closure escapes the module      */
+  bool     dead;               /* set by lc_pass_dead_global: the whole-  */
+                               /* program reachability walk from m->entry  */
+                               /* (plus required-module main chunks) did   */
+                               /* not touch this function. Data only for    */
+                               /* now -- codegen and ProtoInit still emit    */
+                               /* the function; the pass records the fact    */
+                               /* so a later change can prune the body.      */
   LcArena *arena;              /* owning module's arena (set by lc_func_new) */
 };
 
