@@ -2,6 +2,7 @@
 #include "compiler/lua_compile.h"
 #include "compiler/diag.h"
 #include "compiler/diag_pretty.h"
+#include "compiler/diag_suggest.h"
 
 #include "lua.h"
 #include "lauxlib.h"
@@ -752,6 +753,13 @@ int Resolve_Walk( const char *EntryPath, PRESOLVE_OPTS_T Opts, PRESOLVE_RESULT_T
     StrList_Free( &Queue );
     StrList_Free( &Visited );
     Out->WarnCount = Warned;
+
+    /* Advisory "did you mean" pass over the entry module's globals.
+     * Purely diagnostic (no compile is failed, so byte-identity holds);
+     * emits at most one help note per (name, line) pair. Runs AFTER the
+     * require worklist so the module set fed to the pool is complete. */
+    Resolve_DiagUndefinedGlobals( EntryPath, Out );
+
     return 1;
 }
 
@@ -791,6 +799,380 @@ int Resolve_AppendBuiltinModules( PRESOLVE_RESULT_T Out, PRESOLVE_OPTS_T Opts,
         LuaCompile_FreeResult( &C );
     }
     return 1;
+}
+
+/* ---------------------------------------------------------------------------
+ * "Did you mean" scan for undefined globals.
+ *
+ * The Lua 5.4 compiler lowers every bare identifier read (`foo`) to
+ * `OP_GETTABUP A, _ENV, K"foo"`. We walk every reachable Proto's code[]
+ * looking for those, extract the key string, and consult a compilation-wide
+ * candidate pool (built from the stdlib names below plus the module's own
+ * declared identifiers). Any name absent from the pool is a candidate for
+ * a typo suggestion via LcDiag_SuggestName; if a close-enough neighbour
+ * exists, we emit a "did you mean" help note pointing at the source
+ * location.
+ *
+ * Behaviour is diagnostic-only: no compile is failed, so byte-identity of
+ * correct programs is unchanged. Programs whose globals all resolve
+ * against the pool produce zero output from this pass.
+ * ------------------------------------------------------------------------- */
+
+/* The stdlib names we consider "always in scope" in a compiled CLua
+ * program. These match the runtime's own set (aot_entry.c registers each
+ * stdlib and `arg` / `_clua` as globals; runtime_init.c drops the interp-
+ * only pseudo-globals like _VERSION so we don't list those). Adding a
+ * legitimate never-declared runtime global here silences its false
+ * positives; adding a made-up name silences a real one, so keep this
+ * list conservative. */
+static const char *const k_StdGlobals[] = {
+    /* task-specified core set */
+    "print", "pairs", "ipairs", "type", "tostring", "tonumber",
+    "error", "assert", "pcall", "xpcall", "select",
+    "setmetatable", "getmetatable",
+    "rawget", "rawset", "rawequal", "rawlen",
+    "unpack",
+    "table", "string", "math", "io", "os", "utf8", "debug", "coroutine",
+    "require",
+    /* runtime-supplied globals present in every AOT-compiled program */
+    "arg", "_G", "_ENV", "_clua",
+    /* frequently-appearing but not in the core set above; keeping the
+     * false-positive rate down on realistic programs matters more than
+     * a tighter pool. `load`/`loadstring`/`dofile` are banned by the
+     * closed-world check but including them here means a bare reference
+     * (never called) doesn't ALSO trip a "did you mean" note on top of
+     * the eventual closed-world error. */
+    "next", "collectgarbage", "load", "loadstring", "dofile",
+    "loadfile", "package",
+    NULL
+};
+
+/* Case-sensitive membership test against a bounded array of names. */
+static int InArrayN( const char *const *arr, int n, const char *name ) {
+    int i;
+    if ( arr == NULL || name == NULL || n <= 0 ) return 0;
+    for ( i = 0; i < n; i++ ) {
+        if ( arr[ i ] != NULL && strcmp( arr[ i ], name ) == 0 ) return 1;
+    }
+    return 0;
+}
+
+/* Growable pool of const-name pointers. Owns nothing -- points into
+ * static k_StdGlobals[], into Proto constant tables (owned by the loader
+ * lua_State) and into Res->Modules[i].Name (owned by the resolve
+ * result). Freed with free(pool.items) alone. */
+typedef struct {
+    const char **items;
+    int          count;
+    int          cap;
+} NamePool;
+
+static void Pool_Push( NamePool *P, const char *name ) {
+    if ( P == NULL || name == NULL || name[ 0 ] == '\0' ) return;
+    /* Dedup to keep the tie-break stable and the linear scan cheap. */
+    if ( InArrayN( P->items, P->count, name ) ) return;
+    if ( P->count == P->cap ) {
+        int          nc = P->cap ? P->cap * 2 : 32;
+        const char **ni = ( const char ** )realloc( P->items,
+                              ( size_t )nc * sizeof( const char * ) );
+        if ( ni == NULL ) return;
+        P->items = ni;
+        P->cap   = nc;
+    }
+    P->items[ P->count++ ] = name;
+}
+
+/* Walk one Proto's constant table and code[], adding every identifier the
+ * function DECLARES to the pool: local variable names (LocVar), globals
+ * ASSIGNED via SETTABUP over _ENV, and function definitions (which lower
+ * to a SETTABUP of a NEWTABLE/CLOSURE at module scope). Recurses into
+ * nested protos so inner-scope declarations feed the pool too -- a name
+ * declared as an inner local shouldn't trigger a "did you mean" suggestion
+ * for the outer reference to the same name, and vice versa. */
+static void PoolAddFromProto( Proto *P, NamePool *Pool ) {
+    int i;
+    if ( P == NULL || Pool == NULL ) return;
+
+    /* Locals: every named LocVar contributes. Compiler-synthesised
+     * placeholders start with '(' (like "(for state)"); those aren't
+     * user-typable, so exclude them. */
+    for ( i = 0; i < P->sizelocvars; i++ ) {
+        const LocVar *lv = &P->locvars[ i ];
+        const char   *nm;
+        if ( lv->varname == NULL ) continue;
+        nm = getstr( lv->varname );
+        if ( nm == NULL || nm[ 0 ] == '\0' || nm[ 0 ] == '(' ) continue;
+        Pool_Push( Pool, nm );
+    }
+
+    /* Globals assigned in this Proto: SETTABUP UP[A][K[B]] := ... where
+     * UP[A] is _ENV. We accept every SETTABUP against _ENV rather than
+     * confirm the A upvalue is truly _ENV, because assigning to a non-
+     * _ENV upvalue-table is exotic (would require `local t = ...; t.x = y`
+     * on a captured `t`) and the false-positive direction here is safe
+     * (an over-broad pool means we suggest less, never more). */
+    for ( i = 0; i < P->sizecode; i++ ) {
+        Instruction op = P->code[ i ];
+        OpCode      oc = GET_OPCODE( op );
+        int         b, ua;
+        if ( oc != OP_SETTABUP ) continue;
+        ua = GETARG_A( op );
+        if ( ua < 0 || ua >= P->sizeupvalues ) continue;
+        if ( P->upvalues[ ua ].name == NULL ||
+             strcmp( getstr( P->upvalues[ ua ].name ), "_ENV" ) != 0 ) {
+            continue;
+        }
+        b = GETARG_B( op );
+        if ( b < 0 || b >= P->sizek ) continue;
+        if ( !ttisstring( &P->k[ b ] ) ) continue;
+        Pool_Push( Pool, getstr( tsvalue( &P->k[ b ] ) ) );
+    }
+
+    for ( i = 0; i < P->sizep; i++ ) {
+        PoolAddFromProto( P->p[ i ], Pool );
+    }
+}
+
+/* Line at pc: greatest abslineinfo anchor <= pc, then walk lineinfo
+ * deltas forward. Mirrors warn_unused.c LineAtPc so the two diagnostic
+ * passes report the same line for the same instruction. */
+static int SuggestLineAtPc( const Proto *P, int pc ) {
+    int base_line = P->linedefined;
+    int base_pc   = -1;
+    int cur_line;
+    int i;
+    if ( P->abslineinfo != NULL && P->sizeabslineinfo > 0 ) {
+        for ( i = 0; i < P->sizeabslineinfo; i++ ) {
+            if ( P->abslineinfo[ i ].pc <= pc &&
+                 P->abslineinfo[ i ].pc > base_pc ) {
+                base_pc   = P->abslineinfo[ i ].pc;
+                base_line = P->abslineinfo[ i ].line;
+            }
+        }
+    }
+    cur_line = base_line;
+    if ( P->lineinfo == NULL ) return cur_line;
+    for ( i = base_pc + 1; i <= pc && i < P->sizelineinfo; i++ ) {
+        ls_byte d = P->lineinfo[ i ];
+        if ( ( int )d == -128 /* ABSLINEINFO */ ) continue;
+        cur_line += ( int )d;
+    }
+    return cur_line;
+}
+
+/* Get one 1-based source line from Text into Out (no newline). Returns the
+ * line length, or -1 if the line doesn't exist. Same shape as diag.c's
+ * GetSourceLine -- kept local so this pass doesn't depend on the private
+ * helper in that TU. */
+static int SuggestGetSourceLine( const char *Text, int Line,
+                                 char *Out, size_t OutSize ) {
+    int CurLine = 1;
+    const char *P = Text;
+    size_t I = 0;
+    if ( Text == NULL || Line < 1 ) return -1;
+    while ( CurLine < Line && *P != '\0' ) {
+        if ( *P == '\n' ) CurLine++;
+        P++;
+    }
+    if ( CurLine != Line ) return -1;
+    while ( P[ I ] != '\0' && P[ I ] != '\n' && I + 1 < OutSize ) {
+        Out[ I ] = ( P[ I ] == '\r' ) ? ' ' : P[ I ];
+        I++;
+    }
+    Out[ I ] = '\0';
+    return ( int )I;
+}
+
+/* Locate the name inside the source line (word-boundary check so `xy`
+ * inside `xyz` doesn't match), returning a 1-based column. Falls back to
+ * column 1 when the name isn't visible on the line (e.g. spilled over a
+ * continuation). */
+static int SuggestNameColumn( const char *line, const char *name ) {
+    size_t nlen;
+    const char *p;
+    if ( line == NULL || name == NULL ) return 1;
+    nlen = strlen( name );
+    if ( nlen == 0 ) return 1;
+    for ( p = line; *p != '\0'; p++ ) {
+        if ( strncmp( p, name, nlen ) == 0 ) {
+            char prev = ( p == line ) ? ' ' : p[ -1 ];
+            char next = p[ nlen ];
+            int  prev_id = ( prev == '_' ||
+                             ( prev >= 'a' && prev <= 'z' ) ||
+                             ( prev >= 'A' && prev <= 'Z' ) ||
+                             ( prev >= '0' && prev <= '9' ) );
+            int  next_id = ( next == '_' ||
+                             ( next >= 'a' && next <= 'z' ) ||
+                             ( next >= 'A' && next <= 'Z' ) ||
+                             ( next >= '0' && next <= '9' ) );
+            if ( !prev_id && !next_id ) return ( int )( p - line ) + 1;
+        }
+    }
+    return 1;
+}
+
+/* Track (name, pc) pairs already reported so a repeated `foo()` inside a
+ * loop only earns one help note, not one per bytecode reference. Small
+ * fixed cap because the pass is intentionally noisy-averse; if a program
+ * has more than 64 distinct undefined-global-with-suggestion pairs, the
+ * later ones just don't print (the first 64 are already telling). */
+typedef struct { const char *name; int line; } SeenPair;
+
+/* Walk one Proto's code[] for OP_GETTABUP through the _ENV upvalue whose
+ * K string isn't in the pool. For each such reference, ask
+ * LcDiag_SuggestName for a suggestion; if one comes back, emit a
+ * two-line diagnostic: an error header identifying the undefined name,
+ * followed by a `help:` note carrying the suggestion. Recurses into
+ * nested protos so a typo in an inner function is reported too. */
+static void ScanProtoUndef( Proto *P, const char *SourcePath,
+                            const char *SourceText, NamePool *Pool,
+                            SeenPair *Seen, int *SeenN, int SeenCap ) {
+    int i;
+    if ( P == NULL ) return;
+
+    for ( i = 0; i < P->sizecode; i++ ) {
+        Instruction op = P->code[ i ];
+        OpCode      oc = GET_OPCODE( op );
+        int         ua, kidx;
+        const char *name;
+        char        suggestion[ 64 ];
+        int         line, col, j, already, srclen;
+        char        line_buf[ 1024 ];
+        char        msg[ 256 ];
+
+        if ( oc != OP_GETTABUP ) continue;
+        ua = GETARG_B( op );
+        if ( ua < 0 || ua >= P->sizeupvalues ) continue;
+        if ( P->upvalues[ ua ].name == NULL ||
+             strcmp( getstr( P->upvalues[ ua ].name ), "_ENV" ) != 0 ) {
+            continue;
+        }
+        kidx = GETARG_C( op );
+        if ( kidx < 0 || kidx >= P->sizek ) continue;
+        if ( !ttisstring( &P->k[ kidx ] ) ) continue;
+        name = getstr( tsvalue( &P->k[ kidx ] ) );
+        if ( name == NULL || name[ 0 ] == '\0' ) continue;
+
+        /* In-pool means "defined somewhere in the program": skip. */
+        if ( InArrayN( Pool->items, Pool->count, name ) ) continue;
+
+        /* Ask the suggester. If it returns 0, either the name is too short
+         * for the confident-suggestion floor or no candidate lay within
+         * the edit-distance bound -- either way, stay quiet: a compile-time
+         * warning without an actionable fix is just noise. */
+        if ( !LcDiag_SuggestName( name, Pool->items, Pool->count,
+                                  suggestion, sizeof( suggestion ) ) ) {
+            continue;
+        }
+
+        line = SuggestLineAtPc( P, i );
+        already = 0;
+        for ( j = 0; j < *SeenN; j++ ) {
+            if ( Seen[ j ].line == line && Seen[ j ].name != NULL &&
+                 strcmp( Seen[ j ].name, name ) == 0 ) {
+                already = 1; break;
+            }
+        }
+        if ( already ) continue;
+        if ( *SeenN < SeenCap ) {
+            Seen[ *SeenN ].name = name;
+            Seen[ *SeenN ].line = line;
+            ( *SeenN )++;
+        } else {
+            /* Cap reached: emit the reference we discovered but stop
+             * remembering, so repeated names past this point still risk
+             * duplicating -- an acceptable trade against unbounded state. */
+        }
+
+        srclen = -1;
+        if ( SourceText != NULL ) {
+            srclen = SuggestGetSourceLine( SourceText, line, line_buf,
+                                           sizeof( line_buf ) );
+        }
+        col = ( srclen >= 0 ) ? SuggestNameColumn( line_buf, name ) : 1;
+
+        snprintf( msg, sizeof( msg ),
+                  "undefined variable '%s'", name );
+        LcDiag_PrintError( stderr, SourcePath, line, col,
+                           "warning[Wundef]", msg,
+                           ( srclen >= 0 ) ? line_buf : NULL );
+
+        snprintf( msg, sizeof( msg ),
+                  "did you mean '%s'?", suggestion );
+        LcDiag_PrintError( stderr, SourcePath, line, col,
+                           "help", msg,
+                           ( srclen >= 0 ) ? line_buf : NULL );
+    }
+
+    for ( i = 0; i < P->sizep; i++ ) {
+        ScanProtoUndef( P->p[ i ], SourcePath, SourceText, Pool,
+                        Seen, SeenN, SeenCap );
+    }
+}
+
+void Resolve_DiagUndefinedGlobals( const char *EntryPath, PRESOLVE_RESULT_T Res ) {
+    lua_State *L;
+    NamePool   Pool  = { 0 };
+    char      *Src   = NULL;
+    size_t     SrcLen = 0;
+    SeenPair   Seen[ 64 ];
+    int        SeenN = 0;
+
+    if ( EntryPath == NULL ) return;
+
+    /* Seed the pool with always-in-scope stdlib globals first so tie-break
+     * (earliest wins at equal distance) favours the "real" name over any
+     * later-added candidate: `pritn` should prefer `print` (stdlib) rather
+     * than a same-distance user local `paint`. */
+    {
+        int i;
+        for ( i = 0; k_StdGlobals[ i ] != NULL; i++ ) {
+            Pool_Push( &Pool, k_StdGlobals[ i ] );
+        }
+    }
+    /* require'd modules become identifiers the program is allowed to
+     * reference by their dotted name -- but a `require "json"` typically
+     * gets bound to a local; the plausible typo is `require "jsson"`
+     * which the require scan handles elsewhere. Add module names to the
+     * pool anyway so a stray `json` reference (some programs assign to a
+     * table with that name) doesn't false-positive. */
+    if ( Res != NULL ) {
+        size_t i;
+        for ( i = 0; i < Res->Count; i++ ) {
+            Pool_Push( &Pool, Res->Modules[ i ].Name );
+        }
+        for ( i = 0; i < Res->BuiltinPackageCount; i++ ) {
+            Pool_Push( &Pool, Res->BuiltinPackages[ i ] );
+        }
+    }
+
+    L = luaL_newstate( );
+    if ( L == NULL ) { free( Pool.items ); return; }
+    if ( luaL_loadfile( L, EntryPath ) != LUA_OK ) {
+        /* Front-end already printed the compile error via Resolve_Walk;
+         * nothing left to scan. */
+        lua_close( L );
+        free( Pool.items );
+        return;
+    }
+    {
+        Proto *P = ( Proto * )clLvalue( s2v( L->top.p - 1 ) )->p;
+        PoolAddFromProto( P, &Pool );
+
+        /* Slurp the source once for snippet lines; NULL just means the
+         * printer omits the source/caret rows. SrcLen is retained by the
+         * signature but not used here -- the snippet copier stops at NUL. */
+        Src = Diag_SlurpFile( EntryPath, &SrcLen );
+        ( void )SrcLen;
+
+        ScanProtoUndef( P, EntryPath, Src, &Pool,
+                        Seen, &SeenN,
+                        ( int )( sizeof( Seen ) / sizeof( Seen[ 0 ] ) ) );
+    }
+
+    free( Src );
+    lua_close( L );
+    free( Pool.items );
 }
 
 void Resolve_FreeResult( PRESOLVE_RESULT_T R ) {

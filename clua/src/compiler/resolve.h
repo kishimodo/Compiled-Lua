@@ -76,6 +76,26 @@ typedef struct _RESOLVE_OPTS {
 
 int Resolve_Walk( const char *EntryPath, PRESOLVE_OPTS_T Opts, PRESOLVE_RESULT_T Out );
 
+/* Scan the entry module's bytecode for global references (OP_GETTABUP
+ * through _ENV) that name identifiers absent from a compilation-wide
+ * candidate pool (stdlib functions, locals declared in the module, globals
+ * assigned in the module, require'd module names) and, when the misspelled
+ * identifier is close enough to a candidate under Damerau-Levenshtein, emit
+ * a `help: did you mean 'X'?` diagnostic pointing at the source location.
+ *
+ * Purely advisory: no compile is failed. Byte-identity of correct programs
+ * is unchanged -- programs whose global references all resolve produce no
+ * output from this pass. Threshold policy lives in diag_suggest.c
+ * (LC_SUGGEST_MIN_BAD_LEN / LC_SUGGEST_MAX_DIST): unknown identifiers of
+ * fewer than 4 characters, or with no candidate within edit distance 2,
+ * are silently ignored.
+ *
+ * `EntryPath` is the same path passed to Resolve_Walk (the entry .lua
+ * source); `Res` is the completed resolve result whose require'd module
+ * names feed the candidate pool. Both may be NULL, in which case the scan
+ * is a no-op. */
+void Resolve_DiagUndefinedGlobals( const char *EntryPath, PRESOLVE_RESULT_T Res );
+
 /* AOT driver only: compile every BuiltinPackages[] source (located under
    Paths_BuiltinPackagesRoot) and append each as an ordinary module so the
    backend AOT-compiles + preload-registers it like any user module. v1

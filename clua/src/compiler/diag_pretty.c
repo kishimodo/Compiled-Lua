@@ -120,9 +120,10 @@ static const char *C_BoldBluSeq ( int C ) { return C ? "\x1b[1;34m" : ""; }
 static const char *C_BoldWhtSeq ( int C ) { return C ? "\x1b[1;37m" : ""; }
 
 /* Pick the category color. "warning" and its bracketed variants (e.g.
- * "warning[Wunused]" from the -W scanner) paint yellow; "note" cyan; every
- * other value paints as an error (bold red) -- so a typoed or unknown
- * category is loud rather than silently dim. */
+ * "warning[Wunused]" from the -W scanner) paint yellow; "note" and "help"
+ * paint cyan (they're advisory follow-ups to a primary error, not a new
+ * error themselves); every other value paints as an error (bold red) --
+ * so a typoed or unknown category is loud rather than silently dim. */
 static const char *CategoryColor( const char *Category, int C ) {
     if ( Category == NULL ) { return C_BoldRedSeq( C ); }
     if ( strncmp( Category, "warning", 7 ) == 0 &&
@@ -130,6 +131,13 @@ static const char *CategoryColor( const char *Category, int C ) {
         return C_BoldYelSeq( C );
     }
     if ( strncmp( Category, "note", 4 ) == 0 &&
+         ( Category[ 4 ] == '\0' || Category[ 4 ] == '[' ) ) {
+        return C_BoldCynSeq( C );
+    }
+    /* "help" is the follow-up category used by the diag_suggest "did you
+     * mean" pass -- rendered in the same cyan as "note" because it's an
+     * advisory suggestion beneath the primary error, not a new error. */
+    if ( strncmp( Category, "help", 4 ) == 0 &&
          ( Category[ 4 ] == '\0' || Category[ 4 ] == '[' ) ) {
         return C_BoldCynSeq( C );
     }
