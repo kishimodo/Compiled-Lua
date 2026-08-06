@@ -6,8 +6,8 @@ if not ok_req then print("[~] SKIP test_property (" .. tostring(property) .. ")"
 
 local fails = 0
 local function ok(c, m) if not c then fails = fails + 1; print("[-] FAIL test_property: " .. tostring(m)) end end
--- XFAIL helper (CLAUDE.md convention): keep the CORRECT invariant for a known,
--- unfixed bug visible without failing the run.
+-- XFAIL helper: keep the CORRECT invariant for a known, unfixed bug visible
+-- without failing the run.
 local function xfail(cond, desc, bug)
     if cond then print(("[!] XPASS test_property: %s -- bug %s appears FIXED, remove this xfail"):format(desc, bug))
     else        print(("[x] XFAIL test_property: %s (known bug %s)"):format(desc, bug)) end

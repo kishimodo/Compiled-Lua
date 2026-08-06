@@ -551,8 +551,8 @@ is adapted to produce **native** package objects (`packages_native.mk`) rather
 than embedded-bytecode objects. Packages needing an absent external DLL still
 `SKIP` at test time.
 
-**Testing — reuse the 5-layer auto-discovered suite** (CLAUDE.md is authoritative)
-and add the killer layer for an optimizing compiler:
+**Testing — reuse the 5-layer auto-discovered suite** and add the killer layer
+for an optimizing compiler:
 
 - **C unit** (`tests/unit/test_*.c`): add tests for the IR builder, each opt pass
   (assert the lattice/rewrite), the x64 emitter relocations, the PE writer
@@ -565,9 +565,8 @@ and add the killer layer for an optimizing compiler:
   is how you prove the optimizing AOT preserves Lua 5.4 semantics. Every optimizer
   bug surfaces here. Make this the gate for every milestone. v1 is the frozen
   oracle — never "fix" a differential failure by changing v1.
-- **XFAIL discipline** (CLAUDE.md): a test asserts *correct* behavior; a known
-  unfixed bug is marked `XFAIL`, not worked around, so it flips to `XPASS` when
-  fixed.
+- **XFAIL discipline**: a test asserts *correct* behavior; a known unfixed bug
+  is marked `XFAIL`, not worked around, so it flips to `XPASS` when fixed.
 
 `build\run-tests.bat` builds the products and runs every layer with one tally.
 
@@ -607,8 +606,7 @@ test is red" is a failure.
 ## 16. Definition of done (per change) & working agreement
 
 - Every feature/pass ships with a test in the matching layer; run
-  `build\run-tests.bat` and report the real tally before calling it done
-  (CLAUDE.md testing discipline).
+  `build\run-tests.bat` and report the real tally before calling it done.
 - The differential oracle is the arbiter of correctness; a red diff blocks merge.
 - Known, unfixed bugs are `XFAIL`-marked and visible, never hidden.
 - Don't modify the front-end or the runtime *semantics*; if you think you must,

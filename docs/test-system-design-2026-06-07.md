@@ -105,12 +105,12 @@ tests that must compile standalone.)
 - **packages:** aes (GCM+CBC round-trip), hash (known vectors), json, base64,
   semver, uuid, csv, cbor; plus ffi.gc users that need no external DLL.
 
-## Workflow convention (CLAUDE.md)
+## Workflow convention
 
-A new `CLAUDE.md` "Testing discipline" section: when you add or change a feature,
-function, or system, add/adjust a test in the matching `tests/` layer and run
-`build\run-tests.bat` before calling it done. Auto-discovery means you just drop a
-file in — no wiring. Documents the four test types + the one command.
+When you add or change a feature, function, or system, add or adjust a test in
+the matching `tests/` layer and run `build\run-tests.bat` before calling it done.
+Auto-discovery means you just drop a file in — no wiring. Four test types, one
+command.
 
 ## Acceptance criteria
 

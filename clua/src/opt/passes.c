@@ -235,8 +235,7 @@ bool lc_optimize(LcModule *m, const LcPassConfig *cfg) {
     ** Narrowing the second case needs a real "does this instruction read register
     ** A" dataflow query, which Lua 5.4's opcode tables do not expose; two
     ** structural approximations were tried and both were wrong about the emitted
-    ** shape, so the guard stays conservative until the analysis is done properly.
-    ** See docs/benchmarks/session-2026-07-26-speed-and-size.md. */
+    ** shape, so the guard stays conservative until the analysis is done properly. */
     if (no_proofs && getenv("CLUA_QUIET_PROOFS") == NULL) {
       fprintf(stderr,
               "clua: note: type proofs disabled for this module (%s), which "
@@ -1145,8 +1144,7 @@ next_fn:
 
 /* ================================================================== */
 /* M3 -- escape analysis + scalar replacement of non-escaping tables.  */
-/* slice 1: intra-procedural. Spec:                                     */
-/*   docs/superpowers/specs/2026-06-13-scalar-replacement-o3-design.md   */
+/* Slice 1: intra-procedural.                                           */
 /*                                                                      */
 /* A table from OP_NEWTABLE whose home register never escapes its        */
 /* function and is touched ONLY by constant-key field ops can never gain */

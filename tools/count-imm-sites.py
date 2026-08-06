@@ -17,7 +17,8 @@ form:
 
 The tool also counts the pre-change 30-byte all-imm64 triple. After the imm32
 commit that counter must read 0: a nonzero value means the build is half-applied
-(a stale codegen object), which is exactly the failure CLAUDE.md warns about.
+(a stale codegen object), which is the class of failure
+tools/check-object-freshness.py exists to catch.
 
 ACCURACY. On a pre-change binary this is exact: the anchored shape is 33 bytes
 and cannot plausibly occur by accident, and both this matcher and a simpler

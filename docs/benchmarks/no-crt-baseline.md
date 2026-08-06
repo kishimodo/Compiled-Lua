@@ -1,9 +1,7 @@
 # Baseline: the libc dependency surface, and where `hello.exe`'s bytes are
 
-Measured 2026-07-26 on `codex/concurrency-size-stability` (`7fec28f` + the
-delivered slice), warm tree, toolchain `nm`/`objdump` from
-`gcc-15.2.0 … binutils-2.45 … mingw-w64-v13.0.0-ucrt`. The plan that consumes
-these numbers is [`docs/roadmaps/no-crt.md`](../roadmaps/no-crt.md).
+Measured 2026-07-26 at `7fec28f` + the delivered slice, warm tree, toolchain
+`nm`/`objdump` from `gcc-15.2.0 … binutils-2.45 … mingw-w64-v13.0.0-ucrt`.
 
 ## 1. `hello.exe` is not CRT bytes
 

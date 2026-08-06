@@ -8,8 +8,6 @@
 -- in its OWN function (a dedicated register), which is the realistic pattern and
 -- the firing path. Bundling them in one main chunk would reuse a register and
 -- (correctly) bail every candidate.
---
--- Spec: docs/superpowers/specs/2026-06-13-scalar-replacement-o3-design.md
 
 -- 1. basic struct, string keys (fires)
 local function f_struct(a, b)
