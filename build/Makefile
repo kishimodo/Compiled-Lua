@@ -160,6 +160,7 @@ COMPILER_SRCS := \
     $(SRC_DIR)/compiler/lua_compile.c \
     $(SRC_DIR)/compiler/pe_link.c     \
     $(SRC_DIR)/compiler/diag.c        \
+    $(SRC_DIR)/compiler/diag_hints.c  \
     $(SRC_DIR)/compiler/diag_pretty.c \
     $(SRC_DIR)/compiler/diag_suggest.c \
     $(SRC_DIR)/compiler/warn_unused.c \

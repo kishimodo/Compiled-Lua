@@ -1,4 +1,5 @@
 #include "compiler/diag.h"
+#include "compiler/diag_hints.h"
 #include "compiler/diag_pretty.h"
 
 #include "lua.h"
@@ -51,10 +52,7 @@ static int GetSourceLine( const char *Text, int Line, char *Out, size_t OutSize 
 
 /* Map a legacy `Category` string (possibly bracketed like "warning[Wunused]")
  * to (severity, code). The lint driver already bracketed the code into the
- * message text ("[W001] unused local") for the historical single-span
- * printer -- we don't undo that here, so callers get one location + the
- * bracketed code in the message, matching the old byte layout of the
- * fields the tests check. */
+ * message text so tests that grep the raw text still match. */
 static LcSeverity SeverityFromCategory( const char *Category ) {
     if ( Category == NULL ) { return LCSEV_ERROR; }
     if ( strncmp( Category, "warning", 7 ) == 0 &&
@@ -68,6 +66,34 @@ static LcSeverity SeverityFromCategory( const char *Category ) {
     if ( strncmp( Category, "help", 4 ) == 0 ) { return LCSEV_HELP; }
     if ( strncmp( Category, "hint", 4 ) == 0 ) { return LCSEV_HINT; }
     return LCSEV_ERROR;
+}
+
+/* Emit a "help:" block for the raw lua error text if the hint database has
+ * an entry for it. Reuses the note color so it reads as a helper rather than
+ * a new diagnostic. Called AFTER the primary error has been printed; a
+ * missing hint is invisible. */
+static void PrintHintBlock( FILE *Out, const char *RawMsg ) {
+    const char *Hint;
+    const char *Category = NULL;
+    const char *P;
+    int         C;
+
+    if ( Out == NULL || RawMsg == NULL ) { return; }
+    Hint = LcDiag_LookupHint( RawMsg, &Category );
+    if ( Hint == NULL ) { return; }
+
+    C = LcDiag_ShouldColor( Out );
+    if ( C ) { fprintf( Out, "\x1b[1;36mhelp\x1b[0m: " ); }
+    else     { fprintf( Out, "help: " ); }
+
+    for ( P = Hint; *P != '\0'; P++ ) {
+        fputc( *P, Out );
+        if ( *P == '\n' && P[ 1 ] != '\0' ) {
+            fputs( "      ", Out );
+        }
+    }
+    ( void )Category;   /* reserved for future JSON emitter tagging */
+    fflush( Out );
 }
 
 /* Route through the rustc/clang-style pretty printer with 2-lines-of-context.
@@ -174,12 +200,15 @@ void Diag_PrintCompileError( const char *SourcePath, const char *RawLuaErr,
     ( void )Opts;                             /* legacy plumb; color mode is now process-global */
 
     if ( !ParseLuaError( RawLuaErr, &Line, &Msg ) ) {
-        /* Couldn't parse -- fall back to the located header only (no snippet). */
+        /* Couldn't parse -- fall back to the located header only (no snippet).
+         * A hint may still fire off the raw message, so run the lookup against
+         * the whole string rather than the (missing) parsed body. */
         LcDiag_PrintError( stderr,
                            SourcePath ? SourcePath : "<source>",
                            1, 1, "error",
                            RawLuaErr ? RawLuaErr : "(unknown error)",
                            NULL );
+        PrintHintBlock( stderr, RawLuaErr );
         return;
     }
     Line -= PrefixLines;                      /* map @injected line back to user source */
@@ -189,6 +218,10 @@ void Diag_PrintCompileError( const char *SourcePath, const char *RawLuaErr,
         int Col = ColumnFromNear( Msg, Src, Line );
         PrintDiag( SourcePath ? SourcePath : "<source>", Line, Col,
                    "error", Msg, Src );
+        /* Match the hint against the body (already stripped of the
+         * "<chunk>:<line>:" prefix) so patterns can begin at column 0 of
+         * the diagnostic text. */
+        PrintHintBlock( stderr, Msg );
     }
     free( Src );
 }
