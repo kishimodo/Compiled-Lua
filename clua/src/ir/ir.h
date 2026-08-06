@@ -6,7 +6,7 @@
 **     Lua source --[v1 front-end]--> Proto (bytecode) --[lift.c]--> THIS IR
 **                --[opt / *.c passes]--> optimized IR --[codegen]--> x64
 **
-** Design invariants (see ../../PROMPT.md §IR and §Optimizer):
+** Design invariants:
 **  - SSA form: every LcValue is assigned exactly once; control-flow joins use phi.
 **  - Closed-world: the whole reachable program is lifted into ONE LcModule, so the
 **    call graph is complete except across FFI/C edges (which are opaque barriers).

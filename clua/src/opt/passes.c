@@ -1,5 +1,5 @@
 /*
-** passes.c — Optimization pipeline driver. See passes.h and ../../PROMPT.md §9.
+** passes.c — Optimization pipeline driver. See passes.h.
 ** STUB: M0 needs only mem2reg/dce/const_fold + lower/safepoints to be real;
 ** the M1/M2/M3 passes can be no-ops until their milestone.
 **

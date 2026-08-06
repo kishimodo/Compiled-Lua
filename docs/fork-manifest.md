@@ -1,9 +1,9 @@
 # LuaC fork manifest (grounded in the v1 audit)
 
-This is the file-level companion to [`../PROMPT.md`](../PROMPT.md). It records, per
-subsystem: the exact **copy / strip / drop** action for each v1 file, the **key
-interfaces** the new backend calls or mirrors (with `file:line` into v1), and the
-**audited gotchas** that must be preserved. Actions:
+This is the file-level fork record. It states, per subsystem: the exact
+**copy / strip / drop** action for each v1 file, the **key interfaces** the new
+backend calls or mirrors (with `file:line` into v1), and the **audited gotchas**
+that must be preserved. Actions:
 
 - **copy-as-is** — bring into LuaC unchanged.
 - **copy-and-strip** — copy, then remove the noted parts.

@@ -6,7 +6,7 @@
 ** semantics-preserving translation: NO optimization happens here — every op is
 ** emitted in its generic, metatable-aware, boxed form. The opt passes refine it.
 **
-** Algorithm (see ../../PROMPT.md §Lift):
+** Algorithm:
 **  1. Walk the reachable Proto set from the entry chunk + bundled packages
 **     (the require-scan in src/compiler/resolve.c already enumerated them — this
 **     is what makes the world "closed"). Each Proto -> one LcFunc.
@@ -23,7 +23,7 @@
 **       OP_CLOSURE          -> LC_OP_CLOSURE (records captured upvalues)
 **       OP_FORPREP/FORLOOP  -> LC_OP_FORPREP_* / FORLOOP_* (subtype refined later)
 **       OP_TFORCALL/TFORLOOP-> LC_OP_TFORCALL/TFORLOOP
-**       ... (full table in PROMPT.md)
+**       ... (one IR op per opcode family; see the switch in lift.c)
 **  4. Record call-graph edges; mark ffi.* / C-function call sites as barriers.
 **
 ** GOTCHAS to preserve exactly (else the differential test will catch you):
