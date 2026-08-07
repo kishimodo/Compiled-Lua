@@ -3,6 +3,11 @@
 follow-on to beta.5. same style rules: lowercase, ascii only, no em dashes,
 no smart quotes, no invented measurements, no ai watermarks.
 
+binary size and libc surface (make binaries smaller; own the CRT) live in
+the sibling doc [`plan-0.3.0-beta.7.md`](plan-0.3.0-beta.7.md). that work
+is a different tree (linker + runtime archives + libc) and different
+reviewer set; keeping the plans separate lets each ship on its own cadence.
+
 ## what this cycle does
 
 four tracks. tracks D and E are lua++-style language sugar and static
