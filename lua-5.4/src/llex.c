@@ -226,24 +226,145 @@ static int check_next2 (LexState *ls, const char *set) {
 ** mark, to avoid reading '3-4' or '0xe+1' as a single number.
 **
 ** The caller might have already read an initial dot.
+**
+** CLua: also accepts binary (0b/0B) and octal (0o/0O) integer prefixes,
+** and '_' as a digit separator inside ANY numeric literal (binary, octal,
+** decimal, hex, floats, exponents). The separator is only valid strictly
+** between two valid digits -- never at the start, at the end, right after
+** a base prefix, right after '.', right after an exponent mark, right
+** after a sign, and never doubled. Invalid placements raise a lex error.
+** For programs that use no new syntax, the byte-level bytecode is
+** unchanged: 0b/0o are hand-parsed only when their prefix is seen, and
+** '_' is stripped from the token buffer only when at least one '_' was
+** actually consumed.
 */
+
+/* CLua: hand-parse a 0b/0o numeral. Called after the base prefix has been
+** consumed from the input stream but nothing has been saved to the token
+** buffer for it. Digits are accumulated into 'seminfo->i'; '_' is legal
+** only between two base-digits. */
+static int read_numeral_based (LexState *ls, SemInfo *seminfo,
+                               int base, const char *what) {
+  lua_Unsigned acc = 0;
+  int prev_was_digit = 0;    /* to reject leading, trailing and doubled '_' */
+  int have_digit = 0;        /* need at least one digit after the prefix */
+  int max_digit = (base == 2) ? '1' : '7';
+  lua_assert(base == 2 || base == 8);
+  /* Accumulator arithmetic silently wraps modulo 2^64 on overflow, matching
+  ** Lua's behaviour for 0xffffffffffffffff (wraps to -1) and 0x1000..0
+  ** (wraps to 0). Callers who care can check for it themselves; we don't
+  ** try to be stricter than the hex path. */
+  for (;;) {
+    int c = ls->current;
+    if (c == '_') {
+      if (!prev_was_digit)
+        lexerror(ls, "'_' digit separator must sit between two digits",
+                 TK_INT);
+      next(ls);
+      prev_was_digit = 0;  /* the next char MUST be another digit */
+    }
+    else if (c >= '0' && c <= max_digit) {
+      acc = acc * cast(lua_Unsigned, base) + cast(lua_Unsigned, c - '0');
+      next(ls);
+      prev_was_digit = 1;
+      have_digit = 1;
+    }
+    else break;
+  }
+  if (!have_digit) {
+    const char *msg = luaO_pushfstring(ls->L, "malformed %s numeral", what);
+    lexerror(ls, msg, TK_INT);
+  }
+  if (!prev_was_digit)  /* trailing '_' */
+    lexerror(ls, "'_' digit separator must sit between two digits", TK_INT);
+  /* reject `0b12` (digit outside the base) and `0b1a` (numeral touching a
+  ** letter) with the same class of error Lua uses for `10x`. */
+  if (lisxdigit(ls->current) || lislalpha(ls->current) || ls->current == '.') {
+    const char *msg = luaO_pushfstring(ls->L, "malformed %s numeral", what);
+    lexerror(ls, msg, TK_INT);
+  }
+  seminfo->i = cast(lua_Integer, acc);
+  return TK_INT;
+}
+
 static int read_numeral (LexState *ls, SemInfo *seminfo) {
   TValue obj;
   const char *expo = "Ee";
   int first = ls->current;
+  int prev_was_digit;               /* CLua: for '_' placement checks */
+  int is_hex = 0;                   /* CLua: '_' set-of-followers is wider in hex */
   lua_assert(lisdigit(ls->current));
   save_and_next(ls);
-  if (first == '0' && check_next2(ls, "xX"))  /* hexadecimal? */
-    expo = "Pp";
-  for (;;) {
-    if (check_next2(ls, expo))  /* exponent mark? */
-      check_next2(ls, "-+");  /* optional exponent sign */
-    else if (lisxdigit(ls->current) || ls->current == '.')  /* '%x|%.' */
-      save_and_next(ls);
-    else break;
+  /* CLua: 0b / 0B binary and 0o / 0O octal are handled entirely outside
+  ** luaO_str2num, since it does not recognise those prefixes. Drop the '0'
+  ** we just saved -- read_numeral_based rebuilds nothing in the buffer. */
+  if (first == '0' && (ls->current == 'b' || ls->current == 'B')) {
+    luaZ_buffremove(ls->buff, 1);
+    next(ls);                       /* consume 'b' / 'B' */
+    return read_numeral_based(ls, seminfo, 2, "binary");
   }
-  if (lislalpha(ls->current))  /* is numeral touching a letter? */
-    save_and_next(ls);  /* force an error */
+  if (first == '0' && (ls->current == 'o' || ls->current == 'O')) {
+    luaZ_buffremove(ls->buff, 1);
+    next(ls);                       /* consume 'o' / 'O' */
+    return read_numeral_based(ls, seminfo, 8, "octal");
+  }
+  /* CLua: default -- 'first' was a decimal digit (possibly '0') or the
+  ** caller passed us a leading '.' already saved. Either way, one digit
+  ** already sits at the front of the buffer for the digit case; if 'first'
+  ** is '.', we came from `case '.'` in llex with no digit yet, so a '_'
+  ** next is illegal. */
+  prev_was_digit = (first != '.');
+  if (first == '0' && check_next2(ls, "xX")) {  /* hexadecimal? */
+    expo = "Pp";
+    is_hex = 1;
+    prev_was_digit = 0;             /* CLua: '_' right after '0x' is illegal */
+  }
+  for (;;) {
+    if (ls->current == '_') {  /* CLua: digit separator */
+      int nxt;
+      if (!prev_was_digit)
+        lexerror(ls, "'_' digit separator must sit between two digits",
+                 TK_FLT);
+      next(ls);                     /* consume, do NOT save to buffer */
+      /* the char AFTER '_' must itself be a valid digit for THIS base --
+      ** '.', 'e', '_', a sign, or a letter after it all mean the separator
+      ** did not sit between two digits. In a hex literal 0xdead_beef the
+      ** valid follower set is any hex digit; in a decimal literal only
+      ** '0'..'9'. */
+      nxt = ls->current;
+      if (nxt == '_' ||
+          !(is_hex ? lisxdigit(nxt) : (nxt >= '0' && nxt <= '9')))
+        lexerror(ls, "'_' digit separator must sit between two digits",
+                 TK_FLT);
+      prev_was_digit = 0;           /* the follower loop iteration sets it */
+      continue;
+    }
+    if (check_next2(ls, expo)) {    /* exponent mark? */
+      check_next2(ls, "-+");        /* optional exponent sign */
+      /* after 'e'/'p' (and any sign) a '_' would sit next to no digit */
+      prev_was_digit = 0;
+      continue;
+    }
+    if (ls->current == '.') {
+      save_and_next(ls);
+      prev_was_digit = 0;           /* '_' right after '.' is illegal */
+      continue;
+    }
+    if (lisxdigit(ls->current)) {   /* '%x' */
+      /* a hex digit outside a hex/exponent context still gets accepted by
+      ** the existing loop and rejected by luaO_str2num (Lua's behaviour;
+      ** kept for byte-identity). */
+      save_and_next(ls);
+      prev_was_digit = 1;
+      continue;
+    }
+    break;
+  }
+  if (lislalpha(ls->current))       /* numeral touching a letter? */
+    save_and_next(ls);              /* force an error */
+  /* CLua: no explicit trailing-'_' check is needed here -- the in-loop
+  ** post-'_' lookahead already guarantees a base-digit immediately after
+  ** every accepted '_'. */
   save(ls, '\0');
   if (luaO_str2num(luaZ_buffer(ls->buff), &obj) == 0)  /* format error? */
     lexerror(ls, "malformed number", TK_FLT);
