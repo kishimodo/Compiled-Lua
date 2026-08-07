@@ -613,6 +613,124 @@ marks a function deprecated at declaration; call sites get a
 and `deprecated = "warn"` in `clua.toml` control severity. sugar
 over the existing warn framework.
 
+## track K: vscode-clua editor extension
+
+ship a single vscode marketplace extension `vscode-clua`. base is a
+fork of `sumneko/vscode-lua` (MIT-licensed) with our tmLanguage grammar
+extended for tracks D and E. we do NOT re-use sumneko's LSP; ours plugs
+in through H8 (`clua lsp`) once that lands. until then the extension is
+grammar + snippets + tasks only, no language server.
+
+file extension: `.clua` as PRIMARY. `.lua` support is opt-in only via
+`"files.associations": {"*.lua": "clua"}` in the user's settings, so
+we never silently steal a filetype from the base sumneko extension a
+user may already have installed.
+
+### K1. base fork + tmLanguage grammar
+
+fork sumneko/vscode-lua at a pinned commit, rebrand as `vscode-clua`,
+extend the tmLanguage grammar to cover:
+- new compound operators: `+= -= *= /= //= %= ^= ..= &= |= ~= <<= >>=`
+- prefix / postfix `++` `--` (with the same context resolution the
+  lexer uses for the `--` comment conflict)
+- new tokens: `!= ! && || ?? ?. |> => ->`
+- numeric prefixes `0b` / `0o` and digit-separator `_`
+- block comments `/* */`
+- pragma-gated `//` line comments (grammar reads `firstLineMatch`
+  for `--!c-comments` and switches the `//` scope from operator to
+  comment for the rest of the file)
+- new keywords: `type enum continue switch case default`
+- type-annotation context: `: name`, `?: name`, `T[]`, `(A, B) => C`
+  (best-effort in tmLanguage; H8 semantic tokens refine later)
+- type alias RHS: `type X = ...` scopes the whole RHS as a type context
+
+### K2. snippets
+
+ship the standard set out of the box:
+- `for i in 1..N` -> `for i = 1, N do\n  $0\nend`
+- `function name(args)` -> `function ${1:name}(${2:args})\n  $0\nend`
+- `type Point` -> `type ${1:Point} = { ${2:x: number, y: number} }`
+- `switch (x)` -> `switch (${1:x}) {\n  case ${2:a}: $0\n  default: break\n}`
+- `local x, y =` -> `local ${1:x}, ${2:y} = $0` (upgrades to
+  destructuring `local {x, y} = ...` when destructuring lands)
+- one snippet per common lua idiom (`if`, `while`, `for k, v in pairs`,
+  `for i, v in ipairs`, `pcall`, `require`, etc)
+
+### K3. bracket + auto-close pairs
+
+configured in `language-configuration.json`:
+- `{}` `[]` `()` `""` `''` — the usual set
+- `[[ ]]` — lua long strings (already in sumneko)
+- `/* */` — new for us
+
+### K4. comment toggling
+
+- default line comment: `--`
+- when the file's line 1 has `--!c-comments`: `//`
+- block comment: `/* */`
+
+vscode's `commentToggle` uses `language-configuration.json`'s `comments`
+key; we set both `lineComment` and `blockComment`. the pragma-aware
+switch between `--` and `//` needs a bit more: register a command that
+inspects the current file's first line and calls the ordinary
+`editor.action.commentLine` with the right prefix. cheap.
+
+### K5. icon
+
+ship a dedicated `.clua` file icon (a colored file glyph with the
+clua wordmark) via the `iconThemes` contribution point so file explorer
+and tabs distinguish `.clua` from `.lua` at a glance.
+
+### K6. task provider (parses `clua.toml`)
+
+extension implements `vscode.TaskProvider` for the `clua` task type.
+when a `clua.toml` is found at workspace root, register these tasks
+automatically:
+- `clua build` (bound to `ctrl-shift-b` by default)
+- `clua test`
+- `clua bench`
+- `clua fmt`
+- `clua lint`
+- `clua check`
+
+each task inherits flags from `clua.toml` and prompts the user for
+optional args (`--filter=` on test, etc). output pane pipes through
+the standard vscode `TaskRun` mechanism so problems get parsed by the
+`$clua` matcher (which reads the standard `--> file:line:col` shape
+we emit).
+
+### K7. lsp client wiring (needs H8)
+
+once `clua lsp` (H8) lands, the extension activates a
+`LanguageClient` on `.clua` files:
+- diagnostics via `textDocument/publishDiagnostics` (already the
+  shape our JSON diagnostics emit)
+- `hover`, `definition`, `references`, `completion`, `rename`,
+  `formatting` (routes to `clua fmt`)
+
+### K8. semantic tokens (needs H8)
+
+`clua lsp` emits `textDocument/semanticTokens` frames; the tmLanguage
+grammar is the fast-path fallback for the first ~50ms before the
+server is up. semantic tokens colour:
+- unused locals (grey)
+- deprecated calls (strikethrough / dim red)
+- typed identifiers (distinct scope from untyped)
+- function parameters vs locals vs globals
+
+### K9. debugger adapter `vscode-clua-debug` (deferred, needs I5)
+
+once real pdb output (I5) lands, wire a debug adapter that speaks the
+Debug Adapter Protocol on top of the pdb + the runtime's stack
+introspection. deferred to a future cycle; noted here so the extension
+manifest reserves the `debuggers` contribution point up front.
+
+### K10. tree-sitter grammar (deferred)
+
+portable to neovim, zed, helix, github semantic. not in this cycle.
+sketch the grammar shape when K1's tmLanguage stabilises so a future
+arc can port cleanly.
+
 ## ordering
 
 phase D (all in parallel, small):
@@ -694,6 +812,18 @@ phase J (diagnostics extras, small, can land alongside track A of any cycle):
 - J3 clua explain --auto-fix
 - J4 --pedantic
 - J5 deprecation warnings
+
+phase K (vscode-clua extension, needs D + E for full grammar):
+- K1 base fork + tmLanguage grammar
+- K2 snippets
+- K3 bracket + auto-close pairs
+- K4 comment toggling (with pragma-aware line-comment switch)
+- K5 file icon
+- K6 task provider parsing clua.toml
+- K7 lsp client wiring (needs H8)
+- K8 semantic tokens (needs H8)
+- K9 debugger adapter (deferred, needs I5)
+- K10 tree-sitter grammar (deferred)
 
 ## gates
 
