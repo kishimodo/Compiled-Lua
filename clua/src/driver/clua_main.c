@@ -24,6 +24,7 @@
 #include "aotc.h"
 #include "argexpand.h"
 #include "bugreport.h"
+#include "cluatoml.h"       /* F3: per-project clua.toml loader / merge */
 #include "common/version.h"   /* CLUA_VERSION_STRING -- the single source of truth */
 #include "compiler/diag_pretty.h"
 #include "compiler/paths.h"
@@ -252,7 +253,26 @@ typedef struct {
     LcDriverOptions opt;
     const char     *force[ 64 ];
     int             run_arg0;      /* argv index of "--" + 1 (run only), or 0 */
+    /* F3: config discovered from clua.toml (walk from CWD up). The parsed
+    ** LcConfig owns any strings the driver reads via opt.product_name /
+    ** opt.icon_path / etc, so it must outlive lc_drive. force_from_cfg
+    ** points to the heap allocation ApplyToOptions handed us for the -L
+    ** force-bundle list (points into cfg storage, not owned). */
+    LcConfig        cfg;
+    int             cfg_loaded;    /* 1 = load attempted and no error */
+    const char    **force_from_cfg;
 } CluaArgs;
+
+/* Free the config-owned bits attached to the args struct. Safe to call more
+** than once; safe on a zeroed struct. Runs after lc_drive returns and after
+** all pointers into cfg have been dropped by the driver. */
+static void clua_args_free( CluaArgs *a ) {
+    if ( a == NULL ) return;
+    free( a->force_from_cfg );
+    a->force_from_cfg = NULL;
+    LcConfig_Free( &a->cfg );
+    a->cfg_loaded = 0;
+}
 
 /* --emit=<mode> ; error message includes the accepted values so a typo lands
 ** somewhere useful. Returns 1 on match/success, 0 on match/failure, -1 on
@@ -270,7 +290,12 @@ static int parse_emit_arg( CluaArgs *a, const char *s ) {
     return 0;
 }
 
-/* Parse build/run/check flags from argv[from..argc). Returns 0 on error. */
+/* Parse build/run/check flags from argv[from..argc). Returns 0 on error.
+**
+** Merge order (F3): built-in defaults, clua.toml (walked from CWD up, stops
+** at first `clua.toml` or a `.git` marker or the filesystem root), CLUA_*
+** environment variables, then the command-line flags below. An explicit CLI
+** flag beats the env var beats the config file beats the default. */
 static int parse_build_args( CluaArgs *a, int argc, char **argv, int from,
                              int allow_dashdash ) {
     int i, nforce = 0;
@@ -287,6 +312,26 @@ static int parse_build_args( CluaArgs *a, int argc, char **argv, int from,
     ** UTF-8 active code page. --no-versioninfo / --no-manifest turn them off. */
     a->opt.emit_versioninfo = true;
     a->opt.emit_manifest    = true;
+
+    /* F3: locate and merge clua.toml (walked from CWD up). Missing file is
+    ** fine -- byte-identity of a default build is preserved because the
+    ** loader is a no-op when nothing is found. A parse error is fatal:
+    ** LcConfig_Load has already printed a `path:line:col` diagnostic. */
+    {
+        char cfg_path[ 1024 ] = { 0 };
+        if ( LcConfigDiscover( NULL, cfg_path, sizeof( cfg_path ) ) ) {
+            int cfg_nforce = 0;
+            if ( !LcConfig_Load( cfg_path, &a->cfg ) ) return 0;
+            a->cfg_loaded = 1;
+            /* ApplyToOptions writes force_pkgs to a cfg-owned array; keep the
+            ** CLI-side `nforce` at 0 so the -L loop below fills a->force[]
+            ** starting at 0. If any -L is seen we merge cfg + CLI at the tail
+            ** of this function. */
+            LcConfig_ApplyToOptions( &a->cfg, &a->opt,
+                                     &a->force_from_cfg, &cfg_nforce );
+        }
+    }
+    LcConfig_ApplyEnv( &a->opt );
 
     for ( i = from; i < argc; i++ ) {
         const char *s = argv[ i ];
@@ -451,8 +496,25 @@ static int parse_build_args( CluaArgs *a, int argc, char **argv, int from,
         return 0;
     }
     if ( nforce > 0 ) {
-        a->opt.force_pkgs  = a->force;
-        a->opt.nforce_pkgs = nforce;
+        /* Merge with any config-provided bundles (append CLI after cfg so
+        ** later -L still wins on duplicate names inside package.preload). */
+        if ( a->force_from_cfg != NULL && a->opt.nforce_pkgs > 0 ) {
+            int         base = a->opt.nforce_pkgs;
+            int         j;
+            const char **merged = ( const char ** )calloc(
+                ( size_t )( base + nforce + 1 ), sizeof( char * ) );
+            if ( merged == NULL ) { fprintf( stderr, "clua: oom\n" ); return 0; }
+            for ( j = 0; j < base; j++ )   merged[ j ]        = a->force_from_cfg[ j ];
+            for ( j = 0; j < nforce; j++ ) merged[ base + j ] = a->force[ j ];
+            merged[ base + nforce ] = NULL;
+            free( a->force_from_cfg );
+            a->force_from_cfg  = merged;
+            a->opt.force_pkgs  = merged;
+            a->opt.nforce_pkgs = base + nforce;
+        } else {
+            a->opt.force_pkgs  = a->force;
+            a->opt.nforce_pkgs = nforce;
+        }
     }
     return 1;
 }
@@ -462,7 +524,7 @@ static int cmd_build( int argc, char **argv, int from ) {
     char    *derived = NULL;
     int      rc;
 
-    if ( !parse_build_args( &a, argc, argv, from, 0 ) ) return 2;
+    if ( !parse_build_args( &a, argc, argv, from, 0 ) ) { clua_args_free( &a ); return 2; }
     /* Only synthesise an output path when a binary is actually going to be
     ** written. In pure-diagnostic mode (--emit=X with no -o, or --emit-only
     ** without -o) the driver leaves opt.output NULL and skips linking. When
@@ -472,13 +534,14 @@ static int cmd_build( int argc, char **argv, int from ) {
          a.opt.emit_mode == LC_EMIT_NONE &&
          !a.opt.emit_only ) {
         derived = derive_output( a.opt.input, a.opt.output_kind );
-        if ( derived == NULL ) { fprintf( stderr, "clua: oom\n" ); return 1; }
+        if ( derived == NULL ) { fprintf( stderr, "clua: oom\n" ); clua_args_free( &a ); return 1; }
         a.opt.output = derived;
     }
     a.opt.drv_argc = argc;
     a.opt.drv_argv = ( const char *const * )argv;
     rc = lc_drive( &a.opt );
     free( derived );
+    clua_args_free( &a );
     return rc;
 }
 
@@ -547,12 +610,15 @@ static int cmd_init( int argc, char **argv, int from ) {
 
 static int cmd_check( int argc, char **argv, int from ) {
     CluaArgs a;
-    if ( !parse_build_args( &a, argc, argv, from, 0 ) ) return 2;
+    int      rc;
+    if ( !parse_build_args( &a, argc, argv, from, 0 ) ) { clua_args_free( &a ); return 2; }
     a.opt.check_only = true;
     a.opt.output     = NULL;
     a.opt.drv_argc   = argc;
     a.opt.drv_argv   = ( const char *const * )argv;
-    return lc_drive( &a.opt );
+    rc = lc_drive( &a.opt );
+    clua_args_free( &a );
+    return rc;
 }
 
 static int cmd_run( int argc, char **argv, int from ) {
@@ -562,7 +628,7 @@ static int cmd_run( int argc, char **argv, int from ) {
     int         rc, i, n;
     const char **child_argv;
 
-    if ( !parse_build_args( &a, argc, argv, from, 1 ) ) return 2;
+    if ( !parse_build_args( &a, argc, argv, from, 1 ) ) { clua_args_free( &a ); return 2; }
 
     /* `clua run` compiles then executes the produced artifact. --output=obj /
     ** --output=lib yield a COFF object / static archive respectively -- neither
@@ -574,6 +640,7 @@ static int cmd_run( int argc, char **argv, int from ) {
                          "--output=%s (nothing to run; use `clua build` to "
                          "produce the artifact)\n",
                  ( a.opt.output_kind == LC_OUTPUT_OBJ ) ? "obj" : "lib" );
+        clua_args_free( &a );
         return 2;
     }
 
@@ -587,21 +654,21 @@ static int cmd_run( int argc, char **argv, int from ) {
     a.opt.drv_argv = ( const char *const * )argv;
 
     rc = lc_drive( &a.opt );
-    if ( rc != 0 ) return rc;
+    if ( rc != 0 ) { clua_args_free( &a ); return rc; }
 
     /* argv for the program: exe + everything after "--". Quote args with
     ** spaces (the CRT joins spawn argv with plain spaces). */
     n = 0;
     if ( a.run_arg0 > 0 ) n = argc - a.run_arg0;
     child_argv = ( const char ** )calloc( ( size_t )n + 2, sizeof( char * ) );
-    if ( child_argv == NULL ) { fprintf( stderr, "clua: oom\n" ); return 1; }
+    if ( child_argv == NULL ) { fprintf( stderr, "clua: oom\n" ); clua_args_free( &a ); return 1; }
     child_argv[ 0 ] = exe_path;
     for ( i = 0; i < n; i++ ) {
         const char *arg = argv[ a.run_arg0 + i ];
         if ( strchr( arg, ' ' ) != NULL ) {
             size_t len = strlen( arg );
             char  *q   = ( char * )malloc( len + 3 );
-            if ( q == NULL ) { fprintf( stderr, "clua: oom\n" ); return 1; }
+            if ( q == NULL ) { fprintf( stderr, "clua: oom\n" ); clua_args_free( &a ); return 1; }
             q[0] = '"';
             memcpy( q + 1, arg, len );
             q[ len + 1 ] = '"';
@@ -620,6 +687,7 @@ static int cmd_run( int argc, char **argv, int from ) {
         rc = 1;
     }
     remove( exe_path );
+    clua_args_free( &a );
     return rc;
 }
 

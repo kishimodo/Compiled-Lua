@@ -35,6 +35,7 @@
 #include "../driver/compdb.h"
 #include "../driver/argexpand.h"
 #include "../driver/bugreport.h"
+#include "../driver/cluatoml.h"       /* F3: per-project clua.toml            */
 #include "../common/version.h"
 #include "../dump/emit.h"
 
@@ -1150,6 +1151,27 @@ int main( int raw_argc, char **raw_argv ) {
     opt.emit_versioninfo = true;
     opt.emit_manifest    = true;
 
+    /* F3: same clua.toml walk as `clua build`. aotc.exe is the low-level test
+    ** driver; the discovery + merge stays identical so a project's config
+    ** applies to both entry points. Missing file is fine; a malformed file
+    ** is a fatal error with the diagnostic already printed. */
+    LcConfig aotc_cfg;
+    LcConfig_Init( &aotc_cfg );
+    const char **aotc_cfg_force = NULL;
+    int aotc_cfg_force_n = 0;
+    {
+        char cfg_path[ 1024 ] = { 0 };
+        if ( LcConfigDiscover( NULL, cfg_path, sizeof( cfg_path ) ) ) {
+            if ( !LcConfig_Load( cfg_path, &aotc_cfg ) ) {
+                LcArg_FreeExpanded( argc, argv );
+                return 2;
+            }
+            LcConfig_ApplyToOptions( &aotc_cfg, &opt,
+                                     &aotc_cfg_force, &aotc_cfg_force_n );
+        }
+    }
+    LcConfig_ApplyEnv( &opt );
+
     for ( i = 1; i < argc; i++ ) {
         const char *a = argv[ i ];
         if ( strcmp( a, "-o" ) == 0 && i + 1 < argc ) {
@@ -1334,8 +1356,33 @@ int main( int raw_argc, char **raw_argv ) {
         }
     }
     if ( nforce > 0 ) {
-        opt.force_pkgs  = force;
-        opt.nforce_pkgs = nforce;
+        /* Merge cfg-provided bundles with CLI -L (F3): cfg first, CLI after so
+        ** a later -L still wins in package.preload duplicate detection. */
+        if ( aotc_cfg_force != NULL && aotc_cfg_force_n > 0 ) {
+            int j;
+            const char **merged = ( const char ** )calloc(
+                ( size_t )( aotc_cfg_force_n + nforce + 1 ),
+                sizeof( char * ) );
+            if ( merged == NULL ) {
+                fprintf( stderr, "aotc: oom\n" );
+                free( aotc_cfg_force );
+                LcConfig_Free( &aotc_cfg );
+                LcArg_FreeExpanded( argc, argv );
+                return 1;
+            }
+            for ( j = 0; j < aotc_cfg_force_n; j++ )
+                merged[ j ] = aotc_cfg_force[ j ];
+            for ( j = 0; j < nforce; j++ )
+                merged[ aotc_cfg_force_n + j ] = force[ j ];
+            merged[ aotc_cfg_force_n + nforce ] = NULL;
+            free( aotc_cfg_force );
+            aotc_cfg_force  = merged;
+            opt.force_pkgs  = merged;
+            opt.nforce_pkgs = aotc_cfg_force_n + nforce;
+        } else {
+            opt.force_pkgs  = force;
+            opt.nforce_pkgs = nforce;
+        }
     }
 
     /* Give the driver the raw argv so --emit-compdb records the invocation
@@ -1345,6 +1392,8 @@ int main( int raw_argc, char **raw_argv ) {
 
     {
         int rc = lc_drive( &opt );
+        free( aotc_cfg_force );
+        LcConfig_Free( &aotc_cfg );
         LcArg_FreeExpanded( argc, argv );
         return rc;
     }

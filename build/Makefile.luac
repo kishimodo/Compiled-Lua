@@ -49,7 +49,8 @@ BACKEND_OBJS := \
     $(BUILD_DIR)/obj/driver/supported_ops.o  \
     $(BUILD_DIR)/obj/driver/compdb.o         \
     $(BUILD_DIR)/obj/driver/argexpand.o      \
-    $(BUILD_DIR)/obj/driver/bugreport.o
+    $(BUILD_DIR)/obj/driver/bugreport.o      \
+    $(BUILD_DIR)/obj/driver/cluatoml.o
 
 # Front-end objects the driver calls (produced by the base Makefile's `compiler`
 # target). The driver does NOT use blob.o / pe_link.o (those are v1-only), but
