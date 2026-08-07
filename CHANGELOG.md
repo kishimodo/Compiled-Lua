@@ -7,6 +7,76 @@ of truth, `clua/src/common/version.h`, and this file in step.
 
 ## [Unreleased]
 
+## [0.3.0-beta.5] - 2026-08-06
+
+### Added
+
+- **rustc/clang/zig-shape diagnostics.** `error[E###]:` / `warning[W###]:` header,
+  `--> file:line:col` locator, source snippet with a caret row, optional
+  secondary spans, and a `help:` note underneath. Colour is opt-in and honours
+  NO_COLOR, CLICOLOR_FORCE, and `--color=auto|always|never`. Windows console
+  gets ANSI enabled via ENABLE_VIRTUAL_TERMINAL_PROCESSING when possible.
+- **`--diagnostics-format=json`.** One JSON object per diagnostic on stderr,
+  keys shaped after rustc's `--error-format=json` (severity, code, message,
+  spans[], children[], help). Editor / LSP shims that already speak rustc JSON
+  can point at compiler.exe or clua.exe with no glue.
+- **Contextual hints for the top 20 Lua compile-error patterns.** The parser
+  message is matched against a hint database; each hit appends a `help:`
+  paragraph explaining the class of mistake and how to fix it (const
+  reassign, `=` vs `==`, unclosed block, jumps into local scope, ...).
+- **"Did you mean" for undefined globals.** Advisory pass over the entry
+  module's globals emits at most one help note per (name, line) pair via
+  Damerau-Levenshtein against the visible name set. Purely diagnostic:
+  byte-identity of compiled output is preserved.
+- **Multi-error collection.** The driver runs the full resolve walk before
+  bailing out, so one bad module no longer hides the rest. Errors are
+  drained through the same pretty printer / JSON writer.
+- **`clua explain <code>`.** Prints the reference page for a diagnostic
+  code (E001..E010, W001, W004, ...) from `docs/errors/*.md`. Discovery is
+  relocatable: CWD checkout, exe-relative dist, `%CLUA_HOME%`.
+- **ldoc-tag doc comments.** `--- @param`, `@return`, `@throws`, `@field`,
+  `@see`, `@deprecated` in Lua source are scanned and rendered into the
+  generated per-package docs at `docs/site/api/<pkg>.md`.
+- **`@<file>` response-file argument expansion.** Any argv token starting
+  with `@` is treated as a whitespace-separated response file spliced in
+  place (one level deep; nested `@` is left as a literal token).
+- **`--emit-depfile=<path>` / `-MD`.** Writes a make/ninja-shaped dependency
+  file listing every module the resolver walked. `-MD` derives the path as
+  `<output-basename>.d` beside the exe.
+- **`--emit=ast`, `--print-<name>` diagnostics, `clua bug-report`.** New
+  driver surfaces: dump the parsed AST for a source; print the target triple,
+  search dirs, runtime path, or package path; write a Markdown bug report
+  bundling toolchain version, target triple, `CLUA_*` env, OS/CWD, git SHA.
+- **`--strip=none|debug|all`.** Threaded from the driver into the internal
+  linker; `-g` without `--strip` auto-upgrades to `none` so the emitted
+  `.clualn` actually survives the link.
+- **`.rsrc` section in every emitted exe.** VS_VERSION_INFO (populates
+  Explorer's "Details" tab), RT_MANIFEST (Win10/11 defaults; overridable),
+  and an optional RT_GROUP_ICON. New CLI: `--product-name`,
+  `--product-version`, `--file-description`, `--company-name`,
+  `--copyright`, `--manifest=<path>`, `--icon=<path>`, `--no-versioninfo`,
+  `--no-manifest`. Only honoured by the internal linker for now.
+
+### Changed
+
+- Test fixtures updated: `test-cache-incr`, `test-link-stats`,
+  `test-olevel-contract`, `test-parallel-codegen` now reuse one output
+  filename per byte-identity comparison, since VS_VERSION_INFO embeds
+  OriginalFilename / InternalName derived from `-o`.
+- `clua build` now accepts `--color=<mode>` and `--diagnostics-format=<fmt>`
+  in addition to compiler.exe (the flags were only wired into the low-level
+  driver before).
+
+### Deferred
+
+- **LOAD_CONFIG + Control Flow Guard bitmap + DEBUG directory.** The design
+  and code exist on branch (see the reverted 79506f0 in the reflog for a
+  starting point) but the current implementation produces a PE Windows
+  refuses to load ("The system cannot execute the specified program"). Punted
+  from this release; will re-land after the layout bug is isolated. All AOT
+  binaries in this release ship without the CFG bitmap and without a DEBUG
+  data-directory entry, as before.
+
 ## [0.3.0-beta.4] - 2026-08-06
 
 ### Added
