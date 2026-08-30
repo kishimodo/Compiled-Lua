@@ -664,9 +664,9 @@ ship the standard set out of the box:
 ### K3. bracket + auto-close pairs
 
 configured in `language-configuration.json`:
-- `{}` `[]` `()` `""` `''` — the usual set
-- `[[ ]]` — lua long strings (already in sumneko)
-- `/* */` — new for us
+- `{}` `[]` `()` `""` `''` -- the usual set
+- `[[ ]]` -- lua long strings (already in sumneko)
+- `/* */` -- new for us
 
 ### K4. comment toggling
 

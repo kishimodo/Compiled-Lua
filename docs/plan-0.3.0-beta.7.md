@@ -160,7 +160,7 @@ replace CRT `mainCRTStartup` with our own PE entry that:
 
 allocator: replace `malloc`/`calloc`/`realloc`/`free` with our own
 implementation over `HeapAlloc` family or a size-segregated free-list
-over `VirtualAlloc`. this is §2.3 of the roadmap — the ONE ITEM in
+over `VirtualAlloc`. this is section 2.3 of the roadmap -- the ONE ITEM in
 M with a credible runtime upside. measured with `tools/bench-runtime.lua`
 under the benchmark protocol; report even if the answer is zero.
 
@@ -246,7 +246,7 @@ log log10 pow fmod frexp ldexp`. `sqrt fmod frexp ldexp` are exact;
 the 11 transcendentals CANNOT be made bit-identical to ucrtbase
 without reimplementing its exact algorithms which we cannot do.
 
-the ONLY sound resolution to the oracle problem (§4 of the roadmap):
+the ONLY sound resolution to the oracle problem (section 4 of the roadmap):
 BUILD `clua-interp.exe` AGAINST THE SAME `clua/src/libc/`. both
 sides of every differential test then use one implementation.
 math.sin(1) may differ from PUC-Rio Lua on MSVC (documented behavior
@@ -297,7 +297,7 @@ phase M (in strict order; each blocks the next):
 
 ## gates (extra, on top of the standard suite-green gate)
 
-per the roadmap §6:
+per the roadmap section 6:
 
 - N1 harness (item M1) is the primary gate for every libc item M3
   through M9. a green run of the full suite does NOT prove `--crt=none`
@@ -328,7 +328,7 @@ per the roadmap §6:
   the door to POSIX libc). wasm is fine (beta.6 track I2); linux is
   not.
 
-## honest cost and risk (from the roadmap §9)
+## honest cost and risk (from the roadmap section 9)
 
 | | |
 |---|---|
