@@ -55,8 +55,10 @@ jobs:
             @('x86_64-w64-mingw32-ar',  'ar'),
             @('x86_64-w64-mingw32-objcopy', 'objcopy')
           )) {
-            $shim = Join-Path $shimDir "$($pair[0]).cmd"
-            "@`"$mingw\$($pair[1]).exe`" %*" | Out-File -FilePath $shim -Encoding ascii
+            # Copy the REAL exe under the triple-prefixed name (a .cmd shim can
+            # break when make spawns the compiler without a cmd shell).
+            Copy-Item -Path (Join-Path $mingw "$($pair[1]).exe") `
+                      -Destination (Join-Path $shimDir "$($pair[0]).exe")
           }
           $shimDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
