@@ -48,42 +48,19 @@ jobs:
           "$mingw" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           "$make"  | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
-      - name: create triple-prefix shims
-        shell: pwsh
-        run: |
-          # The Makefiles hardcode x86_64-w64-mingw32-{gcc,g++,ld,ar,objcopy},
-          # but the choco mingw package does not ship every one under that
-          # prefix (ld/ar exist only as bare ld.exe/ar.exe). Copy the real exe
-          # under the triple-prefixed name (a .cmd shim can break when make
-          # spawns the compiler without a cmd shell).
-          $shimDir = "$PWD\_shims"
-          New-Item -ItemType Directory -Force -Path $shimDir | Out-Null
-          # Reuse the dynamically located mingw dir from the previous step.
-          $mingw = (Get-ChildItem "C:\ProgramData\mingw64" -Recurse -Filter "gcc.exe" |
-                    Select-Object -First 1 -ExpandProperty DirectoryName)
-          if (-not $mingw) { throw "mingw bin dir not found" }
-          Write-Host "shimming from: $mingw"
-          foreach ($pair in @(
-            @('x86_64-w64-mingw32-gcc',  'gcc'),
-            @('x86_64-w64-mingw32-g++', 'g++'),
-            @('x86_64-w64-mingw32-ld',  'ld'),
-            @('x86_64-w64-mingw32-ar',  'ar'),
-            @('x86_64-w64-mingw32-objcopy', 'objcopy')
-          )) {
-            # Copy the REAL exe under the triple-prefixed name (a .cmd shim can
-            # break when make spawns the compiler without a cmd shell).
-            Copy-Item -Path (Join-Path $mingw "$($pair[1]).exe") `
-                      -Destination (Join-Path $shimDir "$($pair[0]).exe")
-          }
-          $shimDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-
       - name: build products
         shell: cmd
         run: |
           where make
           where x86_64-w64-mingw32-gcc
-          make -f build/Makefile compiler clua-interp embedded luac-objs
-          make -f build/Makefile.luac aotc aot-entry clua rover sysroot
+          rem The Makefiles hardcode triple-prefixed tool names (CC :=
+          rem x86_64-w64-mingw32-gcc), but the choco mingw package ships bare
+          rem gcc/g++/ld/ar only. Command-line variable overrides beat the
+          rem := assignments and avoid brittle shim copies (a copied gcc.exe
+          rem cannot find its cc1 backend). Bare gcc targets the same
+          rem x86_64-w64-mingw32 Windows ABI.
+          make -f build/Makefile CC=gcc CXX=g++ LD=ld AR=ar compiler clua-interp embedded luac-objs
+          make -f build/Makefile.luac CC=gcc CXX=g++ LD=ld AR=ar aotc aot-entry clua rover sysroot
 
       - name: run test suite
         shell: cmd
