@@ -39,6 +39,27 @@ jobs:
           "$mingw" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           "$make"  | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
+      - name: create triple-prefix shims
+        shell: pwsh
+        run: |
+          # The Makefiles hardcode x86_64-w64-mingw32-{gcc,g++,ld,ar}, but the
+          # choco mingw package only ships bare gcc/g++/ld/ar. Create cmd shims
+          # mapping each triple-prefixed name to the bare binary.
+          $shimDir = "$PWD\_shims"
+          New-Item -ItemType Directory -Force -Path $shimDir | Out-Null
+          $mingw = "C:\ProgramData\mingw64\mingw64\bin"
+          foreach ($pair in @(
+            @('x86_64-w64-mingw32-gcc',  'gcc'),
+            @('x86_64-w64-mingw32-g++', 'g++'),
+            @('x86_64-w64-mingw32-ld',  'ld'),
+            @('x86_64-w64-mingw32-ar',  'ar'),
+            @('x86_64-w64-mingw32-objcopy', 'objcopy')
+          )) {
+            $shim = Join-Path $shimDir "$($pair[0]).cmd"
+            "@`"$mingw\$($pair[1]).exe`" %*" | Out-File -FilePath $shim -Encoding ascii
+          }
+          $shimDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
       - name: build products
         shell: cmd
         run: |
