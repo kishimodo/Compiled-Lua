@@ -19,30 +19,34 @@ permissions:
 jobs:
   test:
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - name: checkout
         uses: actions/checkout@v4
 
-      - name: install MSYS2 (MinGW-w64 UCRT gcc + GNU make)
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: UCRT64
-          update: false
-          install: >-
-            mingw-w64-ucrt-x86_64-gcc
-            make
-          path-type: inherit
+      - name: install toolchain (mingw gcc + make via chocolatey)
+        shell: pwsh
+        run: |
+          choco install -y --no-progress mingw make --params "/InstallDir:$PWD\_toolchain"
+          # choco puts mingw at C:\ProgramData\mingw64\mingw64\bin and make at
+          # C:\ProgramData\chocolatey\lib\make\tools\bin - refresh PATH below.
+
+      - name: add toolchain to PATH
+        shell: pwsh
+        run: |
+          $mingw = "C:\ProgramData\mingw64\mingw64\bin"
+          $make  = "C:\ProgramData\chocolatey\lib\make\tools\bin"
+          "$mingw" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "$make"  | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: build products
-        shell: msys2 {0}
+        shell: cmd
         run: |
-          export PATH="/ucrt64/bin:$PATH"
+          where make
+          where x86_64-w64-mingw32-gcc
           make -f build/Makefile compiler clua-interp embedded luac-objs
           make -f build/Makefile.luac aotc aot-entry clua rover sysroot
 
       - name: run test suite
-        shell: msys2 {0}
-        run: |
-          export PATH="/ucrt64/bin:$PATH"
-          ./build/bin/clua-interp.exe tools/run-tests.lua
+        shell: cmd
+        run: build\bin\clua-interp.exe tools\run-tests.lua
