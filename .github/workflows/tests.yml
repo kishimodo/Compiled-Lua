@@ -42,7 +42,7 @@ jobs:
           make -f build/Makefile.luac aotc aot-entry clua rover sysroot
 
       - name: run test suite
-        shell: cmd
+        shell: msys2 {0}
         run: |
-          set "PATH=C:\msys64\ucrt64\bin;%PATH%"
-          build\bin\clua-interp.exe tools\run-tests.lua
+          export PATH="/ucrt64/bin:$PATH"
+          ./build/bin/clua-interp.exe tools/run-tests.lua
