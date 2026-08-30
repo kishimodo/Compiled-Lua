@@ -164,13 +164,25 @@ static bool lc_module_reflects_globals(LcModule *m) {
   for (uint32_t i = 0; i < m->nfuncs; i++) {
     Proto *p = m->funcs[i] ? m->funcs[i]->source : NULL;
     if (!p) continue;
+    /* WHICH _ENV upvalue slot is the real environment? A chunk with more than
+       255 constants gets extra upvalue slots, and lcode then SPILLS global
+       accesses through _ENV: GETUPVAL r, _ENV  +  LOADK r, "print"  +
+       GETTABLE r, r, r. The spill shape materializes the env register only
+       as an intermediate -- indexing it with a *constant* key (LOADK feed)
+       is exactly what OP_GETTABUP already does, so it cannot reach a dynamic
+       key and is NOT reflection. We track which _ENV-carrying registers are
+       ever read with a non-constant index; only that trips the gate. */
+    int env_slot = -1;
+    for (int u = 0; u < p->sizeupvalues; u++) {
+      if (p->upvalues[u].name != NULL &&
+          strcmp(getstr(p->upvalues[u].name), "_ENV") == 0) { env_slot = u; break; }
+    }
     for (int pc = 0; pc < p->sizecode; pc++) {
       Instruction ins = p->code[pc];
       OpCode op = GET_OPCODE(ins);
       if (op == OP_GETUPVAL) {
         int b = GETARG_B(ins);
-        if (b >= 0 && b < p->sizeupvalues && p->upvalues[b].name != NULL &&
-            strcmp(getstr(p->upvalues[b].name), "_ENV") == 0) return true;
+        if (b == env_slot) return true;      /* real env materialized */
       } else if (op == OP_GETTABUP) {
         int c = GETARG_C(ins);
         if (c >= 0 && c < p->sizek && ttisstring(&p->k[c])) {
