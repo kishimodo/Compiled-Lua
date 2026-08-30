@@ -1,0 +1,58 @@
+name: tests
+
+# Runs the full CLua test suite (unit / lua / packages / differential /
+# conformance / tools suites + differential fuzz smoke) on every push and
+# PR. Windows runner: the build is a Windows x64 PE toolchain (MinGW gcc +
+# cmd.exe Makefile), so ubuntu is not an option.
+
+on:
+  push:
+    branches:
+      - main
+      - claude/speed-and-size
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      CLUA_MINGW_BIN: ${{ github.workspace }}/_toolchain/mingw64/bin
+      CLUA_MAKE_BIN: ${{ github.workspace }}/_toolchain/make/bin
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: cache toolchain
+        id: toolchain-cache
+        uses: actions/cache@v4
+        with:
+          path: _toolchain
+          key: clua-toolchain-mingw-w64-15.2-ucrt-v13
+
+      - name: install toolchain (MinGW-w64 gcc + GNU make)
+        if: steps.toolchain-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path _toolchain | Out-Null
+          # MinGW-w64 UCRT build (same family as the documented local toolchain)
+          Invoke-WebRequest -Uri "https://github.com/niXman/mingw-builds-binaries/releases/download/15.2.0-rt_v13-rev1/x86_64-15.2.0-release-posix-seh-ucrt-rt_v13-rev1.7z" -OutFile "$PWD\_toolchain\mingw.7z"
+          7z x -o"$PWD\_toolchain\mingw64" "$PWD\_toolchain\mingw.7z" | Out-Null
+          # GNU make (GnuWin32 is unmaintained; msys2 make works with the cmd.exe SHELL pin)
+          Invoke-WebRequest -Uri "https://github.com/msys2/msys2-installer/releases/download/nightly-x86_64/msys2-base-x86_64-latest.sfx.exe" -OutFile "$PWD\_toolchain\msys2.exe"
+          & "$PWD\_toolchain\msys2.exe" -y -o"$PWD\_toolchain\make" | Out-Null
+          New-Item -ItemType Directory -Force -Path _toolchain\make\bin | Out-Null
+          Copy-Item _toolchain\make\msys64\usr\bin\make.exe _toolchain\make\bin\make.exe
+      - name: build products
+        shell: cmd
+        run: build\build.bat
+
+      - name: run test suite
+        shell: cmd
+        run: |
+          set "PATH=%CLUA_MAKE_BIN%;%CLUA_MINGW_BIN%;%PATH%"
+          build\bin\clua-interp.exe tools\run-tests.lua
